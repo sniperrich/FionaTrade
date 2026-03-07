@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -12,6 +13,8 @@ WRITEOUT_LOGGER_NAME = "fionatrade.writeout"
 HEALTH_LOGGER_NAME = "fionatrade.health"
 
 DEFAULT_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+_LOGGING_READY = False
+_LOGGING_LOCK = threading.Lock()
 
 
 def _resolve_level(log_level: str) -> int:
@@ -34,6 +37,7 @@ def _rotating_handler(path: Path, level: int, fmt: str) -> RotatingFileHandler:
 
 
 def setup_logging(log_dir: str = "logs", log_level: str = "INFO") -> None:
+    global _LOGGING_READY
     level = _resolve_level(log_level)
     output_dir = Path(log_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -63,6 +67,17 @@ def setup_logging(log_dir: str = "logs", log_level: str = "INFO") -> None:
         health_logger,
         [_rotating_handler(output_dir / "health.log", level, "%(message)s")],
     )
+    _LOGGING_READY = True
+
+
+def ensure_logging(log_dir: str = "logs", log_level: str = "INFO") -> None:
+    global _LOGGING_READY
+    if _LOGGING_READY:
+        return
+    with _LOGGING_LOCK:
+        if _LOGGING_READY:
+            return
+        setup_logging(log_dir=log_dir, log_level=log_level)
 
 
 def get_app_logger() -> logging.Logger:

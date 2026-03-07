@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.analysis.service import AnalysisService
 from app.analysis.rules_fallback import fallback_action
 from app.core.config import Settings
-from app.core.logging import get_app_logger, log_writeout
+from app.core.logging import ensure_logging, get_app_logger, log_writeout
 from app.core.utils import ensure_utc, utc_now
 from app.db.models import BacktestRun, BacktestTrade, Bar1m, Event, EventEvidence
 
@@ -27,6 +27,7 @@ class BacktestResult:
 class BacktestEngineService:
     def __init__(self, settings: Settings):
         self.settings = settings
+        ensure_logging(log_dir=settings.log_dir, log_level=settings.log_level)
         self.analysis = AnalysisService(settings)
         self.logger = get_app_logger()
 
