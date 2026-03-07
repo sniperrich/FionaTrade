@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Backtests</h2>
+<p class="muted">通过 API `POST /api/backtests/run` 触发新回测，这里展示历史 run。</p>
+<table>
+  <thead>
+  <tr>
+    <th>Run ID</th>
+    <th>Status</th>
+    <th>Created At</th>
+    <th>Total Return</th>
+    <th>Sharpe</th>
+    <th>Max DD</th>
+    <th>Trades</th>
+  </tr>
+  </thead>
+  <tbody>
+  {% for r in runs %}
+  <tr>
+    <td class="mono">{{ r.id }}</td>
+    <td>{{ r.status }}</td>
+    <td>{{ r.created_at }}</td>
+    <td>{{ (r.metrics.get('total_return', 0) * 100) | round(2) }}%</td>
+    <td>{{ r.metrics.get('sharpe', 0) | round(3) }}</td>
+    <td>{{ (r.metrics.get('max_drawdown', 0) * 100) | round(2) }}%</td>
+    <td>{{ r.metrics.get('trades', 0) }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

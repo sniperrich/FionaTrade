@@ -1,0 +1,326 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from sqlalchemy import and_, or_, select
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_app_settings, get_db
+from app.backtest_engine.service import BacktestEngineService
+from app.core.config import Settings
+from app.core.utils import utc_now
+from app.db.models import BacktestRun, Event, EventEvidence, RawItem, Signal, SourceStatus
+from app.market.backfill import MarketBackfillService
+from app.monitoring.health import HealthAuditService
+from app.services.orchestrator import PipelineOrchestrator
+
+router = APIRouter(prefix="/api", tags=["api"])
+
+
+@router.get("/health")
+def health(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    audit = HealthAuditService(settings).snapshot(session)
+    llm_enabled = bool(settings.llm_base_url and settings.llm_model)
+    return {
+        "status": audit["status"],
+        "app": settings.app_name,
+        "time": utc_now(),
+        "analysis_mode": "llm" if llm_enabled else "rules_fallback",
+        "audit": audit,
+    }
+
+
+@router.post("/ingest/run")
+def run_ingest(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    orchestrator = PipelineOrchestrator(settings)
+    return orchestrator.run_ingestion_validation(session)
+
+
+@router.get("/events")
+def list_events(
+    session: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+    status: str | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    stmt = select(Event).order_by(Event.event_time.desc()).limit(limit)
+    if status:
+        stmt = select(Event).where(Event.validation_status == status).order_by(Event.event_time.desc()).limit(limit)
+
+    rows = session.execute(stmt).scalars().all()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        evidence = session.execute(
+            select(EventEvidence).where(EventEvidence.event_id == row.id).order_by(EventEvidence.id.asc())
+        ).scalars().all()
+        out.append(
+            {
+                "id": row.id,
+                "event_type": row.event_type,
+                "tickers": row.tickers,
+                "severity": row.severity,
+                "event_time": row.event_time,
+                "confidence": row.confidence,
+                "validation_status": row.validation_status,
+                "conflict_reason": row.conflict_reason,
+                "summary": row.summary,
+                "evidence": [
+                    {
+                        "id": e.id,
+                        "url": e.url,
+                        "source": e.source,
+                        "source_tier": e.source_tier,
+                        "captured_at": e.captured_at,
+                        "summary": e.summary,
+                    }
+                    for e in evidence
+                ],
+            }
+        )
+    return out
+
+
+@router.get("/news")
+def list_news(
+    session: Session = Depends(get_db),
+    limit: int = Query(default=200, ge=1, le=2000),
+    since_id: int | None = Query(default=None, ge=0),
+    before_id: int | None = Query(default=None, ge=1),
+    source: str | None = Query(default=None),
+    q: str | None = Query(default=None, min_length=1),
+) -> dict[str, Any]:
+    if since_id is not None and before_id is not None:
+        raise HTTPException(status_code=400, detail="since_id and before_id cannot be used together")
+
+    stmt = select(RawItem)
+    if source:
+        stmt = stmt.where(RawItem.source == source.strip().lower())
+    if q:
+        keyword = f"%{q.strip()}%"
+        stmt = stmt.where(or_(RawItem.title.ilike(keyword), RawItem.body.ilike(keyword)))
+
+    mode = "latest"
+    if since_id is not None:
+        mode = "newer"
+        stmt = stmt.where(RawItem.id > since_id).order_by(RawItem.id.asc()).limit(limit)
+    elif before_id is not None:
+        mode = "older"
+        stmt = stmt.where(RawItem.id < before_id).order_by(RawItem.id.desc()).limit(limit)
+    else:
+        stmt = stmt.order_by(RawItem.id.desc()).limit(limit)
+
+    rows = session.execute(stmt).scalars().all()
+
+    latest_id = max((row.id for row in rows), default=since_id or 0)
+    oldest_id = min((row.id for row in rows), default=before_id or 0)
+
+    has_more_older = False
+    if rows:
+        more_stmt = select(RawItem.id)
+        if source:
+            more_stmt = more_stmt.where(RawItem.source == source.strip().lower())
+        if q:
+            keyword = f"%{q.strip()}%"
+            more_stmt = more_stmt.where(or_(RawItem.title.ilike(keyword), RawItem.body.ilike(keyword)))
+        more_stmt = more_stmt.where(RawItem.id < oldest_id).limit(1)
+        has_more_older = session.execute(more_stmt).first() is not None
+
+    return {
+        "mode": mode,
+        "latest_id": latest_id,
+        "oldest_id": oldest_id,
+        "has_more_older": has_more_older,
+        "count": len(rows),
+        "items": [
+            {
+                "id": row.id,
+                "source": row.source,
+                "source_tier": row.source_tier,
+                "title": row.title,
+                "url": row.url,
+                "published_at": row.published_at,
+                "ingested_at": row.ingested_at,
+                "processed": row.processed,
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/news/sources/status")
+def list_news_source_status(
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    rows = session.execute(
+        select(SourceStatus).order_by(SourceStatus.source_type.asc(), SourceStatus.display_name.asc())
+    ).scalars().all()
+
+    summary: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.source_name not in summary:
+            summary[row.source_name] = {
+                "status": row.status,
+                "error_message": row.error_message,
+            }
+            continue
+
+        if row.status == "OFFLINE":
+            summary[row.source_name]["status"] = "OFFLINE"
+            summary[row.source_name]["error_message"] = row.error_message
+
+    return {
+        "count": len(rows),
+        "summary": summary,
+        "items": [
+            {
+                "source_key": row.source_key,
+                "source_name": row.source_name,
+                "source_type": row.source_type,
+                "display_name": row.display_name,
+                "status": row.status,
+                "error_message": row.error_message,
+                "details": row.details_json,
+                "last_checked_at": row.last_checked_at,
+                "last_success_at": row.last_success_at,
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.post("/signals/run")
+def run_signals(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    orchestrator = PipelineOrchestrator(settings)
+    return orchestrator.run_signals(session)
+
+
+@router.get("/signals")
+def list_signals(
+    session: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+    active_only: bool = Query(default=False),
+) -> list[dict[str, Any]]:
+    stmt = select(Signal).order_by(Signal.created_at.desc()).limit(limit)
+    if active_only:
+        stmt = select(Signal).where(and_(Signal.status == "ACTIVE", Signal.expires_at > utc_now())).order_by(
+            Signal.created_at.desc()
+        ).limit(limit)
+
+    rows = session.execute(stmt).scalars().all()
+    return [
+        {
+            "id": s.id,
+            "event_id": s.event_id,
+            "action": s.action,
+            "ticker": s.ticker,
+            "confidence": s.confidence,
+            "horizon_min": s.horizon_min,
+            "reason": s.reason,
+            "expires_at": s.expires_at,
+            "fallback_used": s.fallback_used,
+            "status": s.status,
+            "created_at": s.created_at,
+            "executed_at": s.executed_at,
+        }
+        for s in rows
+    ]
+
+
+@router.post("/paper/execute")
+def execute_paper(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    orchestrator = PipelineOrchestrator(settings)
+    return orchestrator.run_paper_execution(session)
+
+
+@router.post("/market/backfill")
+def run_market_backfill(
+    payload: dict[str, Any] = Body(default_factory=dict),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    start_date = payload.get("start_date")
+    end_date = payload.get("end_date")
+    if not start_date or not end_date:
+        raise HTTPException(status_code=400, detail="start_date and end_date are required")
+
+    tickers = payload.get("tickers")
+    if tickers is not None and not isinstance(tickers, list):
+        raise HTTPException(status_code=400, detail="tickers must be a list of symbols")
+
+    chunk_days = int(payload.get("chunk_days", 5))
+    if chunk_days < 1 or chunk_days > 31:
+        raise HTTPException(status_code=400, detail="chunk_days must be between 1 and 31")
+
+    service = MarketBackfillService(settings)
+    try:
+        result = service.run(
+            session,
+            start_date=str(start_date),
+            end_date=str(end_date),
+            tickers=tickers,
+            chunk_days=chunk_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return result.to_dict()
+
+
+@router.get("/paper/portfolio")
+def paper_portfolio(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    orchestrator = PipelineOrchestrator(settings)
+    return orchestrator.portfolio(session)
+
+
+@router.post("/backtests/run")
+def run_backtest(
+    payload: dict[str, Any] = Body(default_factory=dict),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    engine = BacktestEngineService(settings)
+    result = engine.run(session, params=payload)
+    return {
+        "run_id": result.run_id,
+        "status": result.status,
+        "metrics": result.metrics,
+    }
+
+
+@router.get("/backtests/{run_id}")
+def get_backtest(
+    run_id: int,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    engine = BacktestEngineService(settings)
+    row = engine.get_run(session, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+
+    return {
+        "id": row.id,
+        "status": row.status,
+        "params": row.params,
+        "metrics": row.metrics,
+        "equity_curve": row.equity_curve,
+        "trade_log": row.trade_log,
+        "created_at": row.created_at,
+        "finished_at": row.finished_at,
+    }

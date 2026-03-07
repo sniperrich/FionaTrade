@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Settings</h2>
+<table>
+  <thead>
+  <tr>
+    <th>Key</th>
+    <th>Value</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr><td>Database</td><td>{{ settings.database_url }}</td></tr>
+  <tr>
+    <td>分析模式</td>
+    <td>
+      {% if settings.llm_base_url and settings.llm_api_key and settings.llm_model %}
+      LLM 主导（失败自动回退规则）
+      {% else %}
+      规则回退模式（未配置 LLM）
+      {% endif %}
+    </td>
+  </tr>
+  <tr><td>Poll Interval</td><td>{{ settings.poll_interval_seconds }} sec</td></tr>
+  <tr><td>SEC</td><td>{{ settings.enable_sec }}</td></tr>
+  <tr><td>RSS</td><td>{{ settings.enable_rss }}</td></tr>
+  <tr><td>Finnhub</td><td>{{ settings.enable_finnhub }}</td></tr>
+  <tr><td>Universe Size</td><td>{{ settings.sp100_tickers | length }}</td></tr>
+  <tr><td>Min Trade Confidence</td><td>{{ settings.min_trade_confidence }}</td></tr>
+  <tr><td>Max Position</td><td>{{ (settings.max_position_pct * 100) | round(1) }}%</td></tr>
+  <tr><td>Max Gross Exposure</td><td>{{ (settings.max_gross_exposure_pct * 100) | round(1) }}%</td></tr>
+  <tr><td>Daily Loss Limit</td><td>{{ (settings.daily_loss_limit_pct * 100) | round(1) }}%</td></tr>
+  </tbody>
+</table>
+{% endblock %}

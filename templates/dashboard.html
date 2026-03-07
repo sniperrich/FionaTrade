@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>System Dashboard</h2>
+<div class="grid">
+  <div class="card">
+    <div class="label">Events (24h)</div>
+    <div class="value">{{ events_24h }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Signals (24h)</div>
+    <div class="value">{{ signals_24h }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Active Signals</div>
+    <div class="value">{{ valid_signals }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Source Latency (sec)</div>
+    <div class="value">{{ source_latency_sec }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Paper NAV</div>
+    <div class="value">{{ paper_nav }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Paper PnL (R/U)</div>
+    <div class="value">{{ paper_realized }} / {{ paper_unrealized }}</div>
+  </div>
+</div>
+
+<p class="muted" style="margin-top:16px;">
+  定时任务按 1 分钟轮询：ingestion -> validation -> signals -> paper execution。
+</p>
+{% endblock %}

@@ -1,0 +1,328 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>News Stream（实时 + 历史时间线）</h2>
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+  <button id="refresh-now" style="padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;">立即拉取新闻</button>
+  <button id="load-older" style="padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;">加载更早历史</button>
+  <span id="live-status" class="muted">实时检测中，每 5 秒轮询一次。</span>
+</div>
+
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px 0;">
+  <label class="muted" for="source-filter">来源：</label>
+  <select id="source-filter" style="padding:7px;border:1px solid var(--line);border-radius:8px;background:#fff;">
+    <option value="">全部</option>
+    {% for s in source_names %}
+    <option value="{{ s }}">{{ s }}</option>
+    {% endfor %}
+  </select>
+
+  <label class="muted" for="q-filter">关键词：</label>
+  <input id="q-filter" type="text" placeholder="例如 earnings / guidance / AAPL" style="padding:7px 9px;border:1px solid var(--line);border-radius:8px;min-width:280px;" />
+
+  <button id="apply-filter" style="padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;">应用筛选</button>
+  <button id="reset-filter" style="padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;">清空筛选</button>
+</div>
+
+<h3>消息源状态</h3>
+<table>
+  <thead>
+    <tr>
+      <th>来源</th>
+      <th>状态</th>
+      <th>最后检查</th>
+      <th>最后成功</th>
+      <th>报错</th>
+    </tr>
+  </thead>
+  <tbody id="source-status-body">
+    {% for s in source_statuses %}
+    <tr>
+      <td>{{ s.display_name }}</td>
+      <td>
+        {% if s.status == "ONLINE" %}
+        <span class="tag valid">ONLINE</span>
+        {% else %}
+        <span class="tag rejected">OFFLINE</span>
+        {% endif %}
+      </td>
+      <td>{{ s.last_checked_at }}</td>
+      <td>{{ s.last_success_at or "-" }}</td>
+      <td>{{ s.error_message or "-" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3>新闻时间线</h3>
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Source</th>
+      <th>来源状态</th>
+      <th>Title</th>
+      <th>Published</th>
+      <th>Ingested</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody id="news-body">
+  {% for n in news_items %}
+    {% set st = status_summary.get(n.source) %}
+    <tr>
+      <td class="mono">{{ n.id }}</td>
+      <td>{{ n.source }}</td>
+      <td>
+        {% if st and st.status == "ONLINE" %}
+        <span class="tag valid">ONLINE</span>
+        {% elif st and st.status == "OFFLINE" %}
+        <span class="tag rejected" title="{{ st.error_message or '' }}">OFFLINE</span>
+        {% else %}
+        <span class="tag watch">UNKNOWN</span>
+        {% endif %}
+      </td>
+      <td><a href="{{ n.url }}" target="_blank">{{ n.title }}</a></td>
+      <td>{{ n.published_at }}</td>
+      <td>{{ n.ingested_at }}</td>
+      <td>{% if n.processed %}processed{% else %}new{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<script>
+(() => {
+  const state = {
+    latestId: Number("{{ latest_id }}") || 0,
+    oldestId: Number("{{ oldest_id }}") || 0,
+    pollingMs: 5000,
+    statusPollingMs: 10000,
+    sourceSummary: {{ status_summary | tojson }},
+    sourceFilter: "",
+    qFilter: "",
+    pageSize: 200,
+    hasMoreOlder: true,
+    timer: null,
+    sourceTimer: null,
+  };
+
+  const statusEl = document.getElementById("live-status");
+  const tbody = document.getElementById("news-body");
+  const sourceStatusBody = document.getElementById("source-status-body");
+  const refreshBtn = document.getElementById("refresh-now");
+  const loadOlderBtn = document.getElementById("load-older");
+  const sourceFilterEl = document.getElementById("source-filter");
+  const qFilterEl = document.getElementById("q-filter");
+  const applyFilterBtn = document.getElementById("apply-filter");
+  const resetFilterBtn = document.getElementById("reset-filter");
+
+  function fmt(ts) {
+    if (!ts) return "-";
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return ts;
+    return d.toLocaleString();
+  }
+
+  function esc(text) {
+    return String(text ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function setLoadOlderState() {
+    loadOlderBtn.disabled = !state.hasMoreOlder;
+    loadOlderBtn.style.opacity = state.hasMoreOlder ? "1" : "0.55";
+    loadOlderBtn.style.cursor = state.hasMoreOlder ? "pointer" : "not-allowed";
+  }
+
+  function sourceBadge(sourceName) {
+    const st = state.sourceSummary[sourceName];
+    if (!st) return '<span class="tag watch">UNKNOWN</span>';
+    if (st.status === "ONLINE") return '<span class="tag valid">ONLINE</span>';
+    const msg = esc(st.error_message || "");
+    return `<span class="tag rejected" title="${msg}">OFFLINE</span>`;
+  }
+
+  function rowHtml(item) {
+    const status = item.processed ? "processed" : "new";
+    const safeTitle = esc(item.title);
+    const safeSource = esc(item.source);
+    const safeUrl = esc(item.url);
+    return `
+      <tr style="background:#eefaf0;transition:background .8s ease;">
+        <td class="mono">${item.id}</td>
+        <td>${safeSource}</td>
+        <td>${sourceBadge(item.source)}</td>
+        <td><a href="${safeUrl}" target="_blank">${safeTitle}</a></td>
+        <td>${fmt(item.published_at)}</td>
+        <td>${fmt(item.ingested_at)}</td>
+        <td>${status}</td>
+      </tr>
+    `;
+  }
+
+  function renderSourceStatusRows(items) {
+    if (!Array.isArray(items)) return;
+    const html = items.map((it) => {
+      const badge = it.status === "ONLINE"
+        ? '<span class="tag valid">ONLINE</span>'
+        : '<span class="tag rejected">OFFLINE</span>';
+      const err = esc(it.error_message || "-");
+      return `
+        <tr>
+          <td>${esc(it.display_name)}</td>
+          <td>${badge}</td>
+          <td>${fmt(it.last_checked_at)}</td>
+          <td>${fmt(it.last_success_at)}</td>
+          <td>${err}</td>
+        </tr>
+      `;
+    }).join("");
+    sourceStatusBody.innerHTML = html;
+  }
+
+  function buildNewsQuery(mode) {
+    const params = new URLSearchParams();
+    params.set("limit", String(state.pageSize));
+    if (state.sourceFilter) params.set("source", state.sourceFilter);
+    if (state.qFilter) params.set("q", state.qFilter);
+    if (mode === "newer") params.set("since_id", String(state.latestId));
+    if (mode === "older") params.set("before_id", String(state.oldestId));
+    return `/api/news?${params.toString()}`;
+  }
+
+  async function pollSourceStatus() {
+    try {
+      const resp = await fetch("/api/news/sources/status");
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const payload = await resp.json();
+      state.sourceSummary = payload.summary || {};
+      renderSourceStatusRows(payload.items || []);
+    } catch (err) {
+      statusEl.textContent = `来源状态检查失败：${String(err)}`;
+    }
+  }
+
+  async function pullIngest() {
+    statusEl.textContent = "正在触发采集...";
+    try {
+      const resp = await fetch("/api/ingest/run", { method: "POST" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const payload = await resp.json();
+      statusEl.textContent = `采集完成：新增 ${payload.ingestion.inserted} 条，去重 ${payload.ingestion.duplicate_dropped} 条。`;
+      await pollSourceStatus();
+      await pollNews();
+    } catch (err) {
+      statusEl.textContent = `采集失败：${String(err)}`;
+    }
+  }
+
+  async function fetchLatest(resetTable = false) {
+    try {
+      const resp = await fetch(buildNewsQuery("latest"));
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const payload = await resp.json();
+      const items = payload.items || [];
+      if (resetTable) {
+        tbody.innerHTML = items.map(rowHtml).join("");
+      }
+      if (payload.latest_id) state.latestId = payload.latest_id;
+      if (payload.oldest_id) state.oldestId = payload.oldest_id;
+      state.hasMoreOlder = Boolean(payload.has_more_older);
+      setLoadOlderState();
+      statusEl.textContent = `已加载最新 ${items.length} 条新闻（latest=${state.latestId}, oldest=${state.oldestId}）。`;
+    } catch (err) {
+      statusEl.textContent = `加载最新新闻失败：${String(err)}`;
+    }
+  }
+
+  async function pollNews() {
+    if (state.latestId <= 0) {
+      await fetchLatest(true);
+      return;
+    }
+
+    try {
+      const resp = await fetch(buildNewsQuery("newer"));
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const payload = await resp.json();
+      const items = payload.items || [];
+      if (items.length > 0) {
+        for (const item of items) {
+          tbody.insertAdjacentHTML("afterbegin", rowHtml(item));
+        }
+        state.latestId = payload.latest_id || state.latestId;
+        if (!state.oldestId && payload.oldest_id) state.oldestId = payload.oldest_id;
+        statusEl.textContent = `检测到 ${items.length} 条新新闻（最新 ID: ${state.latestId}）。`;
+      } else {
+        statusEl.textContent = `暂无新新闻，持续检测中（最新 ID: ${state.latestId}）。`;
+      }
+    } catch (err) {
+      statusEl.textContent = `轮询失败：${String(err)}`;
+    }
+  }
+
+  async function loadOlderNews() {
+    if (state.oldestId <= 0 || !state.hasMoreOlder) {
+      statusEl.textContent = "没有更早的历史新闻了。";
+      return;
+    }
+
+    statusEl.textContent = "正在加载更早历史...";
+    try {
+      const resp = await fetch(buildNewsQuery("older"));
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const payload = await resp.json();
+      const items = payload.items || [];
+      if (items.length === 0) {
+        state.hasMoreOlder = false;
+        setLoadOlderState();
+        statusEl.textContent = "已经到最早历史，没有更多新闻。";
+        return;
+      }
+
+      for (const item of items) {
+        tbody.insertAdjacentHTML("beforeend", rowHtml(item));
+      }
+      state.oldestId = payload.oldest_id || state.oldestId;
+      state.hasMoreOlder = Boolean(payload.has_more_older);
+      setLoadOlderState();
+      statusEl.textContent = `已加载 ${items.length} 条更早新闻（oldest=${state.oldestId}）。`;
+    } catch (err) {
+      statusEl.textContent = `加载历史失败：${String(err)}`;
+    }
+  }
+
+  async function applyFilters() {
+    state.sourceFilter = sourceFilterEl.value.trim();
+    state.qFilter = qFilterEl.value.trim();
+    state.latestId = 0;
+    state.oldestId = 0;
+    state.hasMoreOlder = true;
+    setLoadOlderState();
+    await fetchLatest(true);
+  }
+
+  async function resetFilters() {
+    sourceFilterEl.value = "";
+    qFilterEl.value = "";
+    await applyFilters();
+  }
+
+  refreshBtn.addEventListener("click", pullIngest);
+  loadOlderBtn.addEventListener("click", loadOlderNews);
+  applyFilterBtn.addEventListener("click", applyFilters);
+  resetFilterBtn.addEventListener("click", resetFilters);
+
+  setLoadOlderState();
+  pollSourceStatus();
+  fetchLatest(true);
+  state.timer = setInterval(pollNews, state.pollingMs);
+  state.sourceTimer = setInterval(pollSourceStatus, state.statusPollingMs);
+})();
+</script>
+{% endblock %}

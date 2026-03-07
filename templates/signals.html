@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Signals</h2>
+<table>
+  <thead>
+  <tr>
+    <th>ID</th>
+    <th>Action</th>
+    <th>Ticker</th>
+    <th>Confidence</th>
+    <th>Horizon</th>
+    <th>Expires</th>
+    <th>Status</th>
+    <th>Reason</th>
+  </tr>
+  </thead>
+  <tbody>
+  {% for s in signals %}
+  <tr>
+    <td class="mono">{{ s.id }}</td>
+    <td>{{ s.action }}</td>
+    <td>{{ s.ticker }}</td>
+    <td>{{ s.confidence }}</td>
+    <td>{{ s.horizon_min }}m</td>
+    <td>{{ s.expires_at }}</td>
+    <td>{{ s.status }}</td>
+    <td>{{ s.reason }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
