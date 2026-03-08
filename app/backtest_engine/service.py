@@ -343,6 +343,19 @@ class BacktestEngineService:
                 e for e in events
                 if e.tickers and e.event_type not in EXCLUDED_FROM_TRADING
             ]
+            # Step 1: 预热 Finnhub 补充数据 cache（串行，避免 429）
+            unique_tickers = list({str(e.tickers[0]).upper() for e in tradeable_events if e.tickers})
+            self.logger.info(
+                "预热Finnhub cache run_id=%s unique_tickers=%d",
+                run.id, len(unique_tickers),
+            )
+            for i, tk in enumerate(unique_tickers):
+                self.analysis._finnhub_earnings_context(tk)
+                self.analysis._finnhub_tech_signal(tk)
+                self.analysis._finnhub_support_resistance(tk, None)
+                if (i + 1) % 10 == 0 or (i + 1) == len(unique_tickers):
+                    self.logger.info("Finnhub cache预热 %d/%d", i + 1, len(unique_tickers))
+
             self.logger.info(
                 "并发LLM预取 run_id=%s workers=%s tradeable=%s/%s",
                 run.id, llm_workers, len(tradeable_events), total_events,

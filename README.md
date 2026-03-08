@@ -102,4 +102,4 @@ python scripts/backfill_sec_bodies.py --limit 500
 - **公司名识别**：新增 `app/core/company_names.py`（~100 个 SP100 映射），正则 word-boundary 匹配，修复 GE 等缩写误识别
 - **验证规则放宽**：单条 tier-1 来源（Bloomberg/CNBC/Finnhub company-news）即可通过 VALID
 - **EPS/技术信号/支撑阻力注入 prompt**：`app/analysis/service.py` 新增 `_finnhub_earnings_context()`、`_finnhub_tech_signal()`、`_finnhub_support_resistance()`，有 1 小时 LRU 缓存，LLM rules 新增对应使用指导
-- **回测并发 LLM**：`app/backtest_engine/service.py` 改为两阶段：先 `ThreadPoolExecutor` 并发预取所有 LLM 信号，再串行执行交易；支持 `llm_workers` 参数
+- **回测并发 LLM**：`app/backtest_engine/service.py` 改为三阶段：①串行预热 Finnhub cache（避免并发 429），②`ThreadPoolExecutor` 并发预取所有 LLM 信号，③串行执行交易；支持 `llm_workers` 参数（默认 8）
