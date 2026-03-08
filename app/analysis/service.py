@@ -444,11 +444,15 @@ class AnalysisService:
                 "Output JSON only.",
                 "direction must be exactly one of: UP, DOWN, NEUTRAL.",
                 "Do not output trading actions (BUY/SELL/SHORT/HOLD).",
-                "Use NEUTRAL only when evidence is truly mixed or insufficient.",
-                "When market_features are available, use relative strength vs SPY as a tie-breaker.",
-                "If tech_signal is present: 'buy' signal supports UP, 'sell' supports DOWN, use as secondary confirmation.",
-                "If earnings_context is present: positive surprise_pct (beat) supports UP, negative supports DOWN.",
-                "If support_resistance is present: price near resistance (pct_to_resistance < 1%) limits upside; price near support (pct_from_support < 1%) limits downside.",
+                "THIS IS A SHORT-TERM SIGNAL (next 1-4 hours). Judge the IMMEDIATE price reaction to the news event, NOT the long-term fundamental outlook. A company may be bullish long-term but still drop short-term on bad news.",
+                "Primary signal: news content and event severity. Ask: will this news cause buyers or sellers to act in the next 1-4 hours?",
+                "Use NEUTRAL only when the news is truly routine (e.g. minor analyst note, no surprise) or evidence is contradictory.",
+                "Secondary signals (use only as tie-breakers when news signal is ambiguous):",
+                "  - tech_signal: 'buy' supports UP, 'sell' supports DOWN",
+                "  - relative_strength_vs_spy_pct: if ticker is already outperforming SPY today, UP news has more momentum",
+                "  - earnings_context: positive surprise_pct supports UP, negative supports DOWN",
+                "  - support_resistance: price within 1% of resistance reduces upside; within 1% of support reduces downside",
+                "Do NOT let long-term bullish fundamentals override a clearly negative short-term news event.",
             ],
             "output_schema": {
                 "direction": "UP|DOWN|NEUTRAL",
@@ -458,10 +462,13 @@ class AnalysisService:
             },
         }
         system = (
-            "You are an event-direction classifier for US equities. "
-            "Read the event and evidence text, then classify direction as UP, DOWN, or NEUTRAL. "
+            "You are a SHORT-TERM event-direction classifier for US equities. "
+            "Your job is to predict the stock price direction in the NEXT 1-4 HOURS following a news event. "
+            "This is NOT a long-term fundamental analysis — focus only on immediate market reaction. "
+            "News is the PRIMARY signal. Technical indicators (tech_signal, support_resistance) and "
+            "earnings context are SECONDARY tie-breakers only. "
             "Return strict JSON only with keys: "
-            "direction(UP|DOWN|NEUTRAL), term(SHORT|MID|LONG), ticker(optional), rationale."
+            "direction(UP|DOWN|NEUTRAL), term(SHORT|MID|LONG), ticker(optional), rationale(one sentence)."
         )
         base_payload = {
             "model": self.settings.llm_model,

@@ -30,8 +30,9 @@ NEGATIVE_EVENTS = {
     "policy_shock",
 }
 
-# sec_filing events are excluded from trading - routine filings have no directional edge
-EXCLUDED_FROM_TRADING = {"sec_filing"}
+# sec_filing: routine filings, no directional edge
+# unknown: unclassified news (mostly generic Finnhub company-news), too noisy
+EXCLUDED_FROM_TRADING = {"sec_filing", "unknown"}
 
 SOURCE_TIER = {
     "sec": 0,
