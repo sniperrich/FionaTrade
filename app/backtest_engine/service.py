@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from statistics import mean, pstdev
@@ -208,6 +209,7 @@ class BacktestEngineService:
         progress_every = int(params.get("progress_every", 10))
         if progress_every < 1:
             progress_every = 1
+        llm_workers = int(params.get("llm_workers", 8))
 
         stop_loss_pct = float(params.get("stop_loss_pct", self.settings.stop_loss_pct))
         take_profit_pct = float(params.get("take_profit_pct", self.settings.take_profit_pct))
@@ -332,6 +334,50 @@ class BacktestEngineService:
         if total_events == 0:
             emit_progress(0)
 
+        # ── 并发 LLM 预取阶段 ──────────────────────────────────────────────────
+        # 先用线程池并发获取所有 LLM 信号，再串行执行交易逻辑（保证 equity 顺序正确）
+        signal_map: dict[int, object] = {}  # event.id → TradeSignal | None
+        from app.analysis.taxonomy import EXCLUDED_FROM_TRADING
+        if use_llm and total_events > 0:
+            tradeable_events = [
+                e for e in events
+                if e.tickers and e.event_type not in EXCLUDED_FROM_TRADING
+            ]
+            self.logger.info(
+                "并发LLM预取 run_id=%s workers=%s tradeable=%s/%s",
+                run.id, llm_workers, len(tradeable_events), total_events,
+            )
+            llm_started = time.perf_counter()
+            completed_count = 0
+
+            def _fetch_signal(ev):
+                return ev.id, self.analysis.event_to_signal(ev, session=session)
+
+            with ThreadPoolExecutor(max_workers=llm_workers) as pool:
+                futures = {pool.submit(_fetch_signal, ev): ev for ev in tradeable_events}
+                for fut in as_completed(futures):
+                    try:
+                        eid, sig = fut.result()
+                        signal_map[eid] = sig
+                    except Exception as exc:
+                        ev = futures[fut]
+                        self.logger.warning("LLM预取失败 event_id=%s: %s", ev.id, exc)
+                        signal_map[ev.id] = None
+                    completed_count += 1
+                    if completed_count % max(1, llm_workers * 4) == 0 or completed_count == len(tradeable_events):
+                        elapsed_llm = time.perf_counter() - llm_started
+                        rate = completed_count / elapsed_llm if elapsed_llm > 0 else 0
+                        self.logger.info(
+                            "LLM预取进度 %d/%d (%.1f/s) eta=%.0fs",
+                            completed_count, len(tradeable_events),
+                            rate,
+                            (len(tradeable_events) - completed_count) / rate if rate > 0 else 0,
+                        )
+            self.logger.info(
+                "LLM预取完成 run_id=%s signals=%d elapsed=%.1fs",
+                run.id, len(signal_map), time.perf_counter() - llm_started,
+            )
+
         for idx, event in enumerate(events, start=1):
             event_ts = ensure_utc(event.event_time)
             event_day = event_ts.date()
@@ -372,20 +418,17 @@ class BacktestEngineService:
                 emit_progress(idx)
                 continue
 
+            from app.analysis.taxonomy import EXCLUDED_FROM_TRADING  # noqa: already imported above if use_llm
+            if event.event_type in EXCLUDED_FROM_TRADING:
+                emit_progress(idx)
+                continue
+
             ticker = event.tickers[0]
             local_horizon_min = horizon_min
             fallback_used = False
 
             if use_llm:
-                self.logger.info(
-                    "回测LLM处理 run_id=%s progress=%s/%s event_id=%s ticker=%s",
-                    run.id,
-                    idx,
-                    total_events,
-                    event.id,
-                    ticker,
-                )
-                signal = self.analysis.event_to_signal(event, session=session)
+                signal = signal_map.get(event.id)
                 if not signal:
                     emit_progress(idx)
                     continue

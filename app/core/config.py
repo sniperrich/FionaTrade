@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
+    llm_classifier_model: str = "gemini-3-flash"
     enable_term_management: bool = True
     term_short_horizon_min: int = 60
     term_mid_horizon_min: int = 240
@@ -60,16 +61,9 @@ class Settings(BaseSettings):
     sec_poller_limit: int = 100
     rss_sources: list[str] = Field(
         default_factory=lambda: [
-            "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
             "https://feeds.bloomberg.com/markets/news.rss",
             "https://www.cnbc.com/id/100003114/device/rss/rss.html",
             "https://www.marketwatch.com/rss/topstories",
-            "https://www.wsj.com/xml/rss/3_7031.xml",
-            "https://www.investing.com/rss/news_25.rss",
-            "https://www.ft.com/rss/home/us",
-            "https://www.nasdaq.com/feed/rssoutbound?category=Stocks",
-            "https://seekingalpha.com/market_currents.xml",
-            "https://www.fool.com/feeds/index.aspx",
         ]
     )
 

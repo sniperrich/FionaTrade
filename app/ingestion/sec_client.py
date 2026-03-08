@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.utils import make_hash, utc_now
+
+# Forms where we attempt to fetch full text body (material event disclosures)
+FETCH_BODY_FORMS = {"8-K", "6-K"}
 from app.db.models import IngestionCursor
 from app.ingestion.types import SourceCheck
 from app.schemas.types import RawNewsItem
@@ -92,6 +95,25 @@ class SecClient:
                     sleep(0.4 * attempt)
                     continue
         return None, None, last_error or "request_failed"
+
+    def _fetch_filing_text(self, client: httpx.Client, url: str, max_chars: int = 8000) -> str:
+        """Fetch and extract plain text from an SEC filing HTML page."""
+        try:
+            resp = client.get(url, headers={**self.headers, "Accept": "text/html,application/xhtml+xml"}, timeout=20.0)
+            if resp.status_code != 200:
+                return ""
+            html = resp.text
+        except Exception:
+            return ""
+
+        # Strip script/style tags
+        html = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r"<style[^>]*>.*?</style>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+        # Strip all remaining HTML tags
+        text = re.sub(r"<[^>]+>", " ", html)
+        # Collapse whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:max_chars]
 
     @staticmethod
     def _accession_from_text(text: str) -> str | None:
@@ -251,7 +273,16 @@ class SecClient:
                     filing_url = f"https://www.sec.gov/Archives/edgar/data/{archive_cik}/{accession_plain}/{doc_name}"
                     published = dt_parser.parse(filing_date) if filing_date else utc_now()
                     title = f"{ticker} filed {form}"
-                    body = f"SEC filing {form} accession {accession}"
+
+                    # For material event forms, attempt to fetch actual filing text
+                    if form in FETCH_BODY_FORMS:
+                        body = self._fetch_filing_text(client, filing_url)
+                        if not body:
+                            body = f"SEC filing {form} accession {accession}"
+                        sleep(0.15)  # be polite to SEC servers
+                    else:
+                        body = f"SEC filing {form} accession {accession}"
+
                     item_hash = make_hash("sec", accession, ticker)
                     items.append(
                         RawNewsItem(

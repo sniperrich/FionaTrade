@@ -12,7 +12,8 @@ EVENT_KEYWORDS = {
     "layoff": ["layoff", "job cuts", "workforce reduction"],
     "supply_chain_disruption": ["supply chain", "disruption", "shutdown", "delay"],
     "accident_disaster": ["fire", "explosion", "accident", "outage", "earthquake"],
-    "policy_shock": ["tariff", "sanction", "ban", "policy", "regulation"],
+    "policy_shock": ["tariff", "sanction", "ban", "policy shock", "executive order"],
+    "sec_filing": ["filed 10-k", "filed 10-q", "filed 8-k", "filed 6-k", "filed 13d", "filed 13g", "annual report", "quarterly report"],
 }
 
 POSITIVE_EVENTS = {"buyback", "merger_acquisition"}
@@ -28,6 +29,9 @@ NEGATIVE_EVENTS = {
     "accident_disaster",
     "policy_shock",
 }
+
+# sec_filing events are excluded from trading - routine filings have no directional edge
+EXCLUDED_FROM_TRADING = {"sec_filing"}
 
 SOURCE_TIER = {
     "sec": 0,

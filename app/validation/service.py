@@ -43,9 +43,10 @@ class ValidationService:
 
         confidence = max(0, min(100, int(source_score + corroboration_score + entity_consistency - conflict_penalty)))
 
+        min_tier = min(tiers)
         if conflict:
             return confidence, "WATCH", "source_conflict_detected"
-        if has_tier0 or source_count >= 2:
+        if has_tier0 or source_count >= 2 or min_tier <= 1:
             return confidence, "VALID", None
         return confidence, "WATCH", "single_source_only"
 
