@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta, timezone
 from io import StringIO
@@ -9,6 +10,8 @@ from time import sleep
 import httpx
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.core.config import Settings
 from app.core.utils import ensure_utc
@@ -192,6 +195,45 @@ class MarketBackfillService:
 
         return bars, None
 
+    def _fetch_yfinance_hourly(self, ticker: str, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], str | None]:
+        try:
+            import yfinance as yf
+        except ImportError:
+            return [], "yfinance not installed"
+
+        try:
+            t = yf.Ticker(ticker)
+            df = t.history(
+                start=start_dt.strftime("%Y-%m-%d"),
+                end=end_dt.strftime("%Y-%m-%d"),
+                interval="1h",
+                auto_adjust=True,
+            )
+        except Exception as exc:
+            return [], f"yfinance fetch failed: {exc}"
+
+        if df is None or df.empty:
+            return [], None
+
+        bars: list[dict] = []
+        for ts_idx, row in df.iterrows():
+            try:
+                ts = ts_idx.to_pydatetime().astimezone(timezone.utc).replace(tzinfo=timezone.utc)
+                if not (start_dt <= ts < end_dt):
+                    continue
+                bars.append({
+                    "ts": ts,
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": float(row["Close"]),
+                    "volume": float(row.get("Volume", 0) or 0),
+                })
+            except Exception:
+                continue
+
+        return bars, None
+
     def run(
         self,
         session: Session,
@@ -227,7 +269,7 @@ class MarketBackfillService:
             )
             existing_ts = {ensure_utc(ts) for ts in existing_ts}
 
-            finnhub_forbidden = False
+            ticker_forbidden = False  # 403 is per-ticker, not global
             finnhub_inserted_for_ticker = 0
 
             if self.settings.finnhub_api_key:
@@ -236,7 +278,8 @@ class MarketBackfillService:
                     if err:
                         req_fail += 1
                         if "HTTP 403" in err:
-                            finnhub_forbidden = True
+                            ticker_forbidden = True
+                            break  # 403 for this ticker only, stop its chunks
                         if len(errors) < 50:
                             errors.append(f"{ticker} {c_start.date()}~{c_end.date()}: {err}")
                         sleep(sleep_seconds)
@@ -257,7 +300,7 @@ class MarketBackfillService:
                                 low=bar["low"],
                                 close=bar["close"],
                                 volume=bar["volume"],
-                                source="finnhub",
+                                source="finnhub_1m",
                             )
                         )
                         existing_ts.add(ts)
@@ -269,16 +312,12 @@ class MarketBackfillService:
             if (
                 self.settings.market_backfill_allow_stooq_fallback
                 and finnhub_inserted_for_ticker == 0
-                and (finnhub_forbidden or not self.settings.finnhub_api_key)
             ):
-                stooq_bars, stooq_err = self._fetch_stooq_daily(ticker, start_dt, end_dt)
-                if stooq_err:
-                    if len(errors) < 50:
-                        errors.append(f"{ticker} stooq fallback: {stooq_err}")
-                else:
-                    if stooq_bars:
-                        stooq_fallback_tickers += 1
-                    for bar in stooq_bars:
+                # Try yfinance hourly first (much better resolution than stooq daily)
+                yf_bars, yf_err = self._fetch_yfinance_hourly(ticker, start_dt, end_dt)
+                if yf_bars:
+                    logger.info("yfinance hourly fallback for %s: %d bars", ticker, len(yf_bars))
+                    for bar in yf_bars:
                         ts = ensure_utc(bar["ts"])
                         if ts in existing_ts:
                             skipped_existing += 1
@@ -292,12 +331,43 @@ class MarketBackfillService:
                                 low=bar["low"],
                                 close=bar["close"],
                                 volume=bar["volume"],
-                                source="stooq_daily_fallback",
+                                source="yfinance_hourly",
                             )
                         )
                         existing_ts.add(ts)
                         inserted += 1
-                        stooq_bars_inserted += 1
+                        stooq_fallback_tickers += 1
+                else:
+                    if yf_err:
+                        logger.warning("yfinance fallback failed for %s: %s", ticker, yf_err)
+                    # Fall back to stooq daily
+                    stooq_bars, stooq_err = self._fetch_stooq_daily(ticker, start_dt, end_dt)
+                    if stooq_err:
+                        if len(errors) < 50:
+                            errors.append(f"{ticker} stooq fallback: {stooq_err}")
+                    else:
+                        if stooq_bars:
+                            stooq_fallback_tickers += 1
+                        for bar in stooq_bars:
+                            ts = ensure_utc(bar["ts"])
+                            if ts in existing_ts:
+                                skipped_existing += 1
+                                continue
+                            session.add(
+                                Bar1m(
+                                    ticker=ticker,
+                                    ts=ts,
+                                    open=bar["open"],
+                                    high=bar["high"],
+                                    low=bar["low"],
+                                    close=bar["close"],
+                                    volume=bar["volume"],
+                                    source="stooq_daily_fallback",
+                                )
+                            )
+                            existing_ts.add(ts)
+                            inserted += 1
+                            stooq_bars_inserted += 1
 
             session.flush()
 
