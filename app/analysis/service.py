@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -15,11 +15,16 @@ from app.core.utils import ensure_utc, utc_now
 from app.db.models import Bar1m, Event, EventEvidence, RawItem
 from app.schemas.types import TradeSignal
 
+_FINNHUB_BASE = "https://finnhub.io/api/v1"
+_FINNHUB_CACHE_TTL_S = 3600  # 1 hour cache for Finnhub supplemental data
+
 
 class AnalysisService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._llm_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        # Finnhub supplemental data cache: key → (data, expire_ts)
+        self._fh_cache: dict[str, tuple[Any, float]] = {}
 
     def _llm_enabled(self) -> bool:
         return bool(self.settings.llm_base_url and self.settings.llm_model)
@@ -221,6 +226,99 @@ class AnalysisService:
             return None
         return (current - base) / base
 
+    def _fh_get(self, path: str, params: dict) -> Any | None:
+        """Cached Finnhub GET. Returns parsed JSON or None on error."""
+        if not self.settings.finnhub_api_key:
+            return None
+        cache_key = path + str(sorted(params.items()))
+        now = datetime.now(tz=timezone.utc).timestamp()
+        cached = self._fh_cache.get(cache_key)
+        if cached and now < cached[1]:
+            return cached[0]
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(
+                    f"{_FINNHUB_BASE}{path}",
+                    params={**params, "token": self.settings.finnhub_api_key},
+                )
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                self._fh_cache[cache_key] = (data, now + _FINNHUB_CACHE_TTL_S)
+                return data
+        except Exception:
+            return None
+
+    def _finnhub_earnings_context(self, ticker: str) -> dict | None:
+        """Get last 4 EPS actuals/estimates/surprises from Finnhub."""
+        data = self._fh_get("/stock/earnings", {"symbol": ticker, "limit": 4})
+        if not data or not isinstance(data, list):
+            return None
+        quarters = []
+        for q in data:
+            actual = q.get("actual")
+            estimate = q.get("estimate")
+            surprise_pct = q.get("surprisePercent")
+            if actual is None and estimate is None:
+                continue
+            quarters.append({
+                "period": q.get("period"),
+                "actual": actual,
+                "estimate": estimate,
+                "surprise_pct": round(surprise_pct, 2) if surprise_pct is not None else None,
+            })
+        if not quarters:
+            return None
+        last = quarters[0]
+        return {
+            "last_actual": last.get("actual"),
+            "last_estimate": last.get("estimate"),
+            "last_surprise_pct": last.get("surprise_pct"),
+            "quarters": quarters,
+        }
+
+    def _finnhub_tech_signal(self, ticker: str) -> dict | None:
+        """Get aggregate technical analysis signal from Finnhub."""
+        data = self._fh_get("/scan/technical-indicator", {"symbol": ticker, "resolution": "D"})
+        if not data or not isinstance(data, dict):
+            return None
+        ta = data.get("technicalAnalysis", {})
+        trend = data.get("trend", {})
+        signal = ta.get("signal")
+        count = ta.get("count", {})
+        if not signal:
+            return None
+        return {
+            "signal": signal,
+            "buy_count": count.get("buy"),
+            "neutral_count": count.get("neutral"),
+            "sell_count": count.get("sell"),
+            "adx": round(trend.get("adx", 0), 2) if trend.get("adx") is not None else None,
+            "trending": trend.get("trending"),
+        }
+
+    def _finnhub_support_resistance(self, ticker: str, current_price: float | None) -> dict | None:
+        """Get support/resistance levels and proximity to current price."""
+        data = self._fh_get("/scan/support-resistance", {"symbol": ticker, "resolution": "D"})
+        if not data or not isinstance(data, dict):
+            return None
+        levels = sorted(data.get("levels", []))
+        if not levels:
+            return None
+        result: dict[str, Any] = {"levels": [round(l, 2) for l in levels]}
+        if current_price and current_price > 0:
+            supports = [l for l in levels if l < current_price]
+            resistances = [l for l in levels if l > current_price]
+            nearest_support = supports[-1] if supports else None
+            nearest_resistance = resistances[0] if resistances else None
+            result["nearest_support"] = round(nearest_support, 2) if nearest_support else None
+            result["nearest_resistance"] = round(nearest_resistance, 2) if nearest_resistance else None
+            if nearest_resistance:
+                result["pct_to_resistance"] = round((nearest_resistance - current_price) / current_price * 100, 2)
+            if nearest_support:
+                result["pct_from_support"] = round((current_price - nearest_support) / current_price * 100, 2)
+        return result
+
     def _event_market_features(self, session: Session | None, event: Event) -> dict[str, Any]:
         if session is None or not event.tickers:
             return {}
@@ -281,7 +379,12 @@ class AnalysisService:
             float(spy_now.close) if spy_now else None,
         )
 
-        return {
+        current_price = float(ticker_now.close) if ticker_now else None
+        earnings_ctx = self._finnhub_earnings_context(ticker)
+        tech_signal = self._finnhub_tech_signal(ticker)
+        sr_levels = self._finnhub_support_resistance(ticker, current_price)
+
+        features: dict[str, Any] = {
             "ticker": ticker,
             "event_time_utc": event_ts.isoformat(),
             "session_open_utc": day_open.isoformat(),
@@ -309,6 +412,13 @@ class AnalysisService:
                 "event_close": float(spy_now.close) if spy_now else None,
             },
         }
+        if earnings_ctx:
+            features["earnings_context"] = earnings_ctx
+        if tech_signal:
+            features["tech_signal"] = tech_signal
+        if sr_levels:
+            features["support_resistance"] = sr_levels
+        return features
 
     def _llm_extract(self, event: Event, session: Session | None = None) -> dict:
         prior_direction = self._event_prior_direction(event.event_type)
@@ -336,6 +446,9 @@ class AnalysisService:
                 "Do not output trading actions (BUY/SELL/SHORT/HOLD).",
                 "Use NEUTRAL only when evidence is truly mixed or insufficient.",
                 "When market_features are available, use relative strength vs SPY as a tie-breaker.",
+                "If tech_signal is present: 'buy' signal supports UP, 'sell' supports DOWN, use as secondary confirmation.",
+                "If earnings_context is present: positive surprise_pct (beat) supports UP, negative supports DOWN.",
+                "If support_resistance is present: price near resistance (pct_to_resistance < 1%) limits upside; price near support (pct_from_support < 1%) limits downside.",
             ],
             "output_schema": {
                 "direction": "UP|DOWN|NEUTRAL",
