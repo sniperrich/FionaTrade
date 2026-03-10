@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     backtest_risk_per_trade_pct: float = 0.001
     backtest_daily_circuit_breaker: bool = True
     backtest_enable_term_horizon: bool = False
+    backtest_entry_window_min: int = 120
+    backtest_regime_risk_adjust: bool = True
+    backtest_regime_bull_risk_multiplier: float = 1.20
+    backtest_regime_bear_risk_multiplier: float = 0.80
+    backtest_dedup_same_day_event: bool = True
 
     min_trade_confidence: int = 70
 

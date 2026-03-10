@@ -470,6 +470,36 @@ class AnalysisService:
             features["support_resistance"] = sr_levels
         if analyst_consensus:
             features["analyst_consensus"] = analyst_consensus
+
+        # ── Macro market regime: SPY 20-day trend ─────────────────────────────
+        # Fetch the SPY bar ~20 trading days ago (≈28 calendar days) and compute
+        # cumulative return up to the event time. Tells the LLM whether the broad
+        # market has been in a risk-on or risk-off regime recently.
+        spy_20d_ago_ts = event_ts - timedelta(days=28)
+        spy_20d_bar = session.execute(
+            select(Bar1m)
+            .where(and_(Bar1m.ticker == "SPY", Bar1m.ts >= spy_20d_ago_ts))
+            .order_by(Bar1m.ts.asc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+        if spy_20d_bar and spy_now:
+            spy_20d_return = self._pct_change(
+                float(spy_20d_bar.close), float(spy_now.close)
+            )
+            if spy_20d_return is not None:
+                if spy_20d_return >= 0.03:
+                    regime = "BULL"
+                elif spy_20d_return <= -0.03:
+                    regime = "BEAR"
+                else:
+                    regime = "NEUTRAL"
+                features["macro_market_regime"] = {
+                    "spy_20d_return_pct": round(spy_20d_return * 100, 2),
+                    "regime": regime,
+                    "note": "SPY cumulative return over last ~20 trading days",
+                }
+
         return features
 
     def _llm_extract(self, event: Event, session: Session | None = None) -> dict:
@@ -507,6 +537,7 @@ class AnalysisService:
                 "  - earnings_context: positive surprise_pct supports UP, negative supports DOWN",
                 "  - support_resistance: price within 1% of resistance reduces upside; within 1% of support reduces downside",
                 "  - analyst_consensus: BULLISH (consensus_score>0.2) is a mild UP tailwind; BEARISH is a mild DOWN tailwind — but NEVER override a strong news signal",
+                "  - macro_market_regime: Use as a DIRECTIONAL TILT for ambiguous signals only. In a BULL regime (spy_20d_return >= +3%), prefer UP when news is ambiguous; avoid initiating DOWN trades on weak negative signals. In a BEAR regime (spy_20d_return <= -3%), prefer DOWN when ambiguous; avoid initiating UP trades on weak positive signals. NEVER override a clear, strong, ticker-specific news signal based on macro alone.",
                 "Do NOT let long-term bullish fundamentals override a clearly negative short-term news event.",
             ],
             "output_schema": {

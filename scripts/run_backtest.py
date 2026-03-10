@@ -1,22 +1,39 @@
 #!/usr/bin/env python
-"""一键本地回测脚本 + 自动 acceptance audit
+"""FionaTrade 一键回测 + acceptance audit
 
-用法:
-    python scripts/run_backtest.py                          # 默认：最近一周
-    python scripts/run_backtest.py --start 2025-10-01 --end 2025-10-09
-    python scripts/run_backtest.py --start 2026-01-06 --end 2026-01-13
-    python scripts/run_backtest.py --min-severity 70 --min-confidence 30
-    python scripts/run_backtest.py --no-validation          # 关 signal validation
-    python scripts/run_backtest.py --slippage 0             # 无摩擦诊断
-    python scripts/run_backtest.py --top 20                 # audit 显示 top 20 亏损
-
-结束后自动打印 acceptance audit 报告。
+直接编辑下方 CONFIG 区域修改参数，然后运行：
+    python scripts/run_backtest.py
 """
 from __future__ import annotations
 
-import argparse
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONFIG — 直接在这里改，不需要命令行参数
+# ══════════════════════════════════════════════════════════════════════════════
+
+START_DATE       = "2025-10-01"   # 回测开始日期 (YYYY-MM-DD)；None = 7天前
+END_DATE         = "2025-10-09"   # 回测结束日期 (YYYY-MM-DD)；None = 今天
+
+MIN_CONFIDENCE   = 30             # 事件 confidence 下限
+MIN_SEVERITY     = 70             # 事件 severity 下限（70 = 中强事件）
+SLIPPAGE_BPS     = 4.0            # 滑点（bps）；设 0 做无摩擦诊断
+LLM_WORKERS      = 8              # 并发 LLM workers
+
+HARD_STOPS       = True           # 硬止损/止盈
+RISK_SIZING      = True           # 动态风险仓位
+USE_VALIDATION   = True           # Signal Validation Layer
+ENTRY_WINDOW_MIN = 120            # 事件后允许进场窗口（分钟）
+REGIME_RISK_ADJUST = True         # 按 SPY regime 调节 risk_per_trade_pct
+DEDUP_SAME_DAY_EVENT = True       # 同 ticker+同日+同事件类型只保留最高 severity
+
+AUDIT_TOP_N      = 15             # acceptance audit 显示 top N 亏损
+
+# ══════════════════════════════════════════════════════════════════════════════
+
 import os
+import re
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,91 +43,209 @@ from app.db.database import db_session
 from app.backtest_engine.service import BacktestEngineService
 
 
-def _default_dates() -> tuple[str, str]:
-    """默认跑最近 7 天（以今天为 end，往前推 7 天为 start）。"""
+# ── ANSI helpers ──────────────────────────────────────────────────────────────
+def _cyan(s: str) -> str:   return f"\033[96m{s}\033[0m"
+def _green(s: str) -> str:  return f"\033[92m{s}\033[0m"
+def _red(s: str) -> str:    return f"\033[91m{s}\033[0m"
+def _bold(s: str) -> str:   return f"\033[1m{s}\033[0m"
+def _dim(s: str) -> str:    return f"\033[2m{s}\033[0m"
+
+
+# ── Log tailer (real-time progress) ───────────────────────────────────────────
+_PROGRESS_RE = re.compile(
+    r"回测进度 run_id=(\d+) ([\d.]+)%\((\d+)/(\d+)\) "
+    r"trades=(\d+) llm_signals=(\d+) fallback=(\d+) equity=([\d.]+)"
+)
+_PREFETCH_RE = re.compile(r"并发LLM预取 run_id=(\d+) workers=\d+ tradeable=(\d+)/(\d+)")
+_CACHE_RE    = re.compile(r"Finnhub cache预热 (\d+)/(\d+)")
+_DONE_RE     = re.compile(r"回测完成 run_id=(\d+)")
+
+_stop_tailer = threading.Event()
+
+
+def _bar(pct: float, width: int = 30) -> str:
+    filled = int(width * pct / 100)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _tail_log(log_path: str, run_id_holder: list) -> None:
+    """背景线程：实时读 app.log 并渲染进度条到终端。"""
+    try:
+        with open(log_path, "r") as f:
+            f.seek(0, 2)  # jump to end
+            phase = "warmup"
+            tradeable = 0
+            while not _stop_tailer.is_set():
+                line = f.readline()
+                if not line:
+                    time.sleep(0.1)
+                    continue
+
+                # Finnhub cache warmup
+                m = _CACHE_RE.search(line)
+                if m:
+                    done, total = int(m.group(1)), int(m.group(2))
+                    pct = done / total * 100
+                    sys.stdout.write(
+                        f"\r  {_dim('预热Finnhub cache')}  {_bar(pct, 20)}  {done}/{total}  "
+                    )
+                    sys.stdout.flush()
+                    continue
+
+                # LLM prefetch started
+                m = _PREFETCH_RE.search(line)
+                if m:
+                    tradeable = int(m.group(2))
+                    phase = "prefetch"
+                    sys.stdout.write(f"\r  {_cyan('LLM预取')} {tradeable} 个事件...{' '*30}\n")
+                    sys.stdout.flush()
+                    continue
+
+                # Trade loop progress
+                m = _PROGRESS_RE.search(line)
+                if m:
+                    rid = int(m.group(1))
+                    if run_id_holder and rid != run_id_holder[0]:
+                        continue
+                    pct   = float(m.group(2))
+                    cur   = m.group(3)
+                    total = m.group(4)
+                    trades = m.group(5)
+                    sigs   = m.group(6)
+                    fb     = m.group(7)
+                    equity = float(m.group(8))
+                    ret_pct = (equity - 100000) / 100000 * 100
+                    ret_str = (_green if ret_pct >= 0 else _red)(f"{ret_pct:+.3f}%")
+                    sys.stdout.write(
+                        f"\r  {_bar(pct)} {pct:5.1f}%  "
+                        f"事件 {cur}/{total}  交易 {_bold(trades)}  "
+                        f"LLM {sigs}(fb:{fb})  净值 {ret_str}  "
+                    )
+                    sys.stdout.flush()
+                    continue
+
+                # Done
+                m = _DONE_RE.search(line)
+                if m:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    break
+    except Exception:
+        pass  # log 文件不存在时静默
+
+
+# ── Dates ─────────────────────────────────────────────────────────────────────
+def _resolve_dates() -> tuple[str, str]:
     today = datetime.now(tz=timezone.utc).date()
-    end = today.isoformat()
-    start = (today - timedelta(days=7)).isoformat()
+    start = START_DATE or (today - timedelta(days=7)).isoformat()
+    end   = END_DATE   or today.isoformat()
     return start, end
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
-    parser = argparse.ArgumentParser(description="FionaTrade 一键回测 + acceptance audit")
-    parser.add_argument("--start", default=None, help="回测开始日期 YYYY-MM-DD（默认：7天前）")
-    parser.add_argument("--end", default=None, help="回测结束日期 YYYY-MM-DD（默认：今天）")
-    parser.add_argument("--min-confidence", type=int, default=30, help="最低 confidence 阈值（默认 30）")
-    parser.add_argument("--min-severity", type=int, default=70, help="最低 severity 阈值（默认 70）")
-    parser.add_argument("--slippage", type=float, default=4.0, help="滑点 bps（默认 4；设 0 做无摩擦诊断）")
-    parser.add_argument("--workers", type=int, default=8, help="并发 LLM workers（默认 8）")
-    parser.add_argument("--no-validation", action="store_true", help="关闭 signal validation layer")
-    parser.add_argument("--no-hard-stops", action="store_true", help="关闭硬止损/止盈")
-    parser.add_argument("--no-risk-sizing", action="store_true", help="关闭动态风险仓位")
-    parser.add_argument("--top", type=int, default=15, help="audit 显示 top N 亏损交易（默认 15）")
-    parser.add_argument("--no-audit", action="store_true", help="跳过 acceptance audit")
-    args = parser.parse_args()
-
-    default_start, default_end = _default_dates()
-    start_date = args.start or default_start
-    end_date = args.end or default_end
-
+    start_date, end_date = _resolve_dates()
     settings = get_settings()
-    print(f"\n{'='*60}")
-    print(f"  FionaTrade 回测")
-    print(f"  模型: {settings.llm_model}")
-    print(f"  区间: {start_date} ~ {end_date}")
-    print(f"  min_confidence={args.min_confidence}  min_severity={args.min_severity}")
-    print(f"  slippage={args.slippage}bps  workers={args.workers}")
-    print(f"  validation={'OFF' if args.no_validation else 'ON'}")
-    print(f"{'='*60}\n")
+
+    log_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        settings.log_dir, "app.log",
+    )
+
+    print()
+    print(_bold("═" * 62))
+    print(_bold(f"  FionaTrade 回测"))
+    print(f"  模型      : {_cyan(settings.llm_model)}")
+    print(f"  区间      : {start_date}  →  {end_date}")
+    print(f"  min_conf  : {MIN_CONFIDENCE}   min_sev : {MIN_SEVERITY}")
+    print(f"  slippage  : {SLIPPAGE_BPS} bps   workers : {LLM_WORKERS}")
+    print(f"  entry_win : {ENTRY_WINDOW_MIN}m  regime_adj: {'ON' if REGIME_RISK_ADJUST else 'OFF'}")
+    print(f"  validation: {'ON' if USE_VALIDATION else 'OFF'}   "
+          f"hard_stops: {'ON' if HARD_STOPS else 'OFF'}")
+    print(_bold("═" * 62))
+    print()
 
     params = {
-        "start_date": start_date,
-        "end_date": end_date,
-        "min_confidence": args.min_confidence,
-        "min_severity": args.min_severity,
-        "use_llm": True,
-        "use_signal_horizon": True,
-        "hard_stops": not args.no_hard_stops,
-        "risk_sizing": not args.no_risk_sizing,
+        "start_date"         : start_date,
+        "end_date"           : end_date,
+        "min_confidence"     : MIN_CONFIDENCE,
+        "min_severity"       : MIN_SEVERITY,
+        "use_llm"            : True,
+        "use_signal_horizon" : True,
+        "hard_stops"         : HARD_STOPS,
+        "risk_sizing"        : RISK_SIZING,
+        "entry_window_min"   : ENTRY_WINDOW_MIN,
+        "regime_risk_adjust" : REGIME_RISK_ADJUST,
+        "dedup_same_day_event": DEDUP_SAME_DAY_EVENT,
         "daily_circuit_breaker": True,
-        "slippage_bps": args.slippage,
-        "use_signal_validation": not args.no_validation,
-        "llm_workers": args.workers,
+        "slippage_bps"       : SLIPPAGE_BPS,
+        "use_signal_validation": USE_VALIDATION,
+        "llm_workers"        : LLM_WORKERS,
+        "progress_every"     : 10,
     }
 
+    # 启动 log tailer（实时进度）
+    run_id_holder: list[int] = []
+    tailer = threading.Thread(
+        target=_tail_log, args=(log_path, run_id_holder), daemon=True
+    )
+    tailer.start()
+
+    t0 = time.time()
     with db_session() as session:
         svc = BacktestEngineService(settings)
         result = svc.run(session, params=params)
 
+    _stop_tailer.set()
+    tailer.join(timeout=2)
+    elapsed = time.time() - t0
+
     m = result.metrics
     run_id = result.run_id
+    run_id_holder.append(run_id)
 
-    print(f"\n{'='*60}")
-    print(f"  回测完成  run_id={run_id}  status={result.status}")
-    print(f"{'='*60}")
-    print(f"  Events considered : {m.get('events_considered', '?')}")
-    print(f"  LLM signals       : {m.get('llm_signals', 0)}")
-    print(f"  LLM fallback      : {m.get('llm_fallback_signals', 0)}")
-    print(f"  Validation blocked: {m.get('validation_blocked', 0)}")
-    print(f"  Trades            : {m.get('trades', 0)}")
-    print(f"  Win rate          : {m.get('win_rate', 0)*100:.1f}%")
-    print(f"  Total return      : {m.get('total_return', 0)*100:.4f}%")
-    print(f"  Net PnL           : ${m.get('total_pnl', 0):.2f}")
-    print(f"  Max drawdown      : {m.get('max_drawdown', 0)*100:.3f}%")
-    print(f"  Sharpe            : {m.get('sharpe', 0):.3f}")
+    trades     = m.get("trades", 0)
+    win_rate   = m.get("win_rate", 0) * 100
+    total_ret  = m.get("total_return", 0) * 100
+    pnl        = m.get("total_pnl", 0)
+    drawdown   = m.get("max_drawdown", 0) * 100
+    sharpe     = m.get("sharpe", 0)
+
+    ret_color  = _green if total_ret >= 0 else _red
+    wr_color   = _green if win_rate >= 50 else _red
+
+    print()
+    print(_bold("═" * 62))
+    print(_bold(f"  回测完成  run_id={run_id}  耗时 {elapsed:.0f}s"))
+    print(_bold("═" * 62))
+    print(f"  Events considered  : {m.get('events_considered', '?')}")
+    print(f"  LLM signals        : {m.get('llm_signals', 0)}  "
+          f"fallback: {m.get('llm_fallback_signals', 0)}")
+    print(f"  Validation blocked : {m.get('validation_blocked', 0)}")
+    print(f"  Trades             : {_bold(str(trades))}")
+    print(f"  Win rate           : {wr_color(f'{win_rate:.1f}%')}")
+    print(f"  Total return       : {ret_color(f'{total_ret:+.4f}%')}")
+    print(f"  Net PnL            : {ret_color(f'${pnl:+.2f}')}")
+    print(f"  Max drawdown       : {drawdown:.3f}%")
+    print(f"  Sharpe             : {sharpe:.3f}")
+    print(_bold("═" * 62))
     print()
 
-    if args.no_audit or m.get("trades", 0) == 0:
-        if m.get("trades", 0) == 0:
-            print("  (无交易，跳过 audit)")
+    if trades == 0:
+        print("  (无交易，跳过 acceptance audit)")
         return
 
-    # ── Acceptance audit ─────────────────────────────────────────────────────
-    print("运行 acceptance audit...\n")
+    # ── Acceptance audit ──────────────────────────────────────────────────────
+    print(_bold("  ACCEPTANCE AUDIT"))
+    print()
     audit_script = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "audit_backtest_losses.py"
     )
-    os.execv(sys.executable, [sys.executable, audit_script, "--run-id", str(run_id), "--top", str(args.top)])
+    os.execv(sys.executable, [
+        sys.executable, audit_script,
+        "--run-id", str(run_id),
+        "--top", str(AUDIT_TOP_N),
+    ])
 
 
 if __name__ == "__main__":

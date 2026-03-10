@@ -133,6 +133,9 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 新闻页提供来源在线状态（ONLINE/OFFLINE）与离线报错明细。
 - 回测前可先调用 `POST /api/market/backfill` 回填历史 1m 行情。
 - 回测新增硬风控：分钟级止损/止盈（`hard_stops`）、动态风险仓位（`risk_sizing` + `risk_per_trade_pct`）、日内熔断（`daily_circuit_breaker`）。
+- 回测进场窗口可配置：`entry_window_min`（默认 120 分钟，替代旧版硬编码 60 分钟）。
+- 回测支持同日重复事件去重：`dedup_same_day_event=true` 时，同 `ticker + event_type + day` 仅保留最高 `severity` 事件。
+- 回测支持宏观 regime 仓位调节：`regime_risk_adjust=true` 时，按 SPY 20交易日趋势对 `risk_per_trade_pct` 乘系数（BULL 1.2 / BEAR 0.8，均可参数覆盖）。
 - 回测支持 `slippage_bps` 参数，可先用 `0` 做无摩擦诊断；默认滑点已调为 `4 bps`。
 - `MIN_TRADE_CONFIDENCE` 默认调整为 `70`（避免实时链路在 `75` 下几乎全部被过滤）。
 - 已写入短中长线管理（`SHORT/MID/LONG` 周期桶），默认开启：`ENABLE_TERM_MANAGEMENT=true`。
@@ -144,6 +147,14 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 回测支持 `min_severity` 参数（默认 0 不过滤；70 = 只交易强信号事件 regulatory/accident/supply_chain/litigation 类）。
 
 ## 近期变更
+
+### 2026-03-10
+- 回测引擎新增 `entry_window_min` 参数（默认取 `BACKTEST_ENTRY_WINDOW_MIN=120`），事件后 120 分钟内有 bar 才允许进场。
+- 回测引擎新增 `regime_risk_adjust`：根据 SPY 近 20 交易日 regime（BULL/BEAR/NEUTRAL）动态调整每笔风险预算。
+- 回测引擎新增 `dedup_same_day_event`：同 `ticker + event_type + day` 保留最高 `severity`，减少重复进场。
+- 修复 `AnalysisService` 的 `macro_market_regime` 阈值单位（从 3.0 修正为 3%）。
+- 一键回测脚本 `scripts/run_backtest.py` 新增顶部配置项：`ENTRY_WINDOW_MIN`、`REGIME_RISK_ADJUST`、`DEDUP_SAME_DAY_EVENT`。
+- 新增测试 `tests/test_backtest_handoff_followups.py` 覆盖：进场窗口、同日去重、regime 风险倍率。
 
 ### 2026-03-08 (第三批 — Signal Validation Layer)
 - **新增 `app/analysis/signal_validator.py`**：Signal Validation Layer，纯规则、无 LLM、同步执行。输出 `SignalValidationResult`（8维评估 + `review_score` + `execution_recommendation`）。

@@ -49,6 +49,12 @@ class BacktestEngineService:
             return value.strip().lower() in {"1", "true", "yes", "y", "on"}
         return default
 
+    @staticmethod
+    def _pct_change(base: float | None, current: float | None) -> float | None:
+        if base is None or current is None or abs(base) < 1e-9:
+            return None
+        return (current - base) / base
+
     def _bar_at_or_after(self, session: Session, ticker: str, ts) -> Bar1m | None:
         return session.execute(
             select(Bar1m)
@@ -103,6 +109,59 @@ class BacktestEngineService:
         risk_per_share = max(entry_px * max(stop_loss_pct, 0.0001), 0.01)
         qty_risk = risk_budget / risk_per_share
         return max(min(qty_cap, qty_risk), 0.0)
+
+    def _market_regime_for_event(self, session: Session, event_ts: datetime) -> tuple[str, float | None]:
+        """Infer broad market regime from SPY return over ~20 trading days."""
+        start_ts = ensure_utc(event_ts) - timedelta(days=28)
+        start_bar = session.execute(
+            select(Bar1m)
+            .where(and_(Bar1m.ticker == "SPY", Bar1m.ts >= start_ts, Bar1m.ts <= event_ts))
+            .order_by(Bar1m.ts.asc())
+            .limit(1)
+        ).scalar_one_or_none()
+        end_bar = session.execute(
+            select(Bar1m)
+            .where(and_(Bar1m.ticker == "SPY", Bar1m.ts <= event_ts))
+            .order_by(Bar1m.ts.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+        if not start_bar or not end_bar:
+            return "NEUTRAL", None
+
+        ret = self._pct_change(float(start_bar.close), float(end_bar.close))
+        if ret is None:
+            return "NEUTRAL", None
+        if ret >= 0.03:
+            return "BULL", ret
+        if ret <= -0.03:
+            return "BEAR", ret
+        return "NEUTRAL", ret
+
+    def _deduplicate_same_day_events(self, events: list[Event]) -> list[Event]:
+        """Keep only the highest-severity event for (ticker, event_type, day)."""
+        selected: dict[tuple[str, str, date], Event] = {}
+        passthrough: list[Event] = []
+
+        for event in events:
+            if not event.tickers:
+                passthrough.append(event)
+                continue
+            event_ts = ensure_utc(event.event_time)
+            key = (str(event.tickers[0]).upper(), event.event_type or "", event_ts.date())
+            current = selected.get(key)
+            if current is None:
+                selected[key] = event
+                continue
+            current_ts = ensure_utc(current.event_time)
+            new_rank = ((event.severity or 0), (event.confidence or 0), event_ts.timestamp())
+            current_rank = ((current.severity or 0), (current.confidence or 0), current_ts.timestamp())
+            if new_rank > current_rank:
+                selected[key] = event
+
+        deduped = list(selected.values()) + passthrough
+        deduped.sort(key=lambda e: ensure_utc(e.event_time))
+        return deduped
 
     def _first_barrier_hit(
         self,
@@ -223,9 +282,26 @@ class BacktestEngineService:
         hard_stops = self._as_bool(params.get("hard_stops"), default=self.settings.backtest_hard_stops)
         risk_sizing = self._as_bool(params.get("risk_sizing"), default=self.settings.backtest_risk_sizing)
         risk_per_trade_pct = float(params.get("risk_per_trade_pct", self.settings.backtest_risk_per_trade_pct))
+        entry_window_min = int(params.get("entry_window_min", self.settings.backtest_entry_window_min))
+        if entry_window_min < 1:
+            entry_window_min = 60
         daily_circuit_breaker = self._as_bool(
             params.get("daily_circuit_breaker"),
             default=self.settings.backtest_daily_circuit_breaker,
+        )
+        regime_risk_adjust = self._as_bool(
+            params.get("regime_risk_adjust"),
+            default=self.settings.backtest_regime_risk_adjust,
+        )
+        regime_bull_risk_multiplier = float(
+            params.get("regime_bull_risk_multiplier", self.settings.backtest_regime_bull_risk_multiplier)
+        )
+        regime_bear_risk_multiplier = float(
+            params.get("regime_bear_risk_multiplier", self.settings.backtest_regime_bear_risk_multiplier)
+        )
+        dedup_same_day_event = self._as_bool(
+            params.get("dedup_same_day_event"),
+            default=self.settings.backtest_dedup_same_day_event,
         )
         enable_term_horizon = self._as_bool(
             params.get("enable_term_horizon"),
@@ -267,15 +343,21 @@ class BacktestEngineService:
             stmt = stmt.where(Event.event_time < end_dt)
 
         events = session.execute(stmt.order_by(Event.event_time.asc())).scalars().all()
+        events_before_dedup = len(events)
+        if dedup_same_day_event:
+            events = self._deduplicate_same_day_events(events)
+        dedup_dropped = max(0, events_before_dedup - len(events))
         started = time.perf_counter()
 
         self.logger.info(
-            "回测开始 run_id=%s events=%s use_llm=%s min_conf=%s horizon=%s start=%s end=%s",
+            "回测开始 run_id=%s events=%s dedup_dropped=%s use_llm=%s min_conf=%s horizon=%s entry_window=%s start=%s end=%s",
             run.id,
             len(events),
+            dedup_dropped,
             use_llm,
             min_conf,
             horizon_min,
+            entry_window_min,
             start_date,
             end_date,
         )
@@ -289,9 +371,15 @@ class BacktestEngineService:
                 "horizon_min": horizon_min,
                 "start_date": start_date,
                 "end_date": end_date,
+                "entry_window_min": entry_window_min,
                 "hard_stops": hard_stops,
                 "risk_sizing": risk_sizing,
                 "risk_per_trade_pct": risk_per_trade_pct,
+                "regime_risk_adjust": regime_risk_adjust,
+                "regime_bull_risk_multiplier": regime_bull_risk_multiplier,
+                "regime_bear_risk_multiplier": regime_bear_risk_multiplier,
+                "dedup_same_day_event": dedup_same_day_event,
+                "dedup_dropped": dedup_dropped,
                 "slippage_bps": slippage_bps,
                 "daily_circuit_breaker": daily_circuit_breaker,
                 "enable_term_horizon": enable_term_horizon,
@@ -308,6 +396,7 @@ class BacktestEngineService:
         llm_fallback_signals = 0
         validation_blocked = 0
         exit_reason_counts: dict[str, int] = {}
+        regime_trade_counts: dict[str, int] = {}
         daily_halts = 0
         halted_events_skipped = 0
 
@@ -547,8 +636,8 @@ class BacktestEngineService:
             # ─────────────────────────────────────────────────────────────────
 
             entry_bar = self._bar_at_or_after(session, ticker, event_ts + timedelta(minutes=1))
-            # Skip if no bar within 60 min of event — means no market data for this period
-            if not entry_bar or ensure_utc(entry_bar.ts) > event_ts + timedelta(minutes=60):
+            # Skip if no bar within configured entry window of event.
+            if not entry_bar or ensure_utc(entry_bar.ts) > event_ts + timedelta(minutes=entry_window_min):
                 emit_progress(idx)
                 continue
             planned_exit_bar = self._bar_at_or_after(session, ticker, event_ts + timedelta(minutes=local_horizon_min))
@@ -558,12 +647,24 @@ class BacktestEngineService:
 
             side = "LONG" if action == "BUY" else "SHORT"
             entry_px = self._apply_slippage(float(entry_bar.open), side=side, leg="entry", slippage_bps=slippage_bps)
+            effective_risk_per_trade_pct = risk_per_trade_pct
+            regime = "NEUTRAL"
+            regime_multiplier = 1.0
+            regime_return_pct = None
+            if regime_risk_adjust:
+                regime, regime_ret = self._market_regime_for_event(session, event_ts)
+                regime_return_pct = (regime_ret * 100.0) if regime_ret is not None else None
+                if regime == "BULL":
+                    regime_multiplier = max(0.0, regime_bull_risk_multiplier)
+                elif regime == "BEAR":
+                    regime_multiplier = max(0.0, regime_bear_risk_multiplier)
+                effective_risk_per_trade_pct = max(0.0, risk_per_trade_pct * regime_multiplier)
 
             qty = self._position_size(
                 nav=equity,
                 entry_px=entry_px,
                 stop_loss_pct=stop_loss_pct,
-                risk_per_trade_pct=risk_per_trade_pct,
+                risk_per_trade_pct=effective_risk_per_trade_pct,
                 risk_sizing=risk_sizing,
             )
             if qty <= 0:
@@ -613,6 +714,10 @@ class BacktestEngineService:
                 "ticker": ticker,
                 "side": side,
                 "qty": qty,
+                "risk_per_trade_pct": effective_risk_per_trade_pct,
+                "regime": regime,
+                "regime_multiplier": regime_multiplier,
+                "regime_return_pct": regime_return_pct,
                 "entry_ts": entry_bar.ts.isoformat(),
                 "entry_price": entry_px,
                 "exit_ts": exit_ts.isoformat(),
@@ -627,6 +732,7 @@ class BacktestEngineService:
             }
             trade_log.append(trade_entry)
             equity_curve.append({"ts": exit_ts.isoformat(), "equity": equity})
+            regime_trade_counts[regime] = regime_trade_counts.get(regime, 0) + 1
 
             session.add(
                 BacktestTrade(
@@ -665,6 +771,13 @@ class BacktestEngineService:
         metrics["hard_stops"] = hard_stops
         metrics["risk_sizing"] = risk_sizing
         metrics["risk_per_trade_pct"] = risk_per_trade_pct
+        metrics["entry_window_min"] = entry_window_min
+        metrics["regime_risk_adjust"] = regime_risk_adjust
+        metrics["regime_bull_risk_multiplier"] = regime_bull_risk_multiplier
+        metrics["regime_bear_risk_multiplier"] = regime_bear_risk_multiplier
+        metrics["dedup_same_day_event"] = dedup_same_day_event
+        metrics["dedup_dropped"] = dedup_dropped
+        metrics["regime_trade_counts"] = regime_trade_counts
         metrics["slippage_bps"] = slippage_bps
         metrics["exit_reason_counts"] = exit_reason_counts
         metrics["daily_halts"] = daily_halts
