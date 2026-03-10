@@ -26,7 +26,7 @@ def test_analysis_fallback_used_when_llm_not_configured(settings):
 
 def test_analysis_llm_mode_without_api_key(settings):
     settings.llm_base_url = "https://api.duojie.games"
-    settings.llm_model = "claude-sonnet-4-6"
+    settings.llm_model = "claude-sonnet-4-5"
     settings.llm_api_key = ""
 
     event = Event(

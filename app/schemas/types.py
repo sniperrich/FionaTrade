@@ -41,6 +41,7 @@ class TradeSignal(BaseModel):
     confidence: int
     horizon_min: int
     horizon_profile: Literal["SHORT", "MID", "LONG"] | None = None
+    position_pct_suggestion: float | None = Field(default=None, ge=0.0, le=1.0)
     reason: str
     expires_at: datetime
     fallback_used: bool = False

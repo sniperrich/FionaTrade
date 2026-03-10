@@ -5,7 +5,10 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover - optional dependency fallback
+    OpenAI = None
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,6 +22,34 @@ from app.schemas.types import CanonicalEvent
 logger = logging.getLogger(__name__)
 
 _VALID_EVENT_TYPES = set(EVENT_KEYWORDS.keys()) | {"unknown"}
+_ROUTINE_FILING_RE = re.compile(
+    r"\bfiled\s+(?:form\s+)?(?:8-k|10-k|10-q|6-k|13d|13g|sc\s*13d|sc\s*13g)\b",
+    re.IGNORECASE,
+)
+_ROUTINE_FILING_MARKERS = (
+    "sec filing",
+    "form 8-k",
+    "form 10-k",
+    "form 10-q",
+    "form 6-k",
+    "form 13d",
+    "form 13g",
+)
+_MATERIAL_FILING_KEYWORDS = (
+    "restatement",
+    "material weakness",
+    "internal control",
+    "bankrupt",
+    "chapter 11",
+    "investigation",
+    "sec charge",
+    "doj",
+    "fraud",
+    "guidance cut",
+    "lowered outlook",
+    "earnings miss",
+    "missed estimates",
+)
 
 _CLASSIFIER_PROMPT = """You are a financial news classifier. Classify the following news text into exactly one event type.
 
@@ -53,8 +84,8 @@ class NormalizationService:
         self.universe = set(settings.sp100_tickers)
         # Build sorted list of company names (longest first to avoid partial matches)
         self._name_map = sorted(COMPANY_NAME_TO_TICKER.keys(), key=len, reverse=True)
-        self._llm_client: OpenAI | None = None
-        if settings.llm_base_url and settings.llm_api_key:
+        self._llm_client = None
+        if OpenAI is not None and settings.llm_base_url and settings.llm_api_key:
             base = settings.llm_base_url.rstrip("/")
             if not base.endswith("/v1"):
                 base = base + "/v1"
@@ -131,6 +162,23 @@ class NormalizationService:
         # Fall back to LLM classifier for ambiguous items
         return self._llm_classify(text)
 
+    def _is_routine_filing_item(self, item: RawItem, text: str) -> bool:
+        title = (item.title or "").lower()
+        lowered = text.lower()
+        source = (item.source or "").lower()
+
+        has_filing_marker = bool(_ROUTINE_FILING_RE.search(title)) or any(
+            marker in lowered for marker in _ROUTINE_FILING_MARKERS
+        )
+        if not has_filing_marker:
+            return False
+
+        if source != "sec" and "filed" not in title:
+            return False
+
+        has_material_marker = any(keyword in lowered for keyword in _MATERIAL_FILING_KEYWORDS)
+        return not has_material_marker
+
     def _severity(self, event_type: str) -> int:
         severe = {"financial_fraud", "audit_issue", "regulatory_penalty", "accident_disaster"}
         mid = {"earnings_miss", "guidance_cut", "major_litigation", "supply_chain_disruption"}
@@ -150,14 +198,17 @@ class NormalizationService:
         for item in rows:
             text = f"{item.title} {item.body}"
             tickers = self._extract_tickers(text, item.metadata_json)
-            # Skip slow LLM classifier for ticker-tagged items (Finnhub company-news);
-            # the main analysis LLM reads full text to determine direction anyway.
-            has_ticker_meta = bool((item.metadata_json or {}).get("ticker"))
-            if has_ticker_meta:
-                event_type = self._keyword_classify(text)
-                # keep "unknown" without calling LLM — main analysis LLM handles direction
+            if self._is_routine_filing_item(item, text):
+                event_type = "sec_filing"
             else:
-                event_type = self._infer_event_type(text)
+                # Skip slow LLM classifier for ticker-tagged items (Finnhub company-news);
+                # the main analysis LLM reads full text to determine direction anyway.
+                has_ticker_meta = bool((item.metadata_json or {}).get("ticker"))
+                if has_ticker_meta:
+                    event_type = self._keyword_classify(text)
+                    # keep "unknown" without calling LLM — main analysis LLM handles direction
+                else:
+                    event_type = self._infer_event_type(text)
             primary_ticker = tickers[0] if tickers else "UNKNOWN"
             bucket = minute_bucket(item.published_at, width_min=30).isoformat()
             key = (primary_ticker, event_type, bucket)

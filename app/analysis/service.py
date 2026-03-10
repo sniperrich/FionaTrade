@@ -23,6 +23,7 @@ class AnalysisService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._llm_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._quality_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         # Finnhub supplemental data cache: key → (data, expire_ts)
         self._fh_cache: dict[str, tuple[Any, float]] = {}
 
@@ -122,6 +123,28 @@ class AnalysisService:
             "POSITION": "LONG",
         }
         return alias.get(key)
+
+    @staticmethod
+    def _normalize_position_pct(parsed: dict[str, Any]) -> float | None:
+        raw = parsed.get("position_pct")
+        if raw is None:
+            raw = parsed.get("position_size_pct")
+        if raw is None:
+            raw = parsed.get("size_pct")
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+
+        if value > 1.0 and value <= 100.0:
+            value = value / 100.0
+        if value < 0.0:
+            return 0.0
+        if value > 1.0:
+            return 1.0
+        return value
 
     def _profile_horizon_min(self, profile: str | None) -> int:
         if profile == "SHORT":
@@ -528,6 +551,7 @@ class AnalysisService:
                 "Output JSON only.",
                 "direction must be exactly one of: UP, DOWN, NEUTRAL.",
                 "Do not output trading actions (BUY/SELL/SHORT/HOLD).",
+                "If direction is UP or DOWN, output position_pct in [0,1] as the fraction of max allowed position to use. Use higher size only on very high-conviction, ticker-specific events. If direction is NEUTRAL, set position_pct to 0.",
                 "THIS IS A SHORT-TERM SIGNAL (next 1-4 hours). Judge the IMMEDIATE price reaction to the news event, NOT the long-term fundamental outlook. A company may be bullish long-term but still drop short-term on bad news.",
                 "Primary signal: news content and event severity. Ask: will this news cause buyers or sellers to act in the next 1-4 hours?",
                 "Use NEUTRAL only when the news is truly routine (e.g. minor analyst note, no surprise) or evidence is contradictory.",
@@ -543,6 +567,7 @@ class AnalysisService:
             "output_schema": {
                 "direction": "UP|DOWN|NEUTRAL",
                 "term": "SHORT|MID|LONG",
+                "position_pct": "float in [0,1]",
                 "ticker": "optional",
                 "rationale": "brief string",
             },
@@ -554,7 +579,8 @@ class AnalysisService:
             "News is the PRIMARY signal. Technical indicators (tech_signal, support_resistance) and "
             "earnings context are SECONDARY tie-breakers only. "
             "Return strict JSON only with keys: "
-            "direction(UP|DOWN|NEUTRAL), term(SHORT|MID|LONG), ticker(optional), rationale(one sentence)."
+            "direction(UP|DOWN|NEUTRAL), term(SHORT|MID|LONG), position_pct(0..1), "
+            "ticker(optional), rationale(one sentence)."
         )
         base_payload = {
             "model": self.settings.llm_model,
@@ -609,6 +635,9 @@ class AnalysisService:
         action = direction_action.get(direction, "HOLD")
 
         horizon_profile = self._normalize_horizon_profile(parsed)
+        position_pct_suggestion = self._normalize_position_pct(parsed)
+        if direction == "NEUTRAL":
+            position_pct_suggestion = 0.0
         horizon_min = self.settings.default_horizon_min
         if self.settings.enable_term_management:
             if horizon_profile:
@@ -638,6 +667,7 @@ class AnalysisService:
             "ticker": ticker,
             "horizon_min": horizon_min,
             "horizon_profile": horizon_profile,
+            "position_pct_suggestion": position_pct_suggestion,
             "reason": reason,
         }
 
@@ -647,6 +677,7 @@ class AnalysisService:
             "ticker": event.tickers[0] if event.tickers else "",
             "horizon_min": self.settings.default_horizon_min,
             "horizon_profile": None,
+            "position_pct_suggestion": None,
             "reason": f"fallback rule for {event.event_type}",
         }
 
@@ -665,6 +696,150 @@ class AnalysisService:
             self.settings.term_mid_horizon_min,
             self.settings.term_long_horizon_min,
         )
+
+    def _quality_cache_key(self, event: Event) -> tuple[Any, ...]:
+        return (
+            event.id,
+            event.event_type,
+            tuple(event.tickers or []),
+            event.severity,
+            event.confidence,
+            (event.summary or "")[:500],
+            self.settings.llm_classifier_model,
+            self.settings.llm_base_url,
+        )
+
+    def assess_event_quality(self, event: Event, session: Session | None = None) -> dict[str, Any]:
+        model = (self.settings.llm_classifier_model or "").strip()
+        if not self.settings.llm_base_url or not model:
+            return {
+                "quality": "UNKNOWN",
+                "quality_score": 0,
+                "reason": "quality_llm_disabled",
+                "model": model,
+                "error": "quality_llm_disabled",
+            }
+
+        cache_key = self._quality_cache_key(event)
+        cached = self._quality_cache.get(cache_key)
+        if cached:
+            return dict(cached)
+
+        evidence_payload = self._build_evidence_payload(session, event)
+        if not evidence_payload:
+            result = {
+                "quality": "LOW",
+                "quality_score": 15,
+                "reason": "no_high_quality_evidence_text",
+                "model": model,
+            }
+            self._quality_cache[cache_key] = dict(result)
+            return result
+
+        prompt = {
+            "task": "Score event quality for short-term event-driven trading.",
+            "event": {
+                "event_id": event.id,
+                "event_time": event.event_time.isoformat() if event.event_time else None,
+                "event_type": event.event_type,
+                "tickers": event.tickers,
+                "severity": event.severity,
+                "confidence": event.confidence,
+                "summary": event.summary,
+            },
+            "evidence": evidence_payload,
+            "rules": [
+                "Focus on execution quality, not direction.",
+                "HIGH: ticker-specific, concrete new information, at least one reliable source, actionable within next 1-4 hours.",
+                "MEDIUM: partially specific or mixed evidence, maybe actionable but uncertain.",
+                "LOW: routine filing, macro round-up, weak evidence, ticker mention-only, stale/duplicate, or contradictory.",
+                "Routine headlines like '<ticker> filed 8-K/10-K/10-Q' without explicit negative/positive surprise should be LOW.",
+                "Output strict JSON only.",
+            ],
+            "output_schema": {
+                "quality": "HIGH|MEDIUM|LOW",
+                "quality_score": "0-100 integer",
+                "reason": "one sentence",
+            },
+        }
+        system = (
+            "You are an event quality gate for an event-driven US equity strategy. "
+            "Judge whether the event has enough specificity and evidence quality to trade. "
+            "Do not predict direction. Return strict JSON."
+        )
+
+        payloads = [
+            {
+                "model": model,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+                ],
+            },
+            {
+                "model": model,
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+                ],
+            },
+        ]
+        endpoint = self._llm_endpoint()
+        headers = self._llm_headers()
+
+        parsed: dict[str, Any] | None = None
+        last_error: Exception | None = None
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                for idx, payload in enumerate(payloads):
+                    try:
+                        resp = client.post(endpoint, json=payload, headers=headers)
+                        if idx == 0 and resp.status_code in {400, 404, 415, 422}:
+                            last_error = ValueError(f"quality model rejected response_format: {resp.status_code}")
+                            continue
+                        resp.raise_for_status()
+                        parsed = self._parse_content_json(self._extract_content(resp.json()))
+                        break
+                    except (httpx.HTTPError, json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
+                        last_error = exc
+                        if idx == 0:
+                            continue
+        except Exception as exc:  # pragma: no cover - defensive
+            last_error = exc
+
+        if not parsed:
+            result = {
+                "quality": "UNKNOWN",
+                "quality_score": 0,
+                "reason": "quality_llm_failed",
+                "model": model,
+                "error": str(last_error) if last_error else "quality_llm_failed",
+            }
+            self._quality_cache[cache_key] = dict(result)
+            return result
+
+        quality = str(parsed.get("quality", "")).strip().upper()
+        if quality not in {"HIGH", "MEDIUM", "LOW"}:
+            quality = "LOW"
+        raw_score = parsed.get("quality_score")
+        try:
+            score = int(raw_score)
+        except (TypeError, ValueError):
+            score = 80 if quality == "HIGH" else 55 if quality == "MEDIUM" else 25
+        score = max(0, min(100, score))
+        reason = str(parsed.get("reason") or "quality_scored").strip() or "quality_scored"
+
+        result = {
+            "quality": quality,
+            "quality_score": score,
+            "reason": reason,
+            "model": model,
+        }
+        self._quality_cache[cache_key] = dict(result)
+        return result
 
     def event_to_signal(self, event: Event, session: Session | None = None) -> TradeSignal | None:
         if not event.tickers:
@@ -709,6 +884,7 @@ class AnalysisService:
             confidence=event.confidence,
             horizon_min=data["horizon_min"],
             horizon_profile=data.get("horizon_profile"),
+            position_pct_suggestion=data.get("position_pct_suggestion"),
             reason=data["reason"],
             expires_at=expires,
             fallback_used=fallback_used,

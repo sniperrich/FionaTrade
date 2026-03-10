@@ -46,7 +46,7 @@ def test_backtest_hard_stop_exit_reason(session, settings):
             ),
             Bar1m(
                 ticker="AAPL",
-                ts=event_time + timedelta(minutes=60),
+                ts=event_time + timedelta(minutes=61),
                 open=120.0,
                 high=120.0,
                 low=120.0,
@@ -111,7 +111,7 @@ def test_backtest_risk_position_sizing(session, settings):
             ),
             Bar1m(
                 ticker="AAPL",
-                ts=event_time + timedelta(minutes=60),
+                ts=event_time + timedelta(minutes=61),
                 open=100.0,
                 high=100.0,
                 low=100.0,

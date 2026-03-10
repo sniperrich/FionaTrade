@@ -104,11 +104,31 @@ def test_backtest_dedup_same_day_event(session, settings):
             ),
             Bar1m(
                 ticker="AAPL",
-                ts=event_time + timedelta(minutes=120),
+                ts=event_time + timedelta(minutes=61),
                 open=101.0,
                 high=101.0,
                 low=100.5,
                 close=101.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=6),
+                open=102.0,
+                high=103.0,
+                low=101.5,
+                close=102.5,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=66),
+                open=103.0,
+                high=103.5,
+                low=102.5,
+                close=103.0,
                 volume=1000.0,
                 source="test",
             ),
@@ -164,7 +184,7 @@ def test_backtest_regime_risk_adjust_multiplier(session, settings):
             ),
             Bar1m(
                 ticker="AAPL",
-                ts=event_time + timedelta(minutes=60),
+                ts=event_time + timedelta(minutes=61),
                 open=100.0,
                 high=101.0,
                 low=99.0,
@@ -228,3 +248,197 @@ def test_backtest_regime_risk_adjust_multiplier(session, settings):
     qty_bull = float(bull_run.trade_log[0]["qty"])
     assert qty_bull > qty_base
     assert bull_run.trade_log[0]["regime"] == "BULL"
+
+
+def test_backtest_exit_anchors_to_entry_time(session, settings):
+    event_time = datetime(2026, 1, 10, 14, 30, tzinfo=timezone.utc)
+    session.add(
+        Event(
+            event_type="buyback",
+            entities=["AAPL"],
+            tickers=["AAPL"],
+            severity=80,
+            event_time=event_time,
+            confidence=80,
+            validation_status="VALID",
+            summary="buyback event",
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=30),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=60),
+                open=95.0,
+                high=96.0,
+                low=94.0,
+                close=95.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=90),
+                open=105.0,
+                high=106.0,
+                low=104.0,
+                close=105.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    result = svc.run(
+        session,
+        params={
+            "start_date": "2026-01-09",
+            "end_date": "2026-01-11",
+            "min_confidence": 70,
+            "horizon_min": 60,
+            "hard_stops": False,
+            "risk_sizing": False,
+            "entry_window_min": 120,
+            "use_signal_validation": False,
+        },
+    )
+    run = svc.get_run(session, result.run_id)
+    assert run is not None
+    assert result.metrics["trades"] == 1
+    assert run.trade_log[0]["exit_ts"].startswith((event_time + timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%S"))
+
+
+def test_backtest_skips_routine_filing_headlines(session, settings):
+    event_time = datetime(2026, 1, 10, 14, 30, tzinfo=timezone.utc)
+    session.add(
+        Event(
+            event_type="regulatory_penalty",
+            entities=["AAPL"],
+            tickers=["AAPL"],
+            severity=90,
+            event_time=event_time,
+            confidence=90,
+            validation_status="VALID",
+            summary="AAPL filed 8-K",
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=1),
+                open=100.0,
+                high=100.5,
+                low=99.5,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=120),
+                open=101.0,
+                high=101.0,
+                low=100.0,
+                close=101.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    result = svc.run(
+        session,
+        params={
+            "start_date": "2026-01-09",
+            "end_date": "2026-01-11",
+            "min_confidence": 70,
+            "horizon_min": 60,
+            "hard_stops": False,
+            "risk_sizing": False,
+            "entry_window_min": 120,
+            "use_signal_validation": False,
+        },
+    )
+    assert result.metrics["trades"] == 0
+    assert result.metrics["routine_filing_skipped"] == 1
+
+
+def test_backtest_quality_filter_blocks_low_score(session, settings):
+    event_time = datetime(2026, 1, 10, 14, 30, tzinfo=timezone.utc)
+    session.add(
+        Event(
+            event_type="policy_shock",
+            entities=["AAPL"],
+            tickers=["AAPL"],
+            severity=80,
+            event_time=event_time,
+            confidence=90,
+            validation_status="VALID",
+            summary="policy shock headline",
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=1),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=120),
+                open=99.0,
+                high=100.0,
+                low=98.0,
+                close=99.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    svc.analysis.assess_event_quality = lambda _event, **_kwargs: {  # noqa: SLF001
+        "quality": "LOW",
+        "quality_score": 20,
+        "reason": "noise",
+        "model": "gemini-3-flash",
+    }
+    result = svc.run(
+        session,
+        params={
+            "start_date": "2026-01-09",
+            "end_date": "2026-01-11",
+            "min_confidence": 70,
+            "horizon_min": 60,
+            "hard_stops": False,
+            "risk_sizing": False,
+            "entry_window_min": 120,
+            "use_signal_validation": False,
+            "use_event_quality_filter": True,
+            "event_quality_min_score": 70,
+        },
+    )
+    assert result.metrics["trades"] == 0
+    assert result.metrics["quality_filtered"] == 1

@@ -120,6 +120,17 @@ class SecClient:
         m = re.search(r"(\d{10}-\d{2}-\d{6})", text)
         return m.group(1) if m else None
 
+    @staticmethod
+    def _parse_published_at(acceptance_datetime: str | None, filing_date: str | None):
+        for raw in (acceptance_datetime, filing_date):
+            if not raw:
+                continue
+            try:
+                return dt_parser.parse(str(raw))
+            except Exception:
+                continue
+        return utc_now()
+
     def _fetch_atom_fallback(
         self, client: httpx.Client, ticker: str, cik: str
     ) -> tuple[list[RawNewsItem], str | None]:
@@ -258,11 +269,12 @@ class SecClient:
                 recent = data.get("filings", {}).get("recent", {})
                 forms = recent.get("form", [])
                 filing_dates = recent.get("filingDate", [])
+                acceptance_datetimes = recent.get("acceptanceDateTime", [])
                 accessions = recent.get("accessionNumber", [])
                 docs = recent.get("primaryDocument", [])
 
-                rows = zip(forms, filing_dates, accessions, docs, strict=False)
-                for form, filing_date, accession, doc in rows:
+                rows = zip(forms, filing_dates, acceptance_datetimes, accessions, docs, strict=False)
+                for form, filing_date, acceptance_datetime, accession, doc in rows:
                     if form not in SUPPORTED_FORMS:
                         continue
                     if not accession:
@@ -271,7 +283,7 @@ class SecClient:
                     archive_cik = cik.lstrip("0") or "0"
                     doc_name = doc or f"{accession}-index.html"
                     filing_url = f"https://www.sec.gov/Archives/edgar/data/{archive_cik}/{accession_plain}/{doc_name}"
-                    published = dt_parser.parse(filing_date) if filing_date else utc_now()
+                    published = self._parse_published_at(acceptance_datetime, filing_date)
                     title = f"{ticker} filed {form}"
 
                     # For material event forms, attempt to fetch actual filing text
@@ -299,6 +311,8 @@ class SecClient:
                                 "cik": cik,
                                 "form": form,
                                 "accession": accession,
+                                "filing_date": filing_date,
+                                "acceptance_datetime": acceptance_datetime,
                             },
                         )
                     )

@@ -48,7 +48,7 @@ def test_backtest_term_horizon_disabled_by_default(session, settings):
             # Better horizon exit.
             Bar1m(
                 ticker="AAPL",
-                ts=event_time + timedelta(minutes=60),
+                ts=event_time + timedelta(minutes=61),
                 open=110.0,
                 high=111.0,
                 low=109.0,

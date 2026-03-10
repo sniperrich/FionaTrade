@@ -45,8 +45,9 @@ WebUI: <http://127.0.0.1:8000>
 ## LLM 架构
 
 - **分类器**：`gemini-3-flash`（仅对 RSS/SEC 非 ticker-tagged 条目做事件类型分类，Finnhub company-news 跳过）
-- **主分析**：`claude-sonnet-4-5`（读全文 + EPS context + 技术信号 + 支撑阻力 + 分析师共识，输出 UP/DOWN/NEUTRAL + 持仓周期）
+- **主分析**：`claude-sonnet-4-5`（读全文 + EPS context + 技术信号 + 支撑阻力 + 分析师共识，输出 UP/DOWN/NEUTRAL + 持仓周期 + 仓位建议）
 - **信号验证**：`SignalValidator`（纯规则，无 LLM 调用）— 主分析完成后对信号做质量审查
+- **事件质量筛选**：可选 `gemini-3-flash` 质量门控（HIGH/MEDIUM/LOW + 0-100 分），用于过滤低质量事件
 - **回测并发**：`ThreadPoolExecutor(workers=8)` 并发预取所有 LLM 信号，再串行执行交易逻辑
 
 ## Signal Validation Layer（信号验证层）
@@ -126,7 +127,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 
 ## 配置说明
 
-- 默认已预置 `LLM_BASE_URL=https://api.duojie.games`、`LLM_MODEL=claude-sonnet-4-6`；如网关要求鉴权请补 `LLM_API_KEY`。
+- 默认已预置 `LLM_BASE_URL=https://api.duojie.games`、`LLM_MODEL=claude-sonnet-4-5`；如网关要求鉴权请补 `LLM_API_KEY`。
 - 未配置 `LLM_BASE_URL` 或 `LLM_MODEL` 时，系统自动使用规则回退分析（不会中断主链路）。
 - Finnhub Basic 订阅需设置 `FINNHUB_API_KEY`，开启 `MARKET_BACKFILL_ALLOW_STOOQ_FALLBACK=false`。
 - SEC 抓取已增加重试和 404 原子订阅回退（ATOM feed）；`SEC_USER_AGENT` 请填写真实邮箱。
@@ -136,10 +137,14 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 回测进场窗口可配置：`entry_window_min`（默认 120 分钟，替代旧版硬编码 60 分钟）。
 - 回测支持同日重复事件去重：`dedup_same_day_event=true` 时，同 `ticker + event_type + day` 仅保留最高 `severity` 事件。
 - 回测支持宏观 regime 仓位调节：`regime_risk_adjust=true` 时，按 SPY 20交易日趋势对 `risk_per_trade_pct` 乘系数（BULL 1.2 / BEAR 0.8，均可参数覆盖）。
+- 回测新增 routine filing 硬过滤：`<ticker> filed 8-K/10-Q/10-K...` 且无实质负面关键词时直接跳过，避免误分类触发交易。
+- 回测出场锚点修复：`planned_exit` 按 `entry_ts + horizon` 计算，不再用 `event_ts + horizon`。
+- 回测支持可选 Gemini 质量筛选：`use_event_quality_filter=true` + `event_quality_min_score=70`，过滤低质量事件。
 - 回测支持 `slippage_bps` 参数，可先用 `0` 做无摩擦诊断；默认滑点已调为 `4 bps`。
 - `MIN_TRADE_CONFIDENCE` 默认调整为 `70`（避免实时链路在 `75` 下几乎全部被过滤）。
 - 已写入短中长线管理（`SHORT/MID/LONG` 周期桶），默认开启：`ENABLE_TERM_MANAGEMENT=true`。
 - 回测默认不启用周期桶：`BACKTEST_ENABLE_TERM_HORIZON=false`（需要时可在回测参数 `enable_term_horizon=true` 打开）。
+- LLM 可输出仓位建议：`position_pct_suggestion`（0~1，表示“最大允许仓位”的比例），执行层始终受硬风控上限钳制。
 - 支持一周网格回测（不跑月度）+ 最小交易数过滤，命令：`python scripts/run_weekly_backtest_grid.py --min-trades 5`。
 - 支持 1m 行情覆盖审计：`python scripts/audit_bar_coverage.py --start-date 2026-01-02 --end-date 2026-01-10`。
 - 支持 LLM 一致性测试（同窗重复 3 次）：`python scripts/run_llm_consistency_check.py --runs 3`。
@@ -155,6 +160,11 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 修复 `AnalysisService` 的 `macro_market_regime` 阈值单位（从 3.0 修正为 3%）。
 - 一键回测脚本 `scripts/run_backtest.py` 新增顶部配置项：`ENTRY_WINDOW_MIN`、`REGIME_RISK_ADJUST`、`DEDUP_SAME_DAY_EVENT`。
 - 新增测试 `tests/test_backtest_handoff_followups.py` 覆盖：进场窗口、同日去重、regime 风险倍率。
+- 回测引擎新增 routine filing 硬过滤（`filed 8-K/10-Q/10-K...` 非实质事件直接跳过），并在 metrics 输出 `routine_filing_skipped`。
+- 回测出场锚点修复：`planned_exit_bar` 由 `event_time + horizon` 改为 `entry_time + horizon`，避免错位出场。
+- `SEC` ingestion 优先使用 `acceptanceDateTime` 写入 `published_at`，减少 `00:00:00` 假时间导致的 entry_late。
+- `TradeSignal` 新增 `position_pct_suggestion`，LLM 可建议 0~1 仓位比例；执行层做硬上限钳制（不突破 max_position/risk cap）。
+- 新增可选 Gemini 质量筛选（`use_event_quality_filter`），低于阈值事件直接过滤，支持 `event_quality_fail_open`。
 
 ### 2026-03-08 (第三批 — Signal Validation Layer)
 - **新增 `app/analysis/signal_validator.py`**：Signal Validation Layer，纯规则、无 LLM、同步执行。输出 `SignalValidationResult`（8维评估 + `review_score` + `execution_recommendation`）。

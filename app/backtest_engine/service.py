@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -30,6 +31,31 @@ class BacktestResult:
 
 
 class BacktestEngineService:
+    _ROUTINE_FILING_RE = re.compile(
+        r"\bfiled\s+(?:form\s+)?(?:8-k|10-k|10-q|6-k|13d|13g|sc\s*13d|sc\s*13g)\b",
+        re.IGNORECASE,
+    )
+    _MATERIAL_FILING_MARKERS = (
+        "restatement",
+        "material weakness",
+        "internal control",
+        "bankrupt",
+        "chapter 11",
+        "investigation",
+        "sec charge",
+        "doj",
+        "fraud",
+        "guidance cut",
+        "lowered outlook",
+        "earnings miss",
+        "missed estimates",
+        "major litigation",
+        "class action",
+        "accident",
+        "explosion",
+        "fire",
+    )
+
     def __init__(self, settings: Settings):
         self.settings = settings
         ensure_logging(log_dir=settings.log_dir, log_level=settings.log_level)
@@ -96,19 +122,37 @@ class BacktestEngineService:
         stop_loss_pct: float,
         risk_per_trade_pct: float,
         risk_sizing: bool,
+        position_pct_suggestion: float | None = None,
     ) -> float:
         if nav <= 0:
             return 0.0
 
         cap_notional = nav * self.settings.max_position_pct
         qty_cap = cap_notional / max(entry_px, 0.01)
-        if not risk_sizing:
-            return max(qty_cap, 0.0)
+        qty_limits = [qty_cap]
 
-        risk_budget = nav * max(risk_per_trade_pct, 0.0)
-        risk_per_share = max(entry_px * max(stop_loss_pct, 0.0001), 0.01)
-        qty_risk = risk_budget / risk_per_share
-        return max(min(qty_cap, qty_risk), 0.0)
+        if risk_sizing:
+            risk_budget = nav * max(risk_per_trade_pct, 0.0)
+            risk_per_share = max(entry_px * max(stop_loss_pct, 0.0001), 0.01)
+            qty_risk = risk_budget / risk_per_share
+            qty_limits.append(qty_risk)
+
+        if position_pct_suggestion is not None:
+            suggested = max(0.0, min(1.0, float(position_pct_suggestion)))
+            suggested_notional = cap_notional * suggested
+            qty_limits.append(suggested_notional / max(entry_px, 0.01))
+
+        return max(min(qty_limits), 0.0)
+
+    def _is_routine_filing_event(self, event: Event) -> bool:
+        summary = (event.summary or "").lower()
+        if not summary:
+            return False
+        if not self._ROUTINE_FILING_RE.search(summary):
+            return False
+        if any(marker in summary for marker in self._MATERIAL_FILING_MARKERS):
+            return False
+        return True
 
     def _market_regime_for_event(self, session: Session, event_ts: datetime) -> tuple[str, float | None]:
         """Infer broad market regime from SPY return over ~20 trading days."""
@@ -307,6 +351,17 @@ class BacktestEngineService:
             params.get("enable_term_horizon"),
             default=self.settings.backtest_enable_term_horizon,
         )
+        use_event_quality_filter = self._as_bool(
+            params.get("use_event_quality_filter"),
+            default=self.settings.backtest_use_event_quality_filter,
+        )
+        event_quality_min_score = int(
+            params.get("event_quality_min_score", self.settings.backtest_event_quality_min_score)
+        )
+        event_quality_fail_open = self._as_bool(
+            params.get("event_quality_fail_open"),
+            default=self.settings.backtest_event_quality_fail_open,
+        )
         # Signal Validation Layer: on by default when validation_enabled=True in settings
         use_signal_validation = self._as_bool(
             params.get("use_signal_validation"),
@@ -383,6 +438,9 @@ class BacktestEngineService:
                 "slippage_bps": slippage_bps,
                 "daily_circuit_breaker": daily_circuit_breaker,
                 "enable_term_horizon": enable_term_horizon,
+                "use_event_quality_filter": use_event_quality_filter,
+                "event_quality_min_score": event_quality_min_score,
+                "event_quality_fail_open": event_quality_fail_open,
             },
         )
 
@@ -399,6 +457,9 @@ class BacktestEngineService:
         regime_trade_counts: dict[str, int] = {}
         daily_halts = 0
         halted_events_skipped = 0
+        routine_filing_skipped = 0
+        quality_filtered = 0
+        quality_filter_errors = 0
 
         current_day: date | None = None
         day_start_equity = equity
@@ -461,6 +522,7 @@ class BacktestEngineService:
                 e for e in events
                 if e.tickers and e.event_type not in EXCLUDED_FROM_TRADING
                 and (min_severity == 0 or (e.severity or 0) >= min_severity)
+                and not self._is_routine_filing_event(e)
                 and not any(p in (e.summary or "").lower() for p in _MACRO_NOISE_PREFETCH)
             ]
             # Step 1: 预热 Finnhub 补充数据 cache（串行，避免 429）
@@ -557,6 +619,11 @@ class BacktestEngineService:
                 emit_progress(idx)
                 continue
 
+            if self._is_routine_filing_event(event):
+                routine_filing_skipped += 1
+                emit_progress(idx)
+                continue
+
             # Event strength filter: skip weak single-source events below severity threshold
             if min_severity > 0 and (event.severity or 0) < min_severity:
                 emit_progress(idx)
@@ -580,6 +647,7 @@ class BacktestEngineService:
             ticker = event.tickers[0]
             local_horizon_min = horizon_min
             fallback_used = False
+            position_pct_suggestion: float | None = None
 
             if use_llm:
                 signal = signal_map.get(event.id)
@@ -592,6 +660,7 @@ class BacktestEngineService:
                     llm_fallback_signals += 1
                 action = signal.action
                 ticker = signal.ticker or ticker
+                position_pct_suggestion = signal.position_pct_suggestion
                 if use_signal_horizon and signal.horizon_min > 0:
                     if signal.horizon_profile and not enable_term_horizon:
                         local_horizon_min = horizon_min
@@ -599,6 +668,19 @@ class BacktestEngineService:
                         local_horizon_min = int(signal.horizon_min)
             else:
                 action = fallback_action(event.event_type)
+
+            if use_event_quality_filter:
+                quality = self.analysis.assess_event_quality(event, session=session)
+                quality_error = bool(quality.get("error"))
+                if quality_error:
+                    quality_filter_errors += 1
+
+                if not (quality_error and event_quality_fail_open):
+                    quality_score = int(quality.get("quality_score", 0))
+                    if quality_score < event_quality_min_score:
+                        quality_filtered += 1
+                        emit_progress(idx)
+                        continue
 
             if action == "HOLD":
                 emit_progress(idx)
@@ -640,7 +722,8 @@ class BacktestEngineService:
             if not entry_bar or ensure_utc(entry_bar.ts) > event_ts + timedelta(minutes=entry_window_min):
                 emit_progress(idx)
                 continue
-            planned_exit_bar = self._bar_at_or_after(session, ticker, event_ts + timedelta(minutes=local_horizon_min))
+            planned_exit_ts = ensure_utc(entry_bar.ts) + timedelta(minutes=local_horizon_min)
+            planned_exit_bar = self._bar_at_or_after(session, ticker, planned_exit_ts)
             if not planned_exit_bar:
                 emit_progress(idx)
                 continue
@@ -666,6 +749,7 @@ class BacktestEngineService:
                 stop_loss_pct=stop_loss_pct,
                 risk_per_trade_pct=effective_risk_per_trade_pct,
                 risk_sizing=risk_sizing,
+                position_pct_suggestion=position_pct_suggestion,
             )
             if qty <= 0:
                 emit_progress(idx)
@@ -728,6 +812,7 @@ class BacktestEngineService:
                 "horizon_min": local_horizon_min,
                 "holding_min": holding_min,
                 "fallback_used": fallback_used,
+                "position_pct_suggestion": position_pct_suggestion,
                 "exit_reason": exit_reason,
             }
             trade_log.append(trade_entry)
@@ -785,6 +870,12 @@ class BacktestEngineService:
         metrics["enable_term_horizon"] = enable_term_horizon
         metrics["validation_enabled"] = use_signal_validation
         metrics["validation_blocked"] = validation_blocked
+        metrics["routine_filing_skipped"] = routine_filing_skipped
+        metrics["use_event_quality_filter"] = use_event_quality_filter
+        metrics["event_quality_min_score"] = event_quality_min_score
+        metrics["event_quality_fail_open"] = event_quality_fail_open
+        metrics["quality_filtered"] = quality_filtered
+        metrics["quality_filter_errors"] = quality_filter_errors
 
         run.metrics = metrics
         run.equity_curve = equity_curve
