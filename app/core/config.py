@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
     llm_classifier_model: str = "gemini-3-flash"
+    llm_timeout_seconds: float = 30.0
+    llm_max_retries: int = 3
+    llm_retry_backoff_seconds: float = 1.5
+    llm_retry_backoff_multiplier: float = 1.8
+    llm_retry_max_delay_seconds: float = 12.0
     enable_term_management: bool = True
     term_short_horizon_min: int = 60
     term_mid_horizon_min: int = 240

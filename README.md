@@ -128,6 +128,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 ## 配置说明
 
 - 默认已预置 `LLM_BASE_URL=https://api.duojie.games`、`LLM_MODEL=claude-sonnet-4-5`；如网关要求鉴权请补 `LLM_API_KEY`。
+- 网关调优参数（建议先保守）：`LLM_TIMEOUT_SECONDS=30`、`LLM_MAX_RETRIES=3`、`LLM_RETRY_BACKOFF_SECONDS=1.5`、`LLM_RETRY_BACKOFF_MULTIPLIER=1.8`、`LLM_RETRY_MAX_DELAY_SECONDS=12`。
 - 未配置 `LLM_BASE_URL` 或 `LLM_MODEL` 时，系统自动使用规则回退分析（不会中断主链路）。
 - Finnhub Basic 订阅需设置 `FINNHUB_API_KEY`，开启 `MARKET_BACKFILL_ALLOW_STOOQ_FALLBACK=false`。
 - SEC 抓取已增加重试和 404 原子订阅回退（ATOM feed）；`SEC_USER_AGENT` 请填写真实邮箱。
@@ -165,6 +166,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - `SEC` ingestion 优先使用 `acceptanceDateTime` 写入 `published_at`，减少 `00:00:00` 假时间导致的 entry_late。
 - `TradeSignal` 新增 `position_pct_suggestion`，LLM 可建议 0~1 仓位比例；执行层做硬上限钳制（不突破 max_position/risk cap）。
 - 新增可选 Gemini 质量筛选（`use_event_quality_filter`），低于阈值事件直接过滤，支持 `event_quality_fail_open`。
+- LLM 网关重试改为配置化参数（超时/重试/指数退避），`event_to_signal` 会按配置自动退避重试，降低 429/502 造成的全量 fallback。
 
 ### 2026-03-08 (第三批 — Signal Validation Layer)
 - **新增 `app/analysis/signal_validator.py`**：Signal Validation Layer，纯规则、无 LLM、同步执行。输出 `SignalValidationResult`（8维评估 + `review_score` + `execution_recommendation`）。

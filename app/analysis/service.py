@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -17,6 +18,7 @@ from app.schemas.types import TradeSignal
 
 _FINNHUB_BASE = "https://finnhub.io/api/v1"
 _FINNHUB_CACHE_TTL_S = 3600  # 1 hour cache for Finnhub supplemental data
+_RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
 class AnalysisService:
@@ -29,6 +31,13 @@ class AnalysisService:
 
     def _llm_enabled(self) -> bool:
         return bool(self.settings.llm_base_url and self.settings.llm_model)
+
+    def _llm_retry_delay(self, attempt: int) -> float:
+        base = max(0.0, float(getattr(self.settings, "llm_retry_backoff_seconds", 1.5)))
+        multiplier = max(1.0, float(getattr(self.settings, "llm_retry_backoff_multiplier", 1.8)))
+        cap = max(0.0, float(getattr(self.settings, "llm_retry_max_delay_seconds", 12.0)))
+        delay = base * (multiplier ** max(0, attempt))
+        return min(delay, cap) if cap > 0 else delay
 
     def _llm_endpoint(self) -> str:
         base = self.settings.llm_base_url.strip()
@@ -598,7 +607,8 @@ class AnalysisService:
         endpoint = self._llm_endpoint()
         last_error: Exception | None = None
 
-        with httpx.Client(timeout=20.0) as client:
+        llm_timeout = max(5.0, float(getattr(self.settings, "llm_timeout_seconds", 30.0)))
+        with httpx.Client(timeout=llm_timeout) as client:
             for idx, payload in enumerate(payloads):
                 try:
                     response = client.post(
@@ -610,6 +620,8 @@ class AnalysisService:
                     if idx == 0 and response.status_code in {400, 404, 415, 422}:
                         last_error = ValueError(f"LLM gateway rejected response_format: {response.status_code}")
                         continue
+                    if response.status_code in _RETRYABLE_HTTP_STATUS:
+                        response.raise_for_status()
                     response.raise_for_status()
                     body = response.json()
                     content = self._extract_content(body)
@@ -793,20 +805,31 @@ class AnalysisService:
         parsed: dict[str, Any] | None = None
         last_error: Exception | None = None
         try:
-            with httpx.Client(timeout=20.0) as client:
+            llm_timeout = max(5.0, float(getattr(self.settings, "llm_timeout_seconds", 30.0)))
+            with httpx.Client(timeout=llm_timeout) as client:
+                max_retries = max(1, int(getattr(self.settings, "llm_max_retries", 3)))
                 for idx, payload in enumerate(payloads):
-                    try:
-                        resp = client.post(endpoint, json=payload, headers=headers)
-                        if idx == 0 and resp.status_code in {400, 404, 415, 422}:
-                            last_error = ValueError(f"quality model rejected response_format: {resp.status_code}")
-                            continue
-                        resp.raise_for_status()
-                        parsed = self._parse_content_json(self._extract_content(resp.json()))
+                    for attempt in range(max_retries):
+                        try:
+                            resp = client.post(endpoint, json=payload, headers=headers)
+                            if idx == 0 and resp.status_code in {400, 404, 415, 422}:
+                                last_error = ValueError(f"quality model rejected response_format: {resp.status_code}")
+                                break
+                            if resp.status_code in _RETRYABLE_HTTP_STATUS:
+                                resp.raise_for_status()
+                            resp.raise_for_status()
+                            parsed = self._parse_content_json(self._extract_content(resp.json()))
+                            break
+                        except (httpx.HTTPError, json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
+                            last_error = exc
+                            if attempt < max_retries - 1:
+                                time.sleep(self._llm_retry_delay(attempt))
+                                continue
+                            break
+                    if parsed:
                         break
-                    except (httpx.HTTPError, json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
-                        last_error = exc
-                        if idx == 0:
-                            continue
+                    if idx == 0:
+                        continue
         except Exception as exc:  # pragma: no cover - defensive
             last_error = exc
 
@@ -856,7 +879,8 @@ class AnalysisService:
             if cached:
                 data = dict(cached)
                 success = True
-            for _ in range(3):
+            max_retries = max(1, int(getattr(self.settings, "llm_max_retries", 3)))
+            for attempt in range(max_retries):
                 if success:
                     break
                 try:
@@ -868,6 +892,8 @@ class AnalysisService:
                     self._llm_cache[cache_key] = dict(data)
                     break
                 except Exception:
+                    if attempt < max_retries - 1:
+                        time.sleep(self._llm_retry_delay(attempt))
                     continue
             if not success:
                 data = self._fallback(event)
