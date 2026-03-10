@@ -84,6 +84,7 @@ def test_backtest_term_horizon_disabled_by_default(session, settings):
             "enable_term_horizon": False,
             "hard_stops": False,
             "risk_sizing": False,
+            "use_signal_validation": False,  # disable: test exercises horizon mechanics only
         },
     )
 
@@ -99,6 +100,7 @@ def test_backtest_term_horizon_disabled_by_default(session, settings):
             "enable_term_horizon": True,
             "hard_stops": False,
             "risk_sizing": False,
+            "use_signal_validation": False,  # disable: test exercises horizon mechanics only
         },
     )
 

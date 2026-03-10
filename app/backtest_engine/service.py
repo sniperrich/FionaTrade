@@ -12,6 +12,10 @@ from sqlalchemy.orm import Session
 
 from app.analysis.service import AnalysisService
 from app.analysis.rules_fallback import fallback_action
+from app.analysis.signal_validator import (
+    ExecutionRecommendation,
+    SignalValidator,
+)
 from app.core.config import Settings
 from app.core.logging import ensure_logging, get_app_logger, log_writeout
 from app.core.utils import ensure_utc, utc_now
@@ -30,6 +34,7 @@ class BacktestEngineService:
         self.settings = settings
         ensure_logging(log_dir=settings.log_dir, log_level=settings.log_level)
         self.analysis = AnalysisService(settings)
+        self.validator = SignalValidator(settings)
         self.logger = get_app_logger()
 
     @staticmethod
@@ -204,6 +209,7 @@ class BacktestEngineService:
         params = params or {}
         horizon_min = int(params.get("horizon_min", self.settings.default_horizon_min))
         min_conf = int(params.get("min_confidence", self.settings.min_trade_confidence))
+        min_severity = int(params.get("min_severity", 0))  # 0 = no filter; 70 = strong events only
         use_llm = self._as_bool(params.get("use_llm"), default=False)
         use_signal_horizon = self._as_bool(params.get("use_signal_horizon"), default=True)
         progress_every = int(params.get("progress_every", 10))
@@ -224,6 +230,19 @@ class BacktestEngineService:
         enable_term_horizon = self._as_bool(
             params.get("enable_term_horizon"),
             default=self.settings.backtest_enable_term_horizon,
+        )
+        # Signal Validation Layer: on by default when validation_enabled=True in settings
+        use_signal_validation = self._as_bool(
+            params.get("use_signal_validation"),
+            default=getattr(self.settings, "validation_enabled", True),
+        )
+        validation_min_score = int(
+            params.get("validation_min_review_score",
+                       getattr(self.settings, "validation_min_review_score", 40))
+        )
+        allow_downweight = self._as_bool(
+            params.get("validation_allow_downweight_execution"),
+            default=getattr(self.settings, "validation_allow_downweight_execution", True),
         )
 
         start_date = params.get("start_date")
@@ -287,6 +306,7 @@ class BacktestEngineService:
         source_attr: dict[str, float] = {}
         llm_signals = 0
         llm_fallback_signals = 0
+        validation_blocked = 0
         exit_reason_counts: dict[str, int] = {}
         daily_halts = 0
         halted_events_skipped = 0
@@ -339,9 +359,20 @@ class BacktestEngineService:
         signal_map: dict[int, object] = {}  # event.id → TradeSignal | None
         from app.analysis.taxonomy import EXCLUDED_FROM_TRADING
         if use_llm and total_events > 0:
+            _MACRO_NOISE_PREFETCH = (
+                "government shutdown", "stock market today", "market movers",
+                "wall street lunch", "s&p 500", "dow jones futures",
+                "market summary", "early movers", "morning movers",
+                "ftse 100", "equity indexes", "equity futures",
+                "hits new high", "hits all-time high", "worth a look",
+                "markets look past", "look past shutdown", "no government",
+                "bitcoin price", "crypto", "jobs report",
+            )
             tradeable_events = [
                 e for e in events
                 if e.tickers and e.event_type not in EXCLUDED_FROM_TRADING
+                and (min_severity == 0 or (e.severity or 0) >= min_severity)
+                and not any(p in (e.summary or "").lower() for p in _MACRO_NOISE_PREFETCH)
             ]
             # Step 1: 预热 Finnhub 补充数据 cache（串行，避免 429）
             unique_tickers = list({str(e.tickers[0]).upper() for e in tradeable_events if e.tickers})
@@ -353,6 +384,7 @@ class BacktestEngineService:
                 self.analysis._finnhub_earnings_context(tk)
                 self.analysis._finnhub_tech_signal(tk)
                 self.analysis._finnhub_support_resistance(tk, None)
+                self.analysis._finnhub_analyst_consensus(tk)
                 if (i + 1) % 10 == 0 or (i + 1) == len(unique_tickers):
                     self.logger.info("Finnhub cache预热 %d/%d", i + 1, len(unique_tickers))
 
@@ -436,6 +468,26 @@ class BacktestEngineService:
                 emit_progress(idx)
                 continue
 
+            # Event strength filter: skip weak single-source events below severity threshold
+            if min_severity > 0 and (event.severity or 0) < min_severity:
+                emit_progress(idx)
+                continue
+
+            # Summary noise filter: skip broad market-round-up events (no ticker-specific signal)
+            _summary_lower = (event.summary or "").lower()
+            _MACRO_NOISE = (
+                "government shutdown", "stock market today", "market movers",
+                "wall street lunch", "s&p 500", "dow jones futures",
+                "market summary", "early movers", "morning movers",
+                "ftse 100", "equity indexes", "equity futures",
+                "hits new high", "hits all-time high", "worth a look",
+                "markets look past", "look past shutdown", "no government",
+                "bitcoin price", "crypto", "jobs report",
+            )
+            if any(phrase in _summary_lower for phrase in _MACRO_NOISE):
+                emit_progress(idx)
+                continue
+
             ticker = event.tickers[0]
             local_horizon_min = horizon_min
             fallback_used = False
@@ -463,9 +515,44 @@ class BacktestEngineService:
                 emit_progress(idx)
                 continue
 
+            # ── Signal Validation Gate ────────────────────────────────────────
+            if use_signal_validation and use_llm:
+                _sig = signal_map.get(event.id)
+                if _sig is not None:
+                    _vr = self.validator.validate(
+                        event=event,
+                        signal=_sig,
+                        price_context=None,
+                        reference_time=ensure_utc(event.event_time),
+                    )
+                    _blocked = (
+                        _vr.execution_recommendation
+                        in (ExecutionRecommendation.REJECT, ExecutionRecommendation.NO_TRADE)
+                        or _vr.review_score < validation_min_score
+                        or (
+                            _vr.execution_recommendation == ExecutionRecommendation.DOWNWEIGHT
+                            and not allow_downweight
+                        )
+                    )
+                    if _blocked:
+                        validation_blocked += 1
+                        self.logger.debug(
+                            "validation_blocked ticker=%s score=%s rec=%s tags=%s",
+                            _sig.ticker, _vr.review_score,
+                            _vr.execution_recommendation.value,
+                            _vr.issue_tags,
+                        )
+                        emit_progress(idx)
+                        continue
+            # ─────────────────────────────────────────────────────────────────
+
             entry_bar = self._bar_at_or_after(session, ticker, event_ts + timedelta(minutes=1))
+            # Skip if no bar within 60 min of event — means no market data for this period
+            if not entry_bar or ensure_utc(entry_bar.ts) > event_ts + timedelta(minutes=60):
+                emit_progress(idx)
+                continue
             planned_exit_bar = self._bar_at_or_after(session, ticker, event_ts + timedelta(minutes=local_horizon_min))
-            if not entry_bar or not planned_exit_bar:
+            if not planned_exit_bar:
                 emit_progress(idx)
                 continue
 
@@ -583,6 +670,8 @@ class BacktestEngineService:
         metrics["daily_halts"] = daily_halts
         metrics["halted_events_skipped"] = halted_events_skipped
         metrics["enable_term_horizon"] = enable_term_horizon
+        metrics["validation_enabled"] = use_signal_validation
+        metrics["validation_blocked"] = validation_blocked
 
         run.metrics = metrics
         run.equity_curve = equity_curve

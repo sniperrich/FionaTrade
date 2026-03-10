@@ -7,10 +7,10 @@ EVENT_KEYWORDS = {
     "guidance_cut": ["guidance cut", "lowered outlook", "cuts forecast", "warned"],
     "regulatory_penalty": ["fine", "penalty", "sec charge", "doj", "settlement"],
     "major_litigation": ["lawsuit", "litigation", "class action", "court ruling"],
-    "merger_acquisition": ["acquire", "acquisition", "merger", "takeover", "deal"],
+    "merger_acquisition": ["acquire", "acquisition", "merger", "takeover", "buyout", "acquires"],
     "buyback": ["buyback", "repurchase", "share repurchase"],
     "layoff": ["layoff", "job cuts", "workforce reduction"],
-    "supply_chain_disruption": ["supply chain", "disruption", "shutdown", "delay"],
+    "supply_chain_disruption": ["supply chain", "supply-chain", "disruption", "plant shutdown", "factory shutdown", "port shutdown", "production halt", "delay"],
     "accident_disaster": ["fire", "explosion", "accident", "outage", "earthquake"],
     "policy_shock": ["tariff", "sanction", "ban", "policy shock", "executive order"],
     "sec_filing": ["filed 10-k", "filed 10-q", "filed 8-k", "filed 6-k", "filed 13d", "filed 13g", "annual report", "quarterly report"],
@@ -32,7 +32,9 @@ NEGATIVE_EVENTS = {
 
 # sec_filing: routine filings, no directional edge
 # unknown: unclassified news (mostly generic Finnhub company-news), too noisy
-EXCLUDED_FROM_TRADING = {"sec_filing", "unknown"}
+# supply_chain_disruption: taxonomy too broad; catches government shutdown / general macro articles
+# guidance_cut: keyword "warned" too loose; catches unrelated warnings; body usually too short to trade
+EXCLUDED_FROM_TRADING = {"sec_filing", "unknown", "supply_chain_disruption", "guidance_cut"}
 
 SOURCE_TIER = {
     "sec": 0,

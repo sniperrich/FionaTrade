@@ -67,6 +67,7 @@ def test_backtest_use_llm_mode(session, settings):
             "min_confidence": 70,
             "use_llm": True,
             "use_signal_horizon": True,
+            "use_signal_validation": False,  # disable validation: test exercises backtest mechanics only
         },
     )
 

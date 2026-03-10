@@ -167,6 +167,14 @@ class AnalysisService:
             return "DOWN"
         return "NEUTRAL"
 
+    # Headline patterns that indicate generic market-round-up articles with no directional signal
+    _NOISE_TITLE_PATTERNS = re.compile(
+        r"\b(trending tickers|market movers|early movers|morning movers|benzinga market summary"
+        r"|top stocks|stocks to watch|notable calls|analyst upgrade|analyst downgrade"
+        r"|should you invest|is .{3,40} a (good|bad)|investors could be concerned)\b",
+        re.IGNORECASE,
+    )
+
     def _build_evidence_payload(self, session: Session | None, event: Event) -> list[dict[str, Any]]:
         if session is None or event.id is None:
             return []
@@ -175,7 +183,7 @@ class AnalysisService:
             select(EventEvidence, RawItem)
             .join(RawItem, RawItem.id == EventEvidence.raw_item_id, isouter=True)
             .where(EventEvidence.event_id == event.id)
-            .order_by(EventEvidence.id.asc())
+            .order_by(EventEvidence.source_tier.asc(), EventEvidence.id.asc())  # best sources first
             .limit(8)
         ).all()
 
@@ -191,6 +199,15 @@ class AnalysisService:
             if not full_text:
                 full_text = title.strip()
             if not full_text:
+                continue
+
+            # Quality filter: skip very short articles (market summaries, ticker-mention-only entries)
+            # A <200 char body rarely contains enough specific information for directional signal.
+            if len(full_text) < 200:
+                continue
+
+            # Skip generic market-round-up headlines (no directional signal)
+            if title and self._NOISE_TITLE_PATTERNS.search(title):
                 continue
 
             original_len = len(full_text)
@@ -297,6 +314,38 @@ class AnalysisService:
             "trending": trend.get("trending"),
         }
 
+    def _finnhub_analyst_consensus(self, ticker: str) -> dict | None:
+        """Get analyst recommendation trend from Finnhub (last 2 periods)."""
+        data = self._fh_get("/stock/recommendation", {"symbol": ticker})
+        if not data or not isinstance(data, list) or not data:
+            return None
+        # Sort by period descending (most recent first)
+        data_sorted = sorted(data, key=lambda x: x.get("period", ""), reverse=True)
+        latest = data_sorted[0]
+        strong_buy = latest.get("strongBuy", 0)
+        buy = latest.get("buy", 0)
+        hold = latest.get("hold", 0)
+        sell = latest.get("sell", 0)
+        strong_sell = latest.get("strongSell", 0)
+        total = strong_buy + buy + hold + sell + strong_sell
+        if total == 0:
+            return None
+        bullish = strong_buy + buy
+        bearish = sell + strong_sell
+        score = (bullish - bearish) / total  # range -1 to +1
+        result = {
+            "period": latest.get("period"),
+            "strong_buy": strong_buy,
+            "buy": buy,
+            "hold": hold,
+            "sell": sell,
+            "strong_sell": strong_sell,
+            "total_analysts": total,
+            "consensus_score": round(score, 3),  # >0 bullish, <0 bearish
+            "consensus": "BULLISH" if score > 0.2 else "BEARISH" if score < -0.2 else "NEUTRAL",
+        }
+        return result
+
     def _finnhub_support_resistance(self, ticker: str, current_price: float | None) -> dict | None:
         """Get support/resistance levels and proximity to current price."""
         data = self._fh_get("/scan/support-resistance", {"symbol": ticker, "resolution": "D"})
@@ -383,6 +432,7 @@ class AnalysisService:
         earnings_ctx = self._finnhub_earnings_context(ticker)
         tech_signal = self._finnhub_tech_signal(ticker)
         sr_levels = self._finnhub_support_resistance(ticker, current_price)
+        analyst_consensus = self._finnhub_analyst_consensus(ticker)
 
         features: dict[str, Any] = {
             "ticker": ticker,
@@ -418,6 +468,8 @@ class AnalysisService:
             features["tech_signal"] = tech_signal
         if sr_levels:
             features["support_resistance"] = sr_levels
+        if analyst_consensus:
+            features["analyst_consensus"] = analyst_consensus
         return features
 
     def _llm_extract(self, event: Event, session: Session | None = None) -> dict:
@@ -441,6 +493,8 @@ class AnalysisService:
             "market_features": market_features,
             "evidence": evidence_payload,
             "rules": [
+                "RELEVANCE CHECK (do this first): Before predicting direction, verify the articles are actually about a company-specific event for the named ticker(s). If the articles are about macro/broad-market topics (central bank policy, government shutdown, broad sector ETFs, another company entirely) with only a passing mention of the ticker, output NEUTRAL with rationale 'article_not_ticker_specific'.",
+                "MERGER/ACQUISITION RULE: If event_type is 'merger_acquisition' and the ticker is the TARGET (being acquired), direction is almost always UP (acquisition premium). Only choose DOWN if the ticker is the ACQUIRER paying a very high premium with clear negative market reaction evidence.",
                 "Output JSON only.",
                 "direction must be exactly one of: UP, DOWN, NEUTRAL.",
                 "Do not output trading actions (BUY/SELL/SHORT/HOLD).",
@@ -452,6 +506,7 @@ class AnalysisService:
                 "  - relative_strength_vs_spy_pct: if ticker is already outperforming SPY today, UP news has more momentum",
                 "  - earnings_context: positive surprise_pct supports UP, negative supports DOWN",
                 "  - support_resistance: price within 1% of resistance reduces upside; within 1% of support reduces downside",
+                "  - analyst_consensus: BULLISH (consensus_score>0.2) is a mild UP tailwind; BEARISH is a mild DOWN tailwind — but NEVER override a strong news signal",
                 "Do NOT let long-term bullish fundamentals override a clearly negative short-term news event.",
             ],
             "output_schema": {

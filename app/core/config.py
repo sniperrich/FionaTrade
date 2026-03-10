@@ -58,6 +58,21 @@ class Settings(BaseSettings):
 
     min_trade_confidence: int = 70
 
+    # ── Signal Validation Layer ───────────────────────────────────────────────
+    validation_enabled: bool = True
+    # Minimum review_score to allow execution (0–100). Signals below this are REJECTED.
+    validation_min_review_score: int = 40
+    # Block execution when novelty == STALE
+    validation_reject_on_stale: bool = True
+    # Block execution when novelty == DUPLICATE
+    validation_reject_on_duplicate: bool = True
+    # Price-move threshold: if ticker moved > this % since event_time, flag priced-in risk HIGH
+    validation_price_move_threshold_pct: float = 3.0
+    # When recommendation is DOWNWEIGHT, still allow execution (just flag it)
+    validation_allow_downweight_execution: bool = True
+    # Staleness: news older than this many minutes is flagged STALE
+    validation_stale_minutes: int = 120
+
     sec_poller_limit: int = 100
     rss_sources: list[str] = Field(
         default_factory=lambda: [
