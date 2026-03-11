@@ -151,6 +151,28 @@ class Bar1m(Base):
     source: Mapped[str] = mapped_column(String(64), default="finnhub")
 
 
+class EarningsCalendar(Base):
+    __tablename__ = "earnings_calendar"
+    __table_args__ = (
+        UniqueConstraint("symbol", "report_date", "quarter", "fiscal_year", name="uq_earnings_calendar_symbol_date_qy"),
+        Index("ix_earnings_calendar_symbol_report_date", "symbol", "report_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    report_date: Mapped[datetime] = mapped_column(DateTime, index=True)
+    report_hour: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    quarter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fiscal_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    eps_actual: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_actual: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), default="finnhub")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class BacktestRun(Base):
     __tablename__ = "backtest_runs"
 

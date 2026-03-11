@@ -17,7 +17,7 @@ class PipelineOrchestrator:
         self.settings = settings
         self.ingestion = IngestionService(settings)
         self.normalization = NormalizationService(settings)
-        self.validation = ValidationService()
+        self.validation = ValidationService(settings.validation_corroboration_window_minutes)
         self.signal_engine = SignalEngineService(settings)
         self.paper_engine = PaperEngineService(settings)
 

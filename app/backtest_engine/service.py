@@ -738,16 +738,22 @@ class BacktestEngineService:
                 and (not use_tradeability_filter or bool((tradeability_result(e) or {}).get("tradeable", True)))
             ]
             # Step 1: 预热 Finnhub 补充数据 cache（串行，避免 429）
-            unique_tickers = list({str(e.tickers[0]).upper() for e in tradeable_events if e.tickers})
+            earliest_event_by_ticker: dict[str, datetime] = {}
+            for event in tradeable_events:
+                if not event.tickers:
+                    continue
+                ticker_key = str(event.tickers[0]).upper()
+                event_ts = ensure_utc(event.event_time)
+                current = earliest_event_by_ticker.get(ticker_key)
+                if current is None or event_ts < current:
+                    earliest_event_by_ticker[ticker_key] = event_ts
+            unique_tickers = list(earliest_event_by_ticker.keys())
             self.logger.info(
                 "预热Finnhub cache run_id=%s unique_tickers=%d",
                 run.id, len(unique_tickers),
             )
             for i, tk in enumerate(unique_tickers):
-                self.analysis._finnhub_earnings_context(tk)
-                self.analysis._finnhub_tech_signal(tk)
-                self.analysis._finnhub_support_resistance(tk, None)
-                self.analysis._finnhub_analyst_consensus(tk)
+                self.analysis._finnhub_earnings_context(tk, event_ts=earliest_event_by_ticker[tk])
                 if (i + 1) % 10 == 0 or (i + 1) == len(unique_tickers):
                     self.logger.info("Finnhub cache预热 %d/%d", i + 1, len(unique_tickers))
 

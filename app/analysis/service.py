@@ -14,7 +14,7 @@ from app.analysis.rules_fallback import fallback_action
 from app.analysis.taxonomy import resolve_event_type_for_text
 from app.core.config import Settings
 from app.core.utils import ensure_utc, utc_now
-from app.db.models import Bar1m, Event, EventEvidence, RawItem
+from app.db.models import Bar1m, EarningsCalendar, Event, EventEvidence, RawItem
 from app.schemas.types import TradeSignal
 
 _FINNHUB_BASE = "https://finnhub.io/api/v1"
@@ -260,12 +260,16 @@ class AnalysisService:
             full_text = full_text.strip()
             if not full_text:
                 full_text = title.strip()
+            published_at = raw.published_at.isoformat() if raw and raw.published_at else None
+            if raw and raw.published_at and event.event_time:
+                if ensure_utc(raw.published_at) > ensure_utc(event.event_time):
+                    continue
             items.append(
                 {
                     "source": evidence.source,
                     "source_tier": evidence.source_tier,
                     "url": evidence.url,
-                    "published_at": raw.published_at.isoformat() if raw and raw.published_at else None,
+                    "published_at": published_at,
                     "title": title,
                     "full_text": full_text,
                 }
@@ -349,6 +353,7 @@ class AnalysisService:
                 "full_text": event.summary or "",
             }
         ]
+        effective_event_type = self._analysis_event_type(event, session=session)
         ticker = str(event.tickers[0]).upper() if event.tickers else ""
         entities = [str(x).lower() for x in (event.entities or []) if x]
 
@@ -376,7 +381,7 @@ class AnalysisService:
             for entity in entities[:2]:
                 if len(entity) >= 4:
                     mention_count += text.count(entity)
-            if mention_count >= 2 or (event.event_type and event.event_type != "unknown" and self._HARD_EVENT_PATTERNS.search(text)):
+            if mention_count >= 2 or (effective_event_type and effective_event_type != "unknown" and self._HARD_EVENT_PATTERNS.search(text)):
                 ticker_specific_hits += 1
 
         score = 35
@@ -390,7 +395,7 @@ class AnalysisService:
             score += 10
         if hard_event_hits:
             score += 18
-        if event.event_type and event.event_type != "unknown":
+        if effective_event_type and effective_event_type != "unknown":
             score += 6
         if weak_source_only:
             score -= 18
@@ -409,10 +414,10 @@ class AnalysisService:
         elif price_action_hits and not hard_event_hits:
             tradeable = False
             reason = "price_action_roundup"
-        elif weak_source_only and event.event_type == "unknown" and hard_event_hits == 0:
+        elif weak_source_only and effective_event_type == "unknown" and hard_event_hits == 0:
             tradeable = False
             reason = "weak_source_unknown"
-        elif event.event_type == "unknown" and hard_event_hits == 0 and len(unique_sources) < 2:
+        elif effective_event_type == "unknown" and hard_event_hits == 0 and len(unique_sources) < 2:
             tradeable = False
             reason = "unknown_without_hard_catalyst"
         elif score < self.settings.event_tradeability_min_score:
@@ -463,24 +468,30 @@ class AnalysisService:
         except Exception:
             return None
 
-    def _finnhub_earnings_context(self, ticker: str) -> dict | None:
-        """Get last 4 EPS actuals/estimates/surprises from Finnhub."""
-        data = self._fh_get("/stock/earnings", {"symbol": ticker, "limit": 4})
+    def _finnhub_earnings_context(self, ticker: str, event_ts: datetime | None = None) -> dict | None:
+        """Get trailing earnings history as-of event_ts to avoid lookahead in backtests."""
+        data = self._fh_get("/stock/earnings", {"symbol": ticker, "limit": 8})
         if not data or not isinstance(data, list):
             return None
+        asof_date = ensure_utc(event_ts or utc_now()).date().isoformat()
         quarters = []
         for q in data:
+            period = str(q.get("period") or "")
+            if period and period > asof_date:
+                continue
             actual = q.get("actual")
             estimate = q.get("estimate")
             surprise_pct = q.get("surprisePercent")
             if actual is None and estimate is None:
                 continue
-            quarters.append({
-                "period": q.get("period"),
-                "actual": actual,
-                "estimate": estimate,
-                "surprise_pct": round(surprise_pct, 2) if surprise_pct is not None else None,
-            })
+            quarters.append(
+                {
+                    "period": period or None,
+                    "actual": actual,
+                    "estimate": estimate,
+                    "surprise_pct": round(surprise_pct, 2) if surprise_pct is not None else None,
+                }
+            )
         if not quarters:
             return None
         last = quarters[0]
@@ -488,8 +499,111 @@ class AnalysisService:
             "last_actual": last.get("actual"),
             "last_estimate": last.get("estimate"),
             "last_surprise_pct": last.get("surprise_pct"),
-            "quarters": quarters,
+            "quarters": quarters[:4],
         }
+
+    def _earnings_calendar_context(
+        self,
+        session: Session | None,
+        ticker: str,
+        event_ts: datetime,
+    ) -> dict | None:
+        asof = ensure_utc(event_ts).replace(hour=0, minute=0, second=0, microsecond=0)
+        latest_past = None
+        next_upcoming = None
+
+        if session is not None:
+            latest_past = session.execute(
+                select(EarningsCalendar)
+                .where(EarningsCalendar.symbol == ticker, EarningsCalendar.report_date <= asof)
+                .order_by(EarningsCalendar.report_date.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            next_upcoming = session.execute(
+                select(EarningsCalendar)
+                .where(EarningsCalendar.symbol == ticker, EarningsCalendar.report_date > asof)
+                .order_by(EarningsCalendar.report_date.asc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+        trailing = self._finnhub_earnings_context(ticker, event_ts=event_ts)
+        last_report = latest_past.report_date if latest_past else None
+        if last_report is None and trailing:
+            last_period = trailing["quarters"][0].get("period")
+            if last_period:
+                try:
+                    last_report = datetime.fromisoformat(last_period).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    last_report = None
+
+        result: dict[str, Any] = {}
+        if latest_past or trailing:
+            result["last_report_date"] = last_report.date().isoformat() if last_report else None
+            result["days_since_last_report"] = (
+                (asof.date() - last_report.date()).days if last_report else None
+            )
+            if latest_past:
+                if latest_past.eps_actual is not None:
+                    result["last_actual"] = latest_past.eps_actual
+                if latest_past.eps_estimate is not None:
+                    result["last_estimate"] = latest_past.eps_estimate
+                if latest_past.eps_actual is not None and latest_past.eps_estimate not in (None, 0):
+                    result["last_surprise_pct"] = round(
+                        (latest_past.eps_actual - latest_past.eps_estimate) / abs(latest_past.eps_estimate) * 100,
+                        2,
+                    )
+                result["last_report_hour"] = latest_past.report_hour
+            elif trailing:
+                result["last_actual"] = trailing.get("last_actual")
+                result["last_estimate"] = trailing.get("last_estimate")
+                result["last_surprise_pct"] = trailing.get("last_surprise_pct")
+            if trailing:
+                result["quarters"] = trailing.get("quarters", [])
+
+        if next_upcoming:
+            result["next_report_date"] = next_upcoming.report_date.date().isoformat()
+            result["days_to_next_report"] = (next_upcoming.report_date.date() - asof.date()).days
+            result["next_report_hour"] = next_upcoming.report_hour
+
+        return result or None
+
+    def _finnhub_daily_candles(
+        self,
+        symbol: str,
+        start_ts: datetime,
+        end_ts: datetime,
+    ) -> list[dict[str, Any]] | None:
+        data = self._fh_get(
+            "/stock/candle",
+            {
+                "symbol": symbol,
+                "resolution": "D",
+                "from": int(ensure_utc(start_ts).timestamp()),
+                "to": int(ensure_utc(end_ts).timestamp()),
+            },
+        )
+        if not isinstance(data, dict) or data.get("s") != "ok":
+            return None
+        closes = data.get("c") or []
+        highs = data.get("h") or []
+        lows = data.get("l") or []
+        opens = data.get("o") or []
+        times = data.get("t") or []
+        candles: list[dict[str, Any]] = []
+        for idx, ts in enumerate(times):
+            try:
+                candles.append(
+                    {
+                        "ts": datetime.fromtimestamp(int(ts), tz=timezone.utc),
+                        "open": float(opens[idx]),
+                        "high": float(highs[idx]),
+                        "low": float(lows[idx]),
+                        "close": float(closes[idx]),
+                    }
+                )
+            except Exception:
+                continue
+        return candles or None
 
     def _finnhub_tech_signal(self, ticker: str) -> dict | None:
         """Get aggregate technical analysis signal from Finnhub."""
@@ -565,6 +679,64 @@ class AnalysisService:
                 result["pct_from_support"] = round((current_price - nearest_support) / current_price * 100, 2)
         return result
 
+    def _macro_market_context(self, event_ts: datetime) -> dict | None:
+        lookback_days = max(7, int(getattr(self.settings, "macro_context_lookback_days", 30)))
+        end_ts = ensure_utc(event_ts)
+        start_ts = end_ts - timedelta(days=lookback_days + 7)
+        symbols = ["SPY", "QQQ", "IWM", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI"]
+        returns_pct: dict[str, float] = {}
+
+        for symbol in symbols:
+            candles = self._finnhub_daily_candles(symbol, start_ts=start_ts, end_ts=end_ts)
+            if not candles or len(candles) < 2:
+                continue
+            start_close = candles[0]["close"]
+            end_close = candles[-1]["close"]
+            if abs(start_close) < 1e-9:
+                continue
+            returns_pct[symbol] = round((end_close - start_close) / start_close * 100, 2)
+
+        if "SPY" not in returns_pct:
+            return None
+
+        sector_returns = {symbol: value for symbol, value in returns_pct.items() if symbol.startswith("XL")}
+        leader = max(sector_returns.items(), key=lambda item: item[1]) if sector_returns else None
+        laggard = min(sector_returns.items(), key=lambda item: item[1]) if sector_returns else None
+        breadth_positive = sum(1 for symbol in ("SPY", "QQQ", "IWM", "XLK", "XLF", "XLE", "XLV", "XLI") if returns_pct.get(symbol, 0.0) > 0)
+
+        spy_ret = returns_pct.get("SPY", 0.0)
+        qqq_ret = returns_pct.get("QQQ", 0.0)
+        iwm_ret = returns_pct.get("IWM", 0.0)
+        tlt_ret = returns_pct.get("TLT", 0.0)
+        if spy_ret >= 3.0 and qqq_ret >= spy_ret and breadth_positive >= 5:
+            regime = "RISK_ON"
+            narrative = "broad risk-on tape over the last month, led by growth and supported by decent breadth"
+        elif spy_ret <= -3.0 and tlt_ret > spy_ret:
+            regime = "RISK_OFF"
+            narrative = "risk-off tape over the last month, with defensives or duration outperforming equities"
+        elif leader and leader[0] == "XLE" and leader[1] >= spy_ret + 3.0:
+            regime = "SECTOR_ROTATION"
+            narrative = "rotation-driven market where energy leadership is stronger than the broad tape"
+        else:
+            regime = "MIXED"
+            narrative = "mixed market over the last month with no clean broad-market trend"
+
+        return {
+            "lookback_days": lookback_days,
+            "as_of_utc": end_ts.isoformat(),
+            "index_returns_pct": {
+                symbol: returns_pct[symbol]
+                for symbol in ("SPY", "QQQ", "IWM", "TLT")
+                if symbol in returns_pct
+            },
+            "sector_returns_pct": sector_returns,
+            "breadth_positive_count": breadth_positive,
+            "leadership": {"symbol": leader[0], "return_pct": leader[1]} if leader else None,
+            "laggard": {"symbol": laggard[0], "return_pct": laggard[1]} if laggard else None,
+            "regime": regime,
+            "narrative": narrative,
+        }
+
     def _event_market_features(self, session: Session | None, event: Event) -> dict[str, Any]:
         if session is None or not event.tickers:
             return {}
@@ -626,10 +798,12 @@ class AnalysisService:
         )
 
         current_price = float(ticker_now.close) if ticker_now else None
-        earnings_ctx = self._finnhub_earnings_context(ticker)
-        tech_signal = self._finnhub_tech_signal(ticker)
-        sr_levels = self._finnhub_support_resistance(ticker, current_price)
-        analyst_consensus = self._finnhub_analyst_consensus(ticker)
+        earnings_ctx = self._earnings_calendar_context(session, ticker, event_ts)
+        is_recent_event = event_ts >= utc_now() - timedelta(days=2)
+        tech_signal = self._finnhub_tech_signal(ticker) if is_recent_event else None
+        sr_levels = self._finnhub_support_resistance(ticker, current_price) if is_recent_event else None
+        analyst_consensus = self._finnhub_analyst_consensus(ticker) if is_recent_event else None
+        macro_context = self._macro_market_context(event_ts)
 
         features: dict[str, Any] = {
             "ticker": ticker,
@@ -667,35 +841,14 @@ class AnalysisService:
             features["support_resistance"] = sr_levels
         if analyst_consensus:
             features["analyst_consensus"] = analyst_consensus
-
-        # ── Macro market regime: SPY 20-day trend ─────────────────────────────
-        # Fetch the SPY bar ~20 trading days ago (≈28 calendar days) and compute
-        # cumulative return up to the event time. Tells the LLM whether the broad
-        # market has been in a risk-on or risk-off regime recently.
-        spy_20d_ago_ts = event_ts - timedelta(days=28)
-        spy_20d_bar = session.execute(
-            select(Bar1m)
-            .where(and_(Bar1m.ticker == "SPY", Bar1m.ts >= spy_20d_ago_ts))
-            .order_by(Bar1m.ts.asc())
-            .limit(1)
-        ).scalar_one_or_none()
-
-        if spy_20d_bar and spy_now:
-            spy_20d_return = self._pct_change(
-                float(spy_20d_bar.close), float(spy_now.close)
-            )
-            if spy_20d_return is not None:
-                if spy_20d_return >= 0.03:
-                    regime = "BULL"
-                elif spy_20d_return <= -0.03:
-                    regime = "BEAR"
-                else:
-                    regime = "NEUTRAL"
-                features["macro_market_regime"] = {
-                    "spy_20d_return_pct": round(spy_20d_return * 100, 2),
-                    "regime": regime,
-                    "note": "SPY cumulative return over last ~20 trading days",
-                }
+        if macro_context:
+            features["macro_market_context"] = macro_context
+            features["macro_market_regime"] = {
+                "regime": macro_context.get("regime"),
+                "lookback_days": macro_context.get("lookback_days"),
+                "spy_lookback_return_pct": (macro_context.get("index_returns_pct") or {}).get("SPY"),
+                "narrative": macro_context.get("narrative"),
+            }
 
         return features
 
@@ -749,10 +902,10 @@ class AnalysisService:
                 "Secondary signals (use only as tie-breakers when news signal is ambiguous):",
                 "  - tech_signal: 'buy' supports UP, 'sell' supports DOWN",
                 "  - relative_strength_vs_spy_pct: if ticker is already outperforming SPY today, UP news has more momentum",
-                "  - earnings_context: positive surprise_pct supports UP, negative supports DOWN",
+                "  - earnings_context: use only the earnings data already available as of event_time; positive surprise_pct supports UP, negative supports DOWN; upcoming earnings within a few days raises gap risk and can justify smaller size",
                 "  - support_resistance: price within 1% of resistance reduces upside; within 1% of support reduces downside",
                 "  - analyst_consensus: BULLISH (consensus_score>0.2) is a mild UP tailwind; BEARISH is a mild DOWN tailwind — but NEVER override a strong news signal",
-                "  - macro_market_regime: Use as a DIRECTIONAL TILT for ambiguous signals only. In a BULL regime (spy_20d_return >= +3%), prefer UP when news is ambiguous; avoid initiating DOWN trades on weak negative signals. In a BEAR regime (spy_20d_return <= -3%), prefer DOWN when ambiguous; avoid initiating UP trades on weak positive signals. NEVER override a clear, strong, ticker-specific news signal based on macro alone.",
+                "  - macro_market_context: this is a last-month market narrative, including index/sector returns and regime. Use it as a DIRECTIONAL TILT only when the company-specific news is ambiguous. NEVER override a clear, ticker-specific hard catalyst based on macro alone.",
                 "Do NOT let long-term bullish fundamentals override a clearly negative short-term news event.",
             ],
             "output_schema": {

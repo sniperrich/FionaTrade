@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     llm_retry_max_delay_seconds: float = 12.0
     event_tradeability_filter_enabled: bool = True
     event_tradeability_min_score: int = 55
+    normalization_merge_window_min: int = 0
     enable_term_management: bool = True
     term_short_horizon_min: int = 60
     term_mid_horizon_min: int = 240
@@ -67,7 +68,7 @@ class Settings(BaseSettings):
     backtest_regime_risk_adjust: bool = True
     backtest_regime_bull_risk_multiplier: float = 1.20
     backtest_regime_bear_risk_multiplier: float = 0.80
-    backtest_dedup_same_day_event: bool = True
+    backtest_dedup_same_day_event: bool = False
     backtest_use_event_quality_filter: bool = False
     backtest_event_quality_min_score: int = 70
     backtest_event_quality_fail_open: bool = True
@@ -96,6 +97,13 @@ class Settings(BaseSettings):
     validation_allow_downweight_execution: bool = True
     # Staleness: news older than this many minutes is flagged STALE
     validation_stale_minutes: int = 120
+    validation_corroboration_window_minutes: int = 180
+
+    earnings_calendar_auto_refresh: bool = True
+    earnings_calendar_refresh_interval_hours: int = 24
+    earnings_calendar_lookback_days: int = 30
+    earnings_calendar_lookahead_days: int = 90
+    macro_context_lookback_days: int = 30
 
     sec_poller_limit: int = 100
     rss_sources: list[str] = Field(

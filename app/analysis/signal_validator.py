@@ -309,7 +309,7 @@ class SignalValidator:
             return EventStrength.NOISE
 
         if event_type == "unknown":
-            if signal.action in {"BUY", "SHORT"} and confidence >= 60 and _UNKNOWN_HARD_CATALYST_RE.search(summary):
+            if signal.action in {"BUY", "SHORT"} and confidence >= 50 and _UNKNOWN_HARD_CATALYST_RE.search(summary):
                 issue_tags.append("unknown_event_type")
                 rationale.append(
                     "Stored event type is unknown, but the summary still looks like a ticker-specific hard catalyst."
@@ -345,7 +345,7 @@ class SignalValidator:
             return EventStrength.MODERATE
 
         if event_type in POSITIVE_EVENTS or event_type in NEGATIVE_EVENTS:
-            if confidence >= 60:
+            if confidence >= 45:
                 rationale.append(f"Weak-but-classified event type '{event_type}', confidence={confidence}.")
                 return EventStrength.WEAK
             issue_tags.append("low_confidence_event")

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.analysis.taxonomy import EVENT_KEYWORDS, resolve_event_type_for_text
 from app.core.company_names import COMPANY_NAME_TO_TICKER
 from app.core.config import Settings
-from app.core.utils import minute_bucket
+from app.core.utils import ensure_utc, minute_bucket
 from app.db.models import RawItem
 from app.schemas.types import CanonicalEvent
 
@@ -193,8 +193,9 @@ class NormalizationService:
         if raw_ids:
             stmt = stmt.where(RawItem.id.in_(list(raw_ids)))
         rows = session.execute(stmt.order_by(RawItem.published_at.asc())).scalars().all()
+        merge_window_min = max(0, int(getattr(self.settings, "normalization_merge_window_min", 0)))
 
-        grouped: dict[tuple[str, str, str], NormalizedCluster] = {}
+        grouped: dict[tuple[object, ...], NormalizedCluster] = {}
         for item in rows:
             text = f"{item.title} {item.body}"
             tickers = self._extract_tickers(text, item.metadata_json)
@@ -210,8 +211,11 @@ class NormalizationService:
                 else:
                     event_type = self._infer_event_type(text)
             primary_ticker = tickers[0] if tickers else "UNKNOWN"
-            bucket = minute_bucket(item.published_at, width_min=30).isoformat()
-            key = (primary_ticker, event_type, bucket)
+            if merge_window_min > 0:
+                bucket = minute_bucket(item.published_at, width_min=merge_window_min).isoformat()
+                key = (primary_ticker, event_type, bucket)
+            else:
+                key = (item.id,)
 
             if key not in grouped:
                 grouped[key] = NormalizedCluster(
@@ -220,7 +224,7 @@ class NormalizationService:
                         entities=tickers,
                         tickers=tickers,
                         severity=self._severity(event_type),
-                        event_time=item.published_at,
+                        event_time=ensure_utc(item.published_at),
                         evidence_refs=[item.id],
                         summary=item.title[:280],
                     ),
@@ -234,7 +238,12 @@ class NormalizationService:
                     if t not in group.canonical.tickers:
                         group.canonical.tickers.append(t)
                         group.canonical.entities.append(t)
-                if item.published_at < group.canonical.event_time:
-                    group.canonical.event_time = item.published_at
+                # If merge is enabled, event_time must represent the last evidence that was
+                # already known to the system. Otherwise the merged cluster would leak future
+                # evidence into an earlier tradable timestamp.
+                item_ts = ensure_utc(item.published_at)
+                if item_ts > ensure_utc(group.canonical.event_time):
+                    group.canonical.event_time = item_ts
+                    group.canonical.summary = item.title[:280]
 
         return list(grouped.values())

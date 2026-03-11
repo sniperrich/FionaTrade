@@ -109,3 +109,80 @@ def test_positive_litigation_resolution_not_classified_as_negative(session, sett
     clusters = svc.build_clusters(session)
     assert len(clusters) == 1
     assert clusters[0].canonical.event_type == "unknown"
+
+
+def test_default_normalization_does_not_merge_same_theme_items(session, settings):
+    now = datetime(2026, 1, 28, 14, 14, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            RawItem(
+                source="reuters",
+                source_tier=1,
+                url="https://example.com/aapl-1",
+                title="AAPL lowers outlook after weak iPhone demand",
+                body="Apple lowered outlook after weak iPhone demand.",
+                published_at=now,
+                ingested_at=now,
+                item_hash="hash-aapl-1",
+                metadata_json={"ticker": "AAPL"},
+                processed=False,
+            ),
+            RawItem(
+                source="bloomberg",
+                source_tier=1,
+                url="https://example.com/aapl-2",
+                title="AAPL cuts guidance as handset demand softens",
+                body="Apple cuts guidance as handset demand softens.",
+                published_at=now.replace(minute=20),
+                ingested_at=now.replace(minute=20),
+                item_hash="hash-aapl-2",
+                metadata_json={"ticker": "AAPL"},
+                processed=False,
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = NormalizationService(settings)
+    clusters = svc.build_clusters(session)
+    assert len(clusters) == 2
+
+
+def test_optional_merge_window_uses_last_evidence_timestamp(session, settings):
+    merge_settings = settings.model_copy(update={"normalization_merge_window_min": 30})
+    now = datetime(2026, 1, 28, 14, 14, tzinfo=timezone.utc)
+    later = now.replace(minute=25)
+    session.add_all(
+        [
+            RawItem(
+                source="reuters",
+                source_tier=1,
+                url="https://example.com/msft-1",
+                title="MSFT faces DOJ investigation",
+                body="Microsoft faces a DOJ investigation.",
+                published_at=now,
+                ingested_at=now,
+                item_hash="hash-msft-1",
+                metadata_json={"ticker": "MSFT"},
+                processed=False,
+            ),
+            RawItem(
+                source="bloomberg",
+                source_tier=1,
+                url="https://example.com/msft-2",
+                title="MSFT DOJ probe broadens",
+                body="The DOJ probe into Microsoft broadens.",
+                published_at=later,
+                ingested_at=later,
+                item_hash="hash-msft-2",
+                metadata_json={"ticker": "MSFT"},
+                processed=False,
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = NormalizationService(merge_settings)
+    clusters = svc.build_clusters(session)
+    assert len(clusters) == 1
+    assert clusters[0].canonical.event_time == later

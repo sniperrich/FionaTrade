@@ -130,6 +130,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 默认已预置 `LLM_BASE_URL=https://api.duojie.games`、`LLM_MODEL=claude-sonnet-4-5`；如网关要求鉴权请补 `LLM_API_KEY`。
 - 网关调优参数（建议先保守）：`LLM_TIMEOUT_SECONDS=30`、`LLM_MAX_RETRIES=3`、`LLM_RETRY_BACKOFF_SECONDS=1.5`、`LLM_RETRY_BACKOFF_MULTIPLIER=1.8`、`LLM_RETRY_MAX_DELAY_SECONDS=12`。
 - 新增规则 tradeability 过滤：`EVENT_TRADEABILITY_FILTER_ENABLED=true`、`EVENT_TRADEABILITY_MIN_SCORE=55`，会硬过滤观点文、估值文、技术分析、价格复盘、弱 `unknown` 噪音。
+- 默认不再把同时间窗消息先合并成一个可交易事件：`NORMALIZATION_MERGE_WINDOW_MIN=0`。如手动开启聚合，`event_time` 会自动取该聚合里最后一条证据时间，避免前视。
 - SQLite 锁等待可配置：`SQLITE_BUSY_TIMEOUT_SECONDS=30`（避免并发写入时立刻 `database is locked`）。
 - 未配置 `LLM_BASE_URL` 或 `LLM_MODEL` 时，系统自动使用规则回退分析（不会中断主链路）。
 - Finnhub Basic 订阅需设置 `FINNHUB_API_KEY`，开启 `MARKET_BACKFILL_ALLOW_STOOQ_FALLBACK=false`。
@@ -138,7 +139,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 回测前可先调用 `POST /api/market/backfill` 回填历史 1m 行情。
 - 回测新增硬风控：分钟级止损/止盈（`hard_stops`）、动态风险仓位（`risk_sizing` + `risk_per_trade_pct`）、日内熔断（`daily_circuit_breaker`）。
 - 回测进场窗口可配置：`entry_window_min`（默认 120 分钟，替代旧版硬编码 60 分钟）。
-- 回测支持同日重复事件去重：`dedup_same_day_event=true` 时，同 `ticker + event_type + day` 仅保留最高 `severity` 事件。
+- 回测默认不做同日粗暴去重：`dedup_same_day_event=false`，按“消息到达即处理”回放；后续应由加仓/减仓逻辑替代简单去重。
 - 回测支持宏观 regime 仓位调节：`regime_risk_adjust=true` 时，按 SPY 20交易日趋势对 `risk_per_trade_pct` 乘系数（BULL 1.2 / BEAR 0.8，均可参数覆盖）。
 - 回测新增 routine filing 硬过滤：`<ticker> filed 8-K/10-Q/10-K...` 且无实质负面关键词时直接跳过，避免误分类触发交易。
 - 回测出场锚点修复：`planned_exit` 按 `entry_ts + horizon` 计算，不再用 `event_ts + horizon`。
@@ -157,6 +158,8 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 支持一周网格回测（不跑月度）+ 最小交易数过滤，命令：`python scripts/run_weekly_backtest_grid.py --min-trades 5`。
 - 支持 1m 行情覆盖审计：`python scripts/audit_bar_coverage.py --start-date 2026-01-02 --end-date 2026-01-10`。
 - 支持历史 routine filing 事件重标注：`python scripts/relabel_routine_filings.py --start-date 2026-01-01 --end-date 2026-02-01`。
+- 支持 SP100 财报日历自动回填：`python scripts/backfill_earnings_calendar.py --from 2025-10-01 --to 2025-12-31`。
+- 支持按当前 normalization/validation 逻辑重建历史事件：`python scripts/rebuild_events_from_raw.py --start-date 2025-10-01 --end-date 2025-11-01`。
 - 支持 LLM 一致性测试（同窗重复 3 次）：`python scripts/run_llm_consistency_check.py --runs 3`。
 - 回测并发 LLM workers 可通过参数 `llm_workers`（默认 8）调整。
 - 回测支持 `min_severity` 参数（默认 0 不过滤；70 = 只交易强信号事件 regulatory/accident/supply_chain/litigation 类）。
@@ -164,6 +167,33 @@ python scripts/backfill_sec_bodies.py --limit 500
 ## 近期变更
 
 ### 2026-03-11
+- 默认交易语义切到“逐条消息事件化”：
+  - `NormalizationService` 默认 `NORMALIZATION_MERGE_WINDOW_MIN=0`，每条 `RawItem` 单独生成事件，不再提前把多条消息揉成一个交易对象。
+  - 若手动开启聚合窗口，`event_time` 会取聚合中最后一条证据时间，避免 merged event 用更早时间交易形成前视污染。
+- `ValidationService` 改为“历史已见消息交叉验证”：
+  - 单源消息不再因为 `tier=1` 就自动 VALID，严格遵守“单源永不下单”。
+  - 新消息会与最近 `180` 分钟内已见的同 ticker / 同主题事件做 corroboration，第二独立来源到达后才升级为 VALID。
+- 历史分析上下文修复前视：
+  - `AnalysisService._evidence_rows()` 会过滤 `published_at > event_time` 的未来证据。
+  - 历史事件默认不再读取“今天的” `tech_signal / analyst_consensus / support_resistance`。
+- 新增“宏观叙事系统”：
+  - `macro_market_context` 会拉取最近一个月的 `SPY/QQQ/IWM/TLT/XLK/XLF/XLE/XLV/XLI` 日线收益，输出 regime、breadth、leadership、laggard、narrative。
+  - LLM prompt 现在可看到“上个月总体大盘状态”，用于模糊信号的方向倾斜。
+- 新增 SP100 财报日历数据源：
+  - 新表 `earnings_calendar`
+  - 调度器会自动刷新 Finnhub earnings calendar
+  - `earnings_context` 现在按 `event_time` 读取上一次/下一次财报，而不是直接拿“今天看到的最新财报数据”
+- `major_litigation` 继续收紧：`favorable court ruling`、`settle AI lawsuits`、`positive outlook following ruling` 这类弱/偏正面诉讼文会降回 `unknown`。
+- 新增脚本：
+  - `scripts/backfill_earnings_calendar.py`
+  - `scripts/rebuild_events_from_raw.py`
+- 新增测试：
+  - `tests/test_analysis_context.py` 覆盖财报上下文按事件时点读取、未来证据过滤
+  - `tests/test_normalization_service.py` 覆盖默认不合并消息、可选 merge 时 `event_time` 取最后证据时间
+  - `tests/test_validation_scoring.py` 覆盖“第二独立来源到达后升级 VALID”
+- 注意：
+  - `run_id=56` 仍是旧事件库上的结果。
+  - 要验证这轮新逻辑，先执行 `python scripts/rebuild_events_from_raw.py --start-date 2025-10-01 --end-date 2025-11-01`，再跑回测。
 - 事件类型解析新增文本纠偏：`resolve_event_type_for_text()` 会根据标题/摘要中的正负面措辞修正陈旧 taxonomy 标签，避免 `guides above estimates` 仍被当成 `earnings_miss`、`settles litigation` 仍被当成负面诉讼。
 - `NormalizationService` 与 `AnalysisService` 统一改用“文本修正后的有效事件类型”：
   - LLM prompt 里同时提供 `original_event_type` 和 `effective_event_type`

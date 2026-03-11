@@ -8,6 +8,7 @@ from app.core.config import get_settings
 from app.core.logging import get_app_logger, log_writeout, setup_logging
 from app.db.database import db_session, init_db
 from app.monitoring.health import HealthAuditService
+from app.services.earnings_calendar import EarningsCalendarService
 from app.services.orchestrator import PipelineOrchestrator
 from app.webui.routes import router as web_router
 
@@ -56,6 +57,23 @@ def _scheduled_health_audit() -> None:
         logger.exception("健康巡检失败: %s", exc)
 
 
+def _scheduled_earnings_refresh() -> None:
+    try:
+        with db_session() as session:
+            result = EarningsCalendarService(settings).refresh_if_due(session)
+            if result is not None:
+                logger.info(
+                    "财报日历刷新完成 fetched=%s upserted=%s skipped=%s from=%s to=%s",
+                    result.fetched,
+                    result.upserted,
+                    result.skipped,
+                    result.from_date,
+                    result.to_date,
+                )
+    except Exception as exc:
+        logger.exception("财报日历刷新失败: %s", exc)
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     global scheduler
@@ -71,6 +89,13 @@ def startup_event() -> None:
                 seconds=settings.health_check_interval_seconds,
                 max_instances=1,
             )
+        if settings.earnings_calendar_auto_refresh:
+            scheduler.add_job(
+                _scheduled_earnings_refresh,
+                "interval",
+                hours=max(1, int(settings.earnings_calendar_refresh_interval_hours)),
+                max_instances=1,
+            )
         scheduler.start()
         logger.info(
             "调度器已启动 poll=%ss health_audit=%s/%ss",
@@ -81,6 +106,8 @@ def startup_event() -> None:
 
     if settings.enable_health_audit:
         _scheduled_health_audit()
+    if settings.earnings_calendar_auto_refresh:
+        _scheduled_earnings_refresh()
 
     logger.info("中文提示：打开 WebUI http://127.0.0.1:8000 ，健康检查 http://127.0.0.1:8000/api/health")
 

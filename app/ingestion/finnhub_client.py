@@ -169,3 +169,84 @@ class FinnhubNewsClient:
             status=status,
             details={"items": len(items), "tickers": len(tickers), "errors": errors},
         )
+
+    def fetch_earnings_calendar(
+        self,
+        from_date: str,
+        to_date: str,
+        symbols: list[str] | None = None,
+    ) -> tuple[list[dict], SourceCheck]:
+        """Fetch earnings calendar rows and filter to the configured SP100 universe."""
+        if not self.settings.enable_finnhub:
+            return [], SourceCheck(
+                source_key="finnhub_earnings_calendar",
+                source_name="finnhub",
+                source_type="finnhub",
+                display_name="Finnhub Earnings Calendar",
+                status="OFFLINE",
+                error_message="Finnhub source disabled by config",
+            )
+        if not self.settings.finnhub_api_key:
+            return [], SourceCheck(
+                source_key="finnhub_earnings_calendar",
+                source_name="finnhub",
+                source_type="finnhub",
+                display_name="Finnhub Earnings Calendar",
+                status="OFFLINE",
+                error_message="FINNHUB_API_KEY not configured",
+            )
+
+        allowed = {ticker.upper() for ticker in self.settings.sp100_tickers}
+        if symbols:
+            allowed &= {ticker.upper() for ticker in symbols}
+
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                resp = client.get(
+                    f"{self.BASE_URL}/calendar/earnings",
+                    params={
+                        "from": from_date,
+                        "to": to_date,
+                        "token": self.settings.finnhub_api_key,
+                    },
+                )
+                if resp.status_code != 200:
+                    return [], SourceCheck(
+                        source_key="finnhub_earnings_calendar",
+                        source_name="finnhub",
+                        source_type="finnhub",
+                        display_name="Finnhub Earnings Calendar",
+                        status="OFFLINE",
+                        error_message=f"Finnhub earnings calendar status={resp.status_code}",
+                    )
+                payload = resp.json()
+        except Exception as exc:
+            logger.warning("Finnhub earnings calendar fetch failed: %s", exc)
+            return [], SourceCheck(
+                source_key="finnhub_earnings_calendar",
+                source_name="finnhub",
+                source_type="finnhub",
+                display_name="Finnhub Earnings Calendar",
+                status="OFFLINE",
+                error_message=f"Finnhub earnings calendar failed: {exc}",
+            )
+
+        rows = payload.get("earningsCalendar") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            rows = []
+
+        filtered = []
+        for row in rows:
+            symbol = str(row.get("symbol") or "").upper().strip()
+            if not symbol or symbol not in allowed:
+                continue
+            filtered.append(row)
+
+        return filtered, SourceCheck(
+            source_key="finnhub_earnings_calendar",
+            source_name="finnhub",
+            source_type="finnhub",
+            display_name="Finnhub Earnings Calendar",
+            status="ONLINE",
+            details={"items": len(filtered), "from": from_date, "to": to_date},
+        )

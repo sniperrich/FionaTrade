@@ -80,11 +80,17 @@ _REGULATORY_CONTEXT_RE = re.compile(
 _POSITIVE_RESOLUTION_RE = re.compile(
     r"\b(settles? litigation|settlement with|resolves? litigation|wins? (?:case|appeal)"
     r"|complete victory|dismissed lawsuit|extends? .* deal|stock rose|shares? rose"
-    r"|higher sales|sooner than expected|spin[\s-]?off|maintenance deal)\b",
+    r"|higher sales|sooner than expected|spin[\s-]?off|maintenance deal"
+    r"|favorable court ruling|positive outlook|settle ai lawsuits)\b",
     re.IGNORECASE,
 )
 _NEGATIVE_LITIGATION_RE = re.compile(
     r"\b(class action|lawsuit filed|sued by|court ruling against|legal challenge|appeal denied|trial)\b",
+    re.IGNORECASE,
+)
+_WEAK_LITIGATION_CONTEXT_RE = re.compile(
+    r"\b(what it means|positive outlook|following favorable court ruling|eye investor funds to settle"
+    r"|plans? to settle|weighs? settlement options|could settle|settlement talks)\b",
     re.IGNORECASE,
 )
 _EARNINGS_WINDOW_RE = re.compile(
@@ -123,7 +129,10 @@ def resolve_event_type_for_text(event_type: str | None, text: str) -> str:
             return "unknown"
 
     if et == "major_litigation":
-        if _POSITIVE_RESOLUTION_RE.search(lowered) and not _NEGATIVE_LITIGATION_RE.search(lowered):
+        if (
+            _POSITIVE_RESOLUTION_RE.search(lowered)
+            or _WEAK_LITIGATION_CONTEXT_RE.search(lowered)
+        ) and not _NEGATIVE_LITIGATION_RE.search(lowered):
             return "unknown"
 
     return et
