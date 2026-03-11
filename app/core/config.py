@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     llm_retry_backoff_seconds: float = 1.5
     llm_retry_backoff_multiplier: float = 1.8
     llm_retry_max_delay_seconds: float = 12.0
+    event_tradeability_filter_enabled: bool = True
+    event_tradeability_min_score: int = 55
     enable_term_management: bool = True
     term_short_horizon_min: int = 60
     term_mid_horizon_min: int = 240
@@ -71,6 +73,10 @@ class Settings(BaseSettings):
     backtest_event_quality_fail_open: bool = True
     backtest_allow_unknown_with_llm: bool = True
     backtest_allow_next_session_entry: bool = True
+    backtest_conviction_position_sizing: bool = True
+    backtest_conviction_min_risk_multiplier: float = 1.0
+    backtest_conviction_max_risk_multiplier: float = 2.5
+    backtest_conviction_position_floor: float = 0.45
 
     min_trade_confidence: int = 70
 

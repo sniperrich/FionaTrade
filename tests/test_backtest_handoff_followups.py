@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.backtest_engine.service import BacktestEngineService
-from app.db.models import Bar1m, Event
+from app.db.models import Bar1m, Event, EventEvidence, RawItem
 from app.schemas.types import TradeSignal
 
 
@@ -229,6 +229,7 @@ def test_backtest_regime_risk_adjust_multiplier(session, settings):
         "risk_per_trade_pct": 0.001,
         "entry_window_min": 120,
         "use_signal_validation": False,
+        "conviction_position_sizing": False,
     }
 
     baseline = svc.run(session, params={**base_params, "regime_risk_adjust": False})
@@ -505,6 +506,7 @@ def test_backtest_allows_unknown_events_in_llm_mode(session, settings):
         "risk_sizing": False,
         "entry_window_min": 120,
         "allow_next_session_entry": False,
+        "use_tradeability_filter": False,
     }
     blocked = svc.run(session, params={**base_params, "allow_unknown_with_llm": False})
     allowed = svc.run(session, params={**base_params, "allow_unknown_with_llm": True})
@@ -570,3 +572,213 @@ def test_backtest_allows_next_session_open_entry(session, settings):
     assert blocked.metrics["entry_late_skipped"] == 1
     assert allowed.metrics["trades"] == 1
     assert allowed.metrics["next_session_entry_used"] == 1
+
+
+def test_backtest_tradeability_filter_blocks_opinion_content(session, settings):
+    event_time = datetime(2026, 1, 22, 14, 30, tzinfo=timezone.utc)
+    event = Event(
+        event_type="unknown",
+        entities=["Lockheed Martin"],
+        tickers=["LMT"],
+        severity=55,
+        event_time=event_time,
+        confidence=82,
+        validation_status="VALID",
+        summary="Lockheed Martin - Overbought After A Strong Run",
+    )
+    session.add(event)
+    session.flush()
+
+    raw = RawItem(
+        source="seekingalpha",
+        source_tier=2,
+        url="https://example.com/lmt-opinion",
+        title="Lockheed Martin - Overbought After A Strong Run",
+        body="Lockheed Martin looks overbought after a strong run and valuation now appears stretched for investors.",
+        published_at=event_time,
+        item_hash="lmt-opinion",
+    )
+    session.add(raw)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=raw.source,
+            source_tier=raw.source_tier,
+            summary=raw.title,
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="LMT",
+                ts=event_time + timedelta(minutes=1),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="LMT",
+                ts=event_time + timedelta(minutes=61),
+                open=99.0,
+                high=100.0,
+                low=98.0,
+                close=99.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    svc.analysis.event_to_signal = lambda _event, **_kwargs: TradeSignal(  # noqa: SLF001
+        action="SHORT",
+        ticker="LMT",
+        confidence=82,
+        horizon_min=60,
+        position_pct_suggestion=0.5,
+        reason="should never trade",
+        expires_at=event_time + timedelta(minutes=60),
+        fallback_used=False,
+    )
+    result = svc.run(
+        session,
+        params={
+            "start_date": "2026-01-22",
+            "end_date": "2026-01-23",
+            "min_confidence": 30,
+            "use_llm": True,
+            "use_signal_validation": False,
+            "hard_stops": False,
+            "risk_sizing": False,
+            "use_tradeability_filter": True,
+        },
+    )
+    assert result.metrics["trades"] == 0
+    assert result.metrics["tradeability_filtered"] == 1
+    assert result.metrics["tradeability_reason_counts"]["opinion_or_technical_commentary"] == 1
+
+
+def test_backtest_conviction_position_sizing_lifts_strong_event_size(session, settings):
+    event_time = datetime(2026, 1, 22, 14, 30, tzinfo=timezone.utc)
+    event = Event(
+        event_type="major_litigation",
+        entities=["Honeywell"],
+        tickers=["HON"],
+        severity=82,
+        event_time=event_time,
+        confidence=88,
+        validation_status="VALID",
+        summary="Honeywell settles litigation with Flexjet and extends engine maintenance deal",
+    )
+    session.add(event)
+    session.flush()
+
+    raw = RawItem(
+        source="marketwatch",
+        source_tier=1,
+        url="https://example.com/hon-litigation",
+        title="Honeywell settles litigation with Flexjet and extends engine maintenance deal",
+        body=(
+            "Honeywell settled litigation with Flexjet, extended an engine maintenance agreement, "
+            "and disclosed specific commercial terms in a company-focused update."
+        ),
+        published_at=event_time,
+        item_hash="hon-litigation",
+    )
+    session.add(raw)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=raw.source,
+            source_tier=raw.source_tier,
+            summary=raw.title,
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="HON",
+                ts=event_time + timedelta(minutes=1),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="HON",
+                ts=event_time + timedelta(minutes=61),
+                open=101.0,
+                high=102.0,
+                low=100.0,
+                close=101.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    svc.analysis.event_to_signal = lambda _event, **_kwargs: TradeSignal(  # noqa: SLF001
+        action="BUY",
+        ticker="HON",
+        confidence=88,
+        horizon_min=60,
+        position_pct_suggestion=0.2,
+        reason="llm sized",
+        expires_at=event_time + timedelta(minutes=60),
+        fallback_used=False,
+    )
+
+    base_run = svc.run(
+        session,
+        params={
+            "start_date": "2026-01-22",
+            "end_date": "2026-01-23",
+            "min_confidence": 30,
+            "use_llm": True,
+            "use_signal_validation": False,
+            "hard_stops": False,
+            "risk_sizing": True,
+            "slippage_bps": 0.0,
+            "use_tradeability_filter": True,
+            "conviction_position_sizing": False,
+        },
+    )
+    boosted_run = svc.run(
+        session,
+        params={
+            "start_date": "2026-01-22",
+            "end_date": "2026-01-23",
+            "min_confidence": 30,
+            "use_llm": True,
+            "use_signal_validation": False,
+            "hard_stops": False,
+            "risk_sizing": True,
+            "slippage_bps": 0.0,
+            "use_tradeability_filter": True,
+            "conviction_position_sizing": True,
+        },
+    )
+    base_row = svc.get_run(session, base_run.run_id)
+    boosted_row = svc.get_run(session, boosted_run.run_id)
+    assert base_row is not None
+    assert boosted_row is not None
+    assert base_run.metrics["trades"] == 1
+    assert boosted_run.metrics["trades"] == 1
+    assert float(boosted_run.metrics["risk_per_trade_pct"]) == float(base_run.metrics["risk_per_trade_pct"])
+    assert boosted_run.metrics["conviction_position_sizing"] is True
+    assert float(boosted_row.trade_log[0]["qty"]) > float(base_row.trade_log[0]["qty"])
+    assert float(boosted_row.trade_log[0]["effective_position_pct_suggestion"]) >= 0.45

@@ -26,8 +26,11 @@ REGIME_RISK_ADJUST = True         # 按 SPY regime 调节 risk_per_trade_pct
 DEDUP_SAME_DAY_EVENT = True       # 同 ticker+同日+同事件类型只保留最高 severity
 USE_EVENT_QUALITY_FILTER = False  # Gemini 质量筛选层（HIGH/MEDIUM/LOW）
 EVENT_QUALITY_MIN_SCORE = 70      # 质量分阈值（0-100）
+USE_TRADEABILITY_FILTER = True    # 规则硬过滤：观点/估值/技术分析/价格复盘类内容不交易
+TRADEABILITY_MIN_SCORE = 55       # 规则 tradeability 分阈值（0-100）
 ALLOW_UNKNOWN_WITH_LLM = True     # unknown 事件在 LLM 模式下允许进入方向判断
 ALLOW_NEXT_SESSION_ENTRY = True   # 超过窗口时，允许“下一交易时段首根bar”进场
+CONVICTION_POSITION_SIZING = True # 高质量事件自动放大风险预算与最小仓位建议
 
 AUDIT_TOP_N      = 15             # acceptance audit 显示 top N 亏损
 
@@ -165,10 +168,11 @@ def main() -> None:
     print(f"  slippage  : {SLIPPAGE_BPS} bps   workers : {LLM_WORKERS}")
     print(f"  entry_win : {ENTRY_WINDOW_MIN}m  regime_adj: {'ON' if REGIME_RISK_ADJUST else 'OFF'}")
     print(f"  quality   : {'ON' if USE_EVENT_QUALITY_FILTER else 'OFF'}   min_score: {EVENT_QUALITY_MIN_SCORE}")
+    print(f"  filter    : {'ON' if USE_TRADEABILITY_FILTER else 'OFF'}   tradeability: {TRADEABILITY_MIN_SCORE}")
     print(f"  unknown   : {'ALLOW' if ALLOW_UNKNOWN_WITH_LLM else 'BLOCK'}   "
           f"next_open: {'ALLOW' if ALLOW_NEXT_SESSION_ENTRY else 'BLOCK'}")
     print(f"  validation: {'ON' if USE_VALIDATION else 'OFF'}   "
-          f"hard_stops: {'ON' if HARD_STOPS else 'OFF'}")
+          f"hard_stops: {'ON' if HARD_STOPS else 'OFF'}   conviction: {'ON' if CONVICTION_POSITION_SIZING else 'OFF'}")
     print(_bold("═" * 62))
     print()
 
@@ -184,10 +188,13 @@ def main() -> None:
         "entry_window_min"   : ENTRY_WINDOW_MIN,
         "regime_risk_adjust" : REGIME_RISK_ADJUST,
         "dedup_same_day_event": DEDUP_SAME_DAY_EVENT,
+        "use_tradeability_filter": USE_TRADEABILITY_FILTER,
+        "tradeability_min_score": TRADEABILITY_MIN_SCORE,
         "use_event_quality_filter": USE_EVENT_QUALITY_FILTER,
         "event_quality_min_score": EVENT_QUALITY_MIN_SCORE,
         "allow_unknown_with_llm": ALLOW_UNKNOWN_WITH_LLM,
         "allow_next_session_entry": ALLOW_NEXT_SESSION_ENTRY,
+        "conviction_position_sizing": CONVICTION_POSITION_SIZING,
         "daily_circuit_breaker": True,
         "slippage_bps"       : SLIPPAGE_BPS,
         "use_signal_validation": USE_VALIDATION,

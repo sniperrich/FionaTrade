@@ -144,6 +144,59 @@ class BacktestEngineService:
 
         return max(min(qty_limits), 0.0)
 
+    def _effective_position_pct_suggestion(
+        self,
+        event: Event,
+        position_pct_suggestion: float | None,
+        tradeability_score: int | None,
+        conviction_position_sizing: bool,
+        risk_sizing: bool,
+    ) -> float | None:
+        if not conviction_position_sizing or not risk_sizing:
+            return position_pct_suggestion
+
+        raw = None if position_pct_suggestion is None else max(0.0, min(1.0, float(position_pct_suggestion)))
+        score = max(0, min(int(tradeability_score or 0), 100))
+        confidence = max(0, min(int(event.confidence or 0), 100))
+        severity = max(0, min(int(event.severity or 0), 100))
+
+        floor = 0.0
+        base_floor = max(0.0, min(1.0, float(self.settings.backtest_conviction_position_floor)))
+        if score >= 80 and confidence >= 75 and severity >= 60:
+            floor = min(1.0, base_floor + 0.20)
+        elif score >= 70 and confidence >= 70 and severity >= 55:
+            floor = base_floor
+        elif score >= 60 and confidence >= 65 and severity >= 50:
+            floor = max(0.0, base_floor - 0.10)
+
+        if raw is None:
+            return floor if floor > 0 else None
+        return max(raw, floor)
+
+    def _conviction_risk_multiplier(
+        self,
+        event: Event,
+        position_pct_suggestion: float | None,
+        tradeability_score: int | None,
+        conviction_position_sizing: bool,
+    ) -> float:
+        if not conviction_position_sizing:
+            return 1.0
+
+        min_mult = max(0.1, float(self.settings.backtest_conviction_min_risk_multiplier))
+        max_mult = max(min_mult, float(self.settings.backtest_conviction_max_risk_multiplier))
+        confidence_component = max(0.0, min(float(event.confidence or 0) / 100.0, 1.0))
+        severity_component = max(0.0, min(float(event.severity or 0) / 100.0, 1.0))
+        tradeability_component = max(0.0, min(float(tradeability_score or 0) / 100.0, 1.0))
+        size_component = 0.35 if position_pct_suggestion is None else max(0.0, min(float(position_pct_suggestion), 1.0))
+        composite = (
+            0.35 * tradeability_component
+            + 0.25 * confidence_component
+            + 0.20 * severity_component
+            + 0.20 * size_component
+        )
+        return min_mult + (max_mult - min_mult) * composite
+
     def _is_routine_filing_event(self, event: Event) -> bool:
         summary = (event.summary or "").lower()
         if not summary:
@@ -382,6 +435,13 @@ class BacktestEngineService:
             params.get("allow_next_session_entry"),
             default=self.settings.backtest_allow_next_session_entry,
         )
+        use_tradeability_filter = self._as_bool(
+            params.get("use_tradeability_filter"),
+            default=self.settings.event_tradeability_filter_enabled,
+        )
+        tradeability_min_score = int(
+            params.get("tradeability_min_score", self.settings.event_tradeability_min_score)
+        )
         use_event_quality_filter = self._as_bool(
             params.get("use_event_quality_filter"),
             default=self.settings.backtest_use_event_quality_filter,
@@ -392,6 +452,10 @@ class BacktestEngineService:
         event_quality_fail_open = self._as_bool(
             params.get("event_quality_fail_open"),
             default=self.settings.backtest_event_quality_fail_open,
+        )
+        conviction_position_sizing = self._as_bool(
+            params.get("conviction_position_sizing"),
+            default=self.settings.backtest_conviction_position_sizing,
         )
         # Signal Validation Layer: on by default when validation_enabled=True in settings
         use_signal_validation = self._as_bool(
@@ -471,9 +535,12 @@ class BacktestEngineService:
                 "enable_term_horizon": enable_term_horizon,
                 "allow_unknown_with_llm": allow_unknown_with_llm,
                 "allow_next_session_entry": allow_next_session_entry,
+                "use_tradeability_filter": use_tradeability_filter,
+                "tradeability_min_score": tradeability_min_score,
                 "use_event_quality_filter": use_event_quality_filter,
                 "event_quality_min_score": event_quality_min_score,
                 "event_quality_fail_open": event_quality_fail_open,
+                "conviction_position_sizing": conviction_position_sizing,
             },
         )
 
@@ -491,10 +558,12 @@ class BacktestEngineService:
         daily_halts = 0
         halted_events_skipped = 0
         routine_filing_skipped = 0
+        tradeability_filtered = 0
         quality_filtered = 0
         quality_filter_errors = 0
         entry_late_skipped = 0
         next_session_entry_used = 0
+        tradeability_reason_counts: dict[str, int] = {}
 
         current_day: date | None = None
         day_start_equity = equity
@@ -539,10 +608,20 @@ class BacktestEngineService:
         if total_events == 0:
             emit_progress(0)
 
+        def tradeability_result(event: Event) -> dict[str, object] | None:
+            if not use_tradeability_filter:
+                return None
+            result = self.analysis.assess_tradeability(event, session=session)
+            score = int(result.get("score", 0))
+            if result.get("tradeable", True) and score < tradeability_min_score:
+                result = dict(result)
+                result["tradeable"] = False
+                result["reason"] = "tradeability_score_too_low"
+            return result
+
         # ── 并发 LLM 预取阶段 ──────────────────────────────────────────────────
         # 先用线程池并发获取所有 LLM 信号，再串行执行交易逻辑（保证 equity 顺序正确）
         signal_map: dict[int, object] = {}  # event.id → TradeSignal | None
-        from app.analysis.taxonomy import EXCLUDED_FROM_TRADING
         if use_llm and total_events > 0:
             _MACRO_NOISE_PREFETCH = (
                 "government shutdown", "stock market today", "market movers",
@@ -559,6 +638,7 @@ class BacktestEngineService:
                 and (min_severity == 0 or (e.severity or 0) >= min_severity)
                 and not self._is_routine_filing_event(e)
                 and not any(p in (e.summary or "").lower() for p in _MACRO_NOISE_PREFETCH)
+                and (not use_tradeability_filter or bool((tradeability_result(e) or {}).get("tradeable", True)))
             ]
             # Step 1: 预热 Finnhub 补充数据 cache（串行，避免 429）
             unique_tickers = list({str(e.tickers[0]).upper() for e in tradeable_events if e.tickers})
@@ -582,7 +662,11 @@ class BacktestEngineService:
             completed_count = 0
 
             def _fetch_signal(ev):
-                return ev.id, self.analysis.event_to_signal(ev, session=session)
+                return ev.id, self.analysis.event_to_signal(
+                    ev,
+                    session=session,
+                    use_tradeability_filter=use_tradeability_filter,
+                )
 
             with ThreadPoolExecutor(max_workers=llm_workers) as pool:
                 futures = {pool.submit(_fetch_signal, ev): ev for ev in tradeable_events}
@@ -682,6 +766,22 @@ class BacktestEngineService:
             local_horizon_min = horizon_min
             fallback_used = False
             position_pct_suggestion: float | None = None
+            effective_position_pct_suggestion: float | None = None
+            conviction_risk_multiplier = 1.0
+            tradeability_score: int | None = None
+            tradeability_reason: str | None = None
+
+            if use_tradeability_filter:
+                tradeability = tradeability_result(event)
+                tradeability_score = int((tradeability or {}).get("score", 0))
+                tradeability_reason = str((tradeability or {}).get("reason", "tradeable"))
+                if tradeability and not bool(tradeability.get("tradeable", True)):
+                    tradeability_filtered += 1
+                    tradeability_reason_counts[tradeability_reason] = (
+                        tradeability_reason_counts.get(tradeability_reason, 0) + 1
+                    )
+                    emit_progress(idx)
+                    continue
 
             if use_llm:
                 signal = signal_map.get(event.id)
@@ -719,6 +819,24 @@ class BacktestEngineService:
             if action == "HOLD":
                 emit_progress(idx)
                 continue
+
+            if use_llm:
+                effective_position_pct_suggestion = self._effective_position_pct_suggestion(
+                    event=event,
+                    position_pct_suggestion=position_pct_suggestion,
+                    tradeability_score=tradeability_score,
+                    conviction_position_sizing=conviction_position_sizing,
+                    risk_sizing=risk_sizing,
+                )
+                conviction_risk_multiplier = self._conviction_risk_multiplier(
+                    event=event,
+                    position_pct_suggestion=effective_position_pct_suggestion,
+                    tradeability_score=tradeability_score,
+                    conviction_position_sizing=conviction_position_sizing and risk_sizing,
+                )
+            else:
+                effective_position_pct_suggestion = position_pct_suggestion
+                conviction_risk_multiplier = 1.0
 
             # ── Signal Validation Gate ────────────────────────────────────────
             if use_signal_validation and use_llm:
@@ -786,6 +904,7 @@ class BacktestEngineService:
                 elif regime == "BEAR":
                     regime_multiplier = max(0.0, regime_bear_risk_multiplier)
                 effective_risk_per_trade_pct = max(0.0, risk_per_trade_pct * regime_multiplier)
+            effective_risk_per_trade_pct *= conviction_risk_multiplier
 
             qty = self._position_size(
                 nav=equity,
@@ -793,7 +912,7 @@ class BacktestEngineService:
                 stop_loss_pct=stop_loss_pct,
                 risk_per_trade_pct=effective_risk_per_trade_pct,
                 risk_sizing=risk_sizing,
-                position_pct_suggestion=position_pct_suggestion,
+                position_pct_suggestion=effective_position_pct_suggestion,
             )
             if qty <= 0:
                 emit_progress(idx)
@@ -857,6 +976,10 @@ class BacktestEngineService:
                 "holding_min": holding_min,
                 "fallback_used": fallback_used,
                 "position_pct_suggestion": position_pct_suggestion,
+                "effective_position_pct_suggestion": effective_position_pct_suggestion,
+                "tradeability_score": tradeability_score,
+                "tradeability_reason": tradeability_reason,
+                "conviction_risk_multiplier": conviction_risk_multiplier,
                 "exit_reason": exit_reason,
             }
             trade_log.append(trade_entry)
@@ -915,6 +1038,10 @@ class BacktestEngineService:
         metrics["validation_enabled"] = use_signal_validation
         metrics["validation_blocked"] = validation_blocked
         metrics["routine_filing_skipped"] = routine_filing_skipped
+        metrics["use_tradeability_filter"] = use_tradeability_filter
+        metrics["tradeability_min_score"] = tradeability_min_score
+        metrics["tradeability_filtered"] = tradeability_filtered
+        metrics["tradeability_reason_counts"] = tradeability_reason_counts
         metrics["use_event_quality_filter"] = use_event_quality_filter
         metrics["event_quality_min_score"] = event_quality_min_score
         metrics["event_quality_fail_open"] = event_quality_fail_open
@@ -922,6 +1049,10 @@ class BacktestEngineService:
         metrics["quality_filter_errors"] = quality_filter_errors
         metrics["allow_unknown_with_llm"] = allow_unknown_with_llm
         metrics["allow_next_session_entry"] = allow_next_session_entry
+        metrics["conviction_position_sizing"] = conviction_position_sizing
+        metrics["conviction_min_risk_multiplier"] = self.settings.backtest_conviction_min_risk_multiplier
+        metrics["conviction_max_risk_multiplier"] = self.settings.backtest_conviction_max_risk_multiplier
+        metrics["conviction_position_floor"] = self.settings.backtest_conviction_position_floor
         metrics["entry_late_skipped"] = entry_late_skipped
         metrics["next_session_entry_used"] = next_session_entry_used
 

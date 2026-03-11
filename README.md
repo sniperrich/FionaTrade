@@ -129,6 +129,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 
 - 默认已预置 `LLM_BASE_URL=https://api.duojie.games`、`LLM_MODEL=claude-sonnet-4-5`；如网关要求鉴权请补 `LLM_API_KEY`。
 - 网关调优参数（建议先保守）：`LLM_TIMEOUT_SECONDS=30`、`LLM_MAX_RETRIES=3`、`LLM_RETRY_BACKOFF_SECONDS=1.5`、`LLM_RETRY_BACKOFF_MULTIPLIER=1.8`、`LLM_RETRY_MAX_DELAY_SECONDS=12`。
+- 新增规则 tradeability 过滤：`EVENT_TRADEABILITY_FILTER_ENABLED=true`、`EVENT_TRADEABILITY_MIN_SCORE=55`，会硬过滤观点文、估值文、技术分析、价格复盘、弱 `unknown` 噪音。
 - SQLite 锁等待可配置：`SQLITE_BUSY_TIMEOUT_SECONDS=30`（避免并发写入时立刻 `database is locked`）。
 - 未配置 `LLM_BASE_URL` 或 `LLM_MODEL` 时，系统自动使用规则回退分析（不会中断主链路）。
 - Finnhub Basic 订阅需设置 `FINNHUB_API_KEY`，开启 `MARKET_BACKFILL_ALLOW_STOOQ_FALLBACK=false`。
@@ -142,6 +143,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 回测新增 routine filing 硬过滤：`<ticker> filed 8-K/10-Q/10-K...` 且无实质负面关键词时直接跳过，避免误分类触发交易。
 - 回测出场锚点修复：`planned_exit` 按 `entry_ts + horizon` 计算，不再用 `event_ts + horizon`。
 - 回测支持可选 Gemini 质量筛选：`use_event_quality_filter=true` + `event_quality_min_score=70`，过滤低质量事件。
+- 回测默认启用规则 tradeability 过滤：`use_tradeability_filter=true` + `tradeability_min_score=55`，会在进入 LLM/执行前硬过滤弱事件与观点型内容。
 - 回测支持 unknown 放行策略：`allow_unknown_with_llm=true` 时，`unknown` 在 LLM 模式可进入方向判断，不再被一刀切排除。
 - 回测支持下一交易时段开盘进场：`allow_next_session_entry=true` 时，超出 `entry_window_min` 的事件可在“下一时段首根 bar”进场（适配盘前/盘后事件）。
 - 回测支持 `slippage_bps` 参数，可先用 `0` 做无摩擦诊断；默认滑点已调为 `4 bps`。
@@ -149,6 +151,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 已写入短中长线管理（`SHORT/MID/LONG` 周期桶），默认开启：`ENABLE_TERM_MANAGEMENT=true`。
 - 回测默认不启用周期桶：`BACKTEST_ENABLE_TERM_HORIZON=false`（需要时可在回测参数 `enable_term_horizon=true` 打开）。
 - LLM 可输出仓位建议：`position_pct_suggestion`（0~1，表示“最大允许仓位”的比例），执行层始终受硬风控上限钳制。
+- 回测新增 conviction position sizing：`conviction_position_sizing=true` 时，高 tradeability / 高 confidence / 高 severity 的 LLM 信号会自动抬高最小仓位建议与风险预算倍率，但仍受 `max_position_pct` 和 `risk_per_trade_pct` 上限约束。
 - 支持一周网格回测（不跑月度）+ 最小交易数过滤，命令：`python scripts/run_weekly_backtest_grid.py --min-trades 5`。
 - 支持 1m 行情覆盖审计：`python scripts/audit_bar_coverage.py --start-date 2026-01-02 --end-date 2026-01-10`。
 - 支持历史 routine filing 事件重标注：`python scripts/relabel_routine_filings.py --start-date 2026-01-01 --end-date 2026-02-01`。
@@ -160,13 +163,21 @@ python scripts/backfill_sec_bodies.py --limit 500
 
 ### 2026-03-11
 - 新增 SQLite busy timeout 配置：`SQLITE_BUSY_TIMEOUT_SECONDS`，`app/db/database.py` 对 SQLite 引擎启用 `timeout + check_same_thread=False`。
+- 新增规则 tradeability 过滤：`AnalysisService.assess_tradeability()` 会硬过滤观点/估值/技术分析/价格复盘类内容；`event_to_signal()` 与回测预取阶段都会拦截。
+- 新增 conviction position sizing：高质量 LLM 信号会自动抬高 `effective_position_pct_suggestion` 和 `effective_risk_per_trade_pct`，避免强信号被明显低配。
 - 新增回测开关：
   - `allow_unknown_with_llm=true`：LLM 回测允许 `unknown` 事件进入方向判断。
   - `allow_next_session_entry=true`：盘前/盘后事件超窗口时可在下一时段首根 bar 进场。
+  - `use_tradeability_filter=true`：进入 LLM 前就过滤弱事件/观点型内容。
+  - `conviction_position_sizing=true`：仅在 LLM 回测中启用的仓位放大器。
 - 新增 `scripts/relabel_routine_filings.py`：可批量将历史 routine filing 重标注为 `sec_filing`。
 - 新增测试：
   - `tests/test_backtest_handoff_followups.py` 覆盖 unknown 放行与下一时段进场。
+  - `tests/test_backtest_handoff_followups.py` 覆盖观点文过滤与 conviction 仓位放大。
   - `tests/test_relabel_routine_filings.py` 覆盖 routine filing 识别。
+- 参考结果（run_id=51，2026-01-21~2026-01-28，LLM + tradeability filter + conviction sizing）：
+  - `events=88`，`tradeability_filtered=25`，`llm_signals=30`，`trades=10`
+  - `win_rate=70.00%`，`total_return=+0.1680%`，`next_session_entry_used=7`
 - 参考结果（run_id=50，2026-01-21~2026-01-28，LLM）：
   - `events=88`，`trades=18`，`win_rate=55.56%`，`total_return=+0.0934%`，`llm_fallback=1`，`next_session_entry_used=12`。
 

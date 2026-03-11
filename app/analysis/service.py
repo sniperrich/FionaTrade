@@ -26,6 +26,7 @@ class AnalysisService:
         self.settings = settings
         self._llm_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._quality_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._tradeability_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         # Finnhub supplemental data cache: key → (data, expire_ts)
         self._fh_cache: dict[str, tuple[Any, float]] = {}
 
@@ -207,7 +208,39 @@ class AnalysisService:
         re.IGNORECASE,
     )
 
-    def _build_evidence_payload(self, session: Session | None, event: Event) -> list[dict[str, Any]]:
+    _WEAK_OPINION_PATTERNS = re.compile(
+        r"\b(overbought|oversold|undervalued|overvalued|valuation|price target|what it means for"
+        r"|what this means for|after a strong run|worth a look|buy sell hold|is .{3,50} a buy"
+        r"|should you buy|should investors|bull case|bear case|technical analysis"
+        r"|momentum stock|why .{3,60} stock|shares? (?:look|looks) expensive)\b",
+        re.IGNORECASE,
+    )
+    _PRICE_ACTION_ONLY_PATTERNS = re.compile(
+        r"\b(shares? (?:rise|rises|fell|fall|falls|drop|drops|jump|jumps|gain|gains)"
+        r"|stock (?:rise|rises|fell|falls|drop|drops|jump|jumps|gain|gains)"
+        r"|lead[s]? dow|lead[s]? s&p|rally|sell-off)\b",
+        re.IGNORECASE,
+    )
+    _HARD_EVENT_PATTERNS = re.compile(
+        r"\b(settle[sd]?|settlement|acquire[sd]?|acquisition|merger|buyback|repurchase"
+        r"|guidance|forecast|outlook|earnings|estimate|sec|doj|investigation|probe"
+        r"|lawsuit|litigation|contract|award|order|penalty|fine|recall|faa|fda"
+        r"|layoff|restructuring|bankrupt|chapter 11|fire|explosion|plant|factory"
+        r"|shutdown|accident|fraud|material weakness|restatement|dividend|deal)\b",
+        re.IGNORECASE,
+    )
+    _WEAK_OPINION_SOURCES = {
+        "seekingalpha",
+        "motley fool",
+        "fool",
+        "investorplace",
+        "simplywallst",
+        "simply wall st",
+        "zacks",
+        "barchart",
+    }
+
+    def _evidence_rows(self, session: Session | None, event: Event, limit: int = 8) -> list[dict[str, Any]]:
         if session is None or event.id is None:
             return []
 
@@ -215,21 +248,38 @@ class AnalysisService:
             select(EventEvidence, RawItem)
             .join(RawItem, RawItem.id == EventEvidence.raw_item_id, isouter=True)
             .where(EventEvidence.event_id == event.id)
-            .order_by(EventEvidence.source_tier.asc(), EventEvidence.id.asc())  # best sources first
-            .limit(8)
+            .order_by(EventEvidence.source_tier.asc(), EventEvidence.id.asc())
+            .limit(limit)
         ).all()
 
-        max_chars_per_item = 20_000
-        max_total_chars = 100_000
-        used_chars = 0
-        evidence_payload: list[dict[str, Any]] = []
-
+        items: list[dict[str, Any]] = []
         for evidence, raw in rows:
             title = (raw.title if raw and raw.title else evidence.summary) or ""
             full_text = (raw.body if raw and raw.body else evidence.summary) or ""
             full_text = full_text.strip()
             if not full_text:
                 full_text = title.strip()
+            items.append(
+                {
+                    "source": evidence.source,
+                    "source_tier": evidence.source_tier,
+                    "url": evidence.url,
+                    "published_at": raw.published_at.isoformat() if raw and raw.published_at else None,
+                    "title": title,
+                    "full_text": full_text,
+                }
+            )
+        return items
+
+    def _build_evidence_payload(self, session: Session | None, event: Event) -> list[dict[str, Any]]:
+        max_chars_per_item = 20_000
+        max_total_chars = 100_000
+        used_chars = 0
+        evidence_payload: list[dict[str, Any]] = []
+
+        for row in self._evidence_rows(session, event):
+            title = row["title"]
+            full_text = row["full_text"]
             if not full_text:
                 continue
 
@@ -240,6 +290,9 @@ class AnalysisService:
 
             # Skip generic market-round-up headlines (no directional signal)
             if title and self._NOISE_TITLE_PATTERNS.search(title):
+                continue
+            # Skip opinion / valuation / technical-commentary content.
+            if title and self._WEAK_OPINION_PATTERNS.search(title):
                 continue
 
             original_len = len(full_text)
@@ -257,10 +310,10 @@ class AnalysisService:
             used_chars += len(full_text)
             evidence_payload.append(
                 {
-                    "source": evidence.source,
-                    "source_tier": evidence.source_tier,
-                    "url": evidence.url,
-                    "published_at": raw.published_at.isoformat() if raw and raw.published_at else None,
+                    "source": row["source"],
+                    "source_tier": row["source_tier"],
+                    "url": row["url"],
+                    "published_at": row["published_at"],
                     "title": title,
                     "full_text": full_text,
                     "text_truncated": original_len > len(full_text),
@@ -268,6 +321,117 @@ class AnalysisService:
             )
 
         return evidence_payload
+
+    def _tradeability_cache_key(self, event: Event) -> tuple[Any, ...]:
+        return (
+            event.id,
+            event.event_type,
+            tuple(event.tickers or []),
+            tuple(event.entities or []),
+            event.severity,
+            event.confidence,
+            (event.summary or "")[:500],
+        )
+
+    def assess_tradeability(self, event: Event, session: Session | None = None) -> dict[str, Any]:
+        cache_key = self._tradeability_cache_key(event)
+        cached = self._tradeability_cache.get(cache_key)
+        if cached:
+            return dict(cached)
+
+        evidence_rows = self._evidence_rows(session, event)
+        candidates = evidence_rows or [
+            {
+                "source": "",
+                "source_tier": 9,
+                "title": event.summary or "",
+                "full_text": event.summary or "",
+            }
+        ]
+        ticker = str(event.tickers[0]).upper() if event.tickers else ""
+        entities = [str(x).lower() for x in (event.entities or []) if x]
+
+        opinion_hits = 0
+        price_action_hits = 0
+        hard_event_hits = 0
+        ticker_specific_hits = 0
+        unique_sources = {str(item.get("source") or "").strip().lower() for item in candidates if item.get("source")}
+        strong_sources = sum(1 for item in candidates if int(item.get("source_tier") or 9) <= 1)
+        weak_source_only = bool(unique_sources) and all(source in self._WEAK_OPINION_SOURCES for source in unique_sources)
+
+        for item in candidates:
+            title = str(item.get("title") or "")
+            text = f"{title}\n{item.get('full_text') or ''}".lower()
+            title_lower = title.lower()
+            if self._WEAK_OPINION_PATTERNS.search(title) or self._WEAK_OPINION_PATTERNS.search(text):
+                opinion_hits += 1
+            if self._PRICE_ACTION_ONLY_PATTERNS.search(title_lower) and not self._HARD_EVENT_PATTERNS.search(text):
+                price_action_hits += 1
+            if self._HARD_EVENT_PATTERNS.search(text):
+                hard_event_hits += 1
+            mention_count = 0
+            if ticker:
+                mention_count += text.count(ticker.lower())
+            for entity in entities[:2]:
+                if len(entity) >= 4:
+                    mention_count += text.count(entity)
+            if mention_count >= 2 or (event.event_type and event.event_type != "unknown" and self._HARD_EVENT_PATTERNS.search(text)):
+                ticker_specific_hits += 1
+
+        score = 35
+        score += min(max(int(event.confidence or 0), 0), 100) // 8
+        score += min(max(int(event.severity or 0), 0), 100) // 10
+        if strong_sources:
+            score += 12
+        if len(unique_sources) >= 2:
+            score += 8
+        if ticker_specific_hits:
+            score += 10
+        if hard_event_hits:
+            score += 18
+        if event.event_type and event.event_type != "unknown":
+            score += 6
+        if weak_source_only:
+            score -= 18
+        if price_action_hits:
+            score -= 22
+        if opinion_hits:
+            score -= 35
+
+        score = max(0, min(score, 100))
+        reason = "tradeable"
+        tradeable = True
+
+        if opinion_hits and not hard_event_hits:
+            tradeable = False
+            reason = "opinion_or_technical_commentary"
+        elif price_action_hits and not hard_event_hits:
+            tradeable = False
+            reason = "price_action_roundup"
+        elif weak_source_only and event.event_type == "unknown" and hard_event_hits == 0:
+            tradeable = False
+            reason = "weak_source_unknown"
+        elif event.event_type == "unknown" and hard_event_hits == 0 and len(unique_sources) < 2:
+            tradeable = False
+            reason = "unknown_without_hard_catalyst"
+        elif score < self.settings.event_tradeability_min_score:
+            tradeable = False
+            reason = "tradeability_score_too_low"
+
+        result = {
+            "tradeable": tradeable,
+            "score": score,
+            "reason": reason,
+            "opinion_hits": opinion_hits,
+            "price_action_hits": price_action_hits,
+            "hard_event_hits": hard_event_hits,
+            "ticker_specific_hits": ticker_specific_hits,
+            "unique_sources": len(unique_sources),
+            "strong_sources": strong_sources,
+            "weak_source_only": weak_source_only,
+        }
+        self._tradeability_cache[cache_key] = dict(result)
+        return result
 
     @staticmethod
     def _pct_change(base: float | None, current: float | None) -> float | None:
@@ -560,7 +724,9 @@ class AnalysisService:
                 "Output JSON only.",
                 "direction must be exactly one of: UP, DOWN, NEUTRAL.",
                 "Do not output trading actions (BUY/SELL/SHORT/HOLD).",
-                "If direction is UP or DOWN, output position_pct in [0,1] as the fraction of max allowed position to use. Use higher size only on very high-conviction, ticker-specific events. If direction is NEUTRAL, set position_pct to 0.",
+                "If direction is UP or DOWN, output position_pct in [0,1] as the fraction of max allowed position to use.",
+                "Position sizing bands: 0.75-1.00 only for hard, ticker-specific, high-confidence catalysts with direct evidence; 0.45-0.70 for clear but less exceptional catalysts; 0.10-0.35 for weaker but still tradeable setups; 0 for non-tradeable or ambiguous content.",
+                "If the article is valuation/opinion/technical commentary, price-action recap, or broad market roundup, output NEUTRAL and position_pct=0.",
                 "THIS IS A SHORT-TERM SIGNAL (next 1-4 hours). Judge the IMMEDIATE price reaction to the news event, NOT the long-term fundamental outlook. A company may be bullish long-term but still drop short-term on bad news.",
                 "Primary signal: news content and event severity. Ask: will this news cause buyers or sellers to act in the next 1-4 hours?",
                 "Use NEUTRAL only when the news is truly routine (e.g. minor analyst note, no surprise) or evidence is contradictory.",
@@ -864,9 +1030,31 @@ class AnalysisService:
         self._quality_cache[cache_key] = dict(result)
         return result
 
-    def event_to_signal(self, event: Event, session: Session | None = None) -> TradeSignal | None:
+    def event_to_signal(
+        self,
+        event: Event,
+        session: Session | None = None,
+        use_tradeability_filter: bool | None = None,
+    ) -> TradeSignal | None:
         if not event.tickers:
             return None
+
+        if use_tradeability_filter is None:
+            use_tradeability_filter = self.settings.event_tradeability_filter_enabled
+        if use_tradeability_filter:
+            tradeability = self.assess_tradeability(event, session=session)
+            if not tradeability.get("tradeable", True):
+                return TradeSignal(
+                    action="HOLD",
+                    ticker=event.tickers[0],
+                    confidence=event.confidence,
+                    horizon_min=self.settings.default_horizon_min,
+                    horizon_profile=None,
+                    position_pct_suggestion=0.0,
+                    reason=f"tradeability_filtered:{tradeability.get('reason', 'low_quality')}",
+                    expires_at=utc_now() + timedelta(minutes=self.settings.default_horizon_min),
+                    fallback_used=False,
+                )
 
         fallback_used = False
         data: dict
