@@ -1,11 +1,15 @@
 """Event taxonomy and simple keyword inference for V1."""
 
+from __future__ import annotations
+
+import re
+
 EVENT_KEYWORDS = {
     "financial_fraud": ["fraud", "restatement", "misstatement", "accounting irregular"],
     "audit_issue": ["audit", "auditor resignation", "material weakness", "internal control"],
     "earnings_miss": ["missed estimates", "earnings miss", "below expectations"],
     "guidance_cut": ["guidance cut", "lowered outlook", "cuts forecast", "warned"],
-    "regulatory_penalty": ["fine", "penalty", "sec charge", "doj", "settlement"],
+    "regulatory_penalty": ["fine", "penalty", "sec charge", "doj", "sec settlement", "doj settlement", "civil penalty"],
     "major_litigation": ["lawsuit", "litigation", "class action", "court ruling"],
     "merger_acquisition": ["acquire", "acquisition", "merger", "takeover", "buyout", "acquires"],
     "buyback": ["buyback", "repurchase", "share repurchase"],
@@ -56,3 +60,79 @@ TIER_SCORE = {
     1: 30,
     2: 15,
 }
+
+_POSITIVE_EARNINGS_RE = re.compile(
+    r"\b(guides?\s+above|above (?:q\d\s+)?estimates|beats? (?:estimates|expectations)"
+    r"|tops? estimates|raises? (?:guidance|forecast|outlook)|higher sales|sales (?:rise|rose|up)"
+    r"|revenue(?:s)? (?:rise|rose|up)|profit (?:rise|rose|up)|stock (?:rose|jumped|surged)"
+    r"|shares? (?:rose|jumped|surged)|better than expected|strong demand)\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_EARNINGS_RE = re.compile(
+    r"\b(missed? estimates|earnings miss|below expectations|below estimates|cuts? (?:forecast|outlook|guidance)"
+    r"|warned on|soft demand|weaker than expected)\b",
+    re.IGNORECASE,
+)
+_REGULATORY_CONTEXT_RE = re.compile(
+    r"\b(sec|doj|penalt(?:y|ies)|fine[sd]?|charge[sd]?|regulator(?:y)?|enforcement|civil penalty|consent order)\b",
+    re.IGNORECASE,
+)
+_POSITIVE_RESOLUTION_RE = re.compile(
+    r"\b(settles? litigation|settlement with|resolves? litigation|wins? (?:case|appeal)"
+    r"|complete victory|dismissed lawsuit|extends? .* deal|stock rose|shares? rose"
+    r"|higher sales|sooner than expected|spin[\s-]?off|maintenance deal)\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_LITIGATION_RE = re.compile(
+    r"\b(class action|lawsuit filed|sued by|court ruling against|legal challenge|appeal denied|trial)\b",
+    re.IGNORECASE,
+)
+_EARNINGS_WINDOW_RE = re.compile(
+    r"\b(earnings|eps|estimate(?:s)?|guid(?:e|ance)|forecast|outlook|quarter|q[1-4]|revenue|sales)\b",
+    re.IGNORECASE,
+)
+_PRICE_RECAP_RE = re.compile(
+    r"\b(how .* stock (?:jumped|rose|fell|dropped|surged|slid)|stock jumped|stock rose|stock fell"
+    r"|shares? jumped|shares? rose|shares? fell)\b",
+    re.IGNORECASE,
+)
+
+
+def resolve_event_type_for_text(event_type: str | None, text: str) -> str:
+    et = (event_type or "unknown").strip()
+    lowered = text or ""
+
+    if not lowered:
+        return et
+
+    if et == "earnings_miss":
+        has_positive = bool(_POSITIVE_EARNINGS_RE.search(lowered))
+        has_negative = bool(_NEGATIVE_EARNINGS_RE.search(lowered))
+        if has_positive and not has_negative:
+            return "unknown"
+        if has_positive and has_negative:
+            return "unknown"
+
+    if et == "regulatory_penalty":
+        if not _REGULATORY_CONTEXT_RE.search(lowered):
+            if any(token in lowered.lower() for token in ("litigation", "lawsuit", "court")):
+                et = "major_litigation"
+            else:
+                return "unknown"
+        if _POSITIVE_RESOLUTION_RE.search(lowered):
+            return "unknown"
+
+    if et == "major_litigation":
+        if _POSITIVE_RESOLUTION_RE.search(lowered) and not _NEGATIVE_LITIGATION_RE.search(lowered):
+            return "unknown"
+
+    return et
+
+
+def is_earnings_window_event(event_type: str | None, text: str) -> bool:
+    et = resolve_event_type_for_text(event_type, text)
+    return et in {"earnings_miss", "guidance_cut"} or bool(_EARNINGS_WINDOW_RE.search(text or ""))
+
+
+def is_price_action_recap(text: str) -> bool:
+    return bool(_PRICE_RECAP_RE.search(text or ""))

@@ -25,6 +25,7 @@ from app.analysis.taxonomy import (
     EXCLUDED_FROM_TRADING,
     NEGATIVE_EVENTS,
     POSITIVE_EVENTS,
+    resolve_event_type_for_text,
 )
 from app.db.models import Event
 from app.schemas.types import TradeSignal
@@ -148,6 +149,14 @@ _STRONG_EVENT_TYPES = frozenset(
 )
 _MODERATE_EVENT_TYPES = frozenset(
     {"earnings_miss", "guidance_cut", "major_litigation", "supply_chain_disruption"}
+)
+_UNKNOWN_HARD_CATALYST_RE = re.compile(
+    r"\b(settle[sd]?|settlement|acquire[sd]?|acquisition|merger|buyback|repurchase"
+    r"|guidance|forecast|outlook|earnings|estimate|sec|doj|investigation|probe"
+    r"|lawsuit|litigation|contract|award|order|penalty|fine|recall|faa|fda"
+    r"|layoff|restructuring|bankrupt|chapter 11|fire|explosion|spin[\s-]?off"
+    r"|victory|dismissed lawsuit)\b",
+    re.IGNORECASE,
 )
 
 
@@ -288,10 +297,10 @@ class SignalValidator:
         issue_tags: list[str],
         rationale: list[str],
     ) -> EventStrength:
-        event_type = event.event_type or ""
-        severity = event.severity or 0
         summary = event.summary or ""
-        confidence = event.confidence or 0
+        event_type = resolve_event_type_for_text(event.event_type or "", summary)
+        severity = event.severity or 0
+        confidence = max(int(event.confidence or 0), int(signal.confidence or 0))
 
         # Noise headline pattern
         if _NOISE_TITLE_RE.search(summary):
@@ -299,7 +308,18 @@ class SignalValidator:
             rationale.append("Event summary matches a generic market-round-up headline pattern.")
             return EventStrength.NOISE
 
-        # Unknown / excluded event type — no directional edge
+        if event_type == "unknown":
+            if signal.action in {"BUY", "SHORT"} and confidence >= 60 and _UNKNOWN_HARD_CATALYST_RE.search(summary):
+                issue_tags.append("unknown_event_type")
+                rationale.append(
+                    "Stored event type is unknown, but the summary still looks like a ticker-specific hard catalyst."
+                )
+                return EventStrength.MODERATE if severity >= 70 else EventStrength.WEAK
+            issue_tags.append("excluded_event_type")
+            rationale.append("Event type 'unknown' has no confirmed hard catalyst after validation.")
+            return EventStrength.NOISE
+
+        # Other excluded event types — no directional edge
         if event_type in EXCLUDED_FROM_TRADING:
             issue_tags.append("excluded_event_type")
             rationale.append(f"Event type '{event_type}' is excluded from trading (no directional edge).")
@@ -457,7 +477,7 @@ class SignalValidator:
         issue_tags: list[str],
         rationale: list[str],
     ) -> Consistency:
-        event_type = event.event_type or ""
+        event_type = resolve_event_type_for_text(event.event_type or "", event.summary or "")
 
         # Fallback signal direction vs taxonomy expectation
         if signal.fallback_used:
@@ -542,6 +562,7 @@ class SignalValidator:
         _CRITICAL_TAG_PENALTIES: dict[str, int] = {
             "noise_headline": 20,
             "excluded_event_type": 25,
+            "unknown_event_type": 5,
             "ticker_mismatch": 15,
             "large_move_before_entry": 10,
             "near_resistance": 5,

@@ -11,6 +11,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.analysis.rules_fallback import fallback_action
+from app.analysis.taxonomy import resolve_event_type_for_text
 from app.core.config import Settings
 from app.core.utils import ensure_utc, utc_now
 from app.db.models import Bar1m, Event, EventEvidence, RawItem
@@ -698,8 +699,21 @@ class AnalysisService:
 
         return features
 
+    def _analysis_event_type(self, event: Event, session: Session | None = None) -> str:
+        text_parts = [event.summary or ""]
+        if session is not None:
+            for row in self._evidence_rows(session, event, limit=3):
+                title = str(row.get("title") or "")
+                full_text = str(row.get("full_text") or "")
+                if title:
+                    text_parts.append(title)
+                if full_text:
+                    text_parts.append(full_text[:1200])
+        return resolve_event_type_for_text(event.event_type, "\n".join(part for part in text_parts if part))
+
     def _llm_extract(self, event: Event, session: Session | None = None) -> dict:
-        prior_direction = self._event_prior_direction(event.event_type)
+        analysis_event_type = self._analysis_event_type(event, session=session)
+        prior_direction = self._event_prior_direction(analysis_event_type)
         evidence_payload = self._build_evidence_payload(session, event)
         market_features = self._event_market_features(session, event)
         prompt = {
@@ -707,7 +721,8 @@ class AnalysisService:
             "event": {
                 "event_id": event.id,
                 "event_time": event.event_time.isoformat() if event.event_time else None,
-                "event_type": event.event_type,
+                "event_type": analysis_event_type,
+                "original_event_type": event.event_type,
                 "tickers": event.tickers,
                 "severity": event.severity,
                 "confidence": event.confidence,
@@ -720,6 +735,7 @@ class AnalysisService:
             "evidence": evidence_payload,
             "rules": [
                 "RELEVANCE CHECK (do this first): Before predicting direction, verify the articles are actually about a company-specific event for the named ticker(s). If the articles are about macro/broad-market topics (central bank policy, government shutdown, broad sector ETFs, another company entirely) with only a passing mention of the ticker, output NEUTRAL with rationale 'article_not_ticker_specific'.",
+                "EVENT-TYPE SANITY CHECK: If the stored event_type conflicts with the article text, trust the article text. Examples: 'guides above estimates', 'higher sales', 'wins case', 'complete victory', or 'settles litigation' should not be treated as automatically negative just because the stored label is negative.",
                 "MERGER/ACQUISITION RULE: If event_type is 'merger_acquisition' and the ticker is the TARGET (being acquired), direction is almost always UP (acquisition premium). Only choose DOWN if the ticker is the ACQUIRER paying a very high premium with clear negative market reaction evidence.",
                 "Output JSON only.",
                 "direction must be exactly one of: UP, DOWN, NEUTRAL.",
@@ -850,13 +866,14 @@ class AnalysisService:
         }
 
     def _fallback(self, event: Event) -> dict:
+        analysis_event_type = resolve_event_type_for_text(event.event_type, event.summary or "")
         return {
-            "action": fallback_action(event.event_type),
+            "action": fallback_action(analysis_event_type),
             "ticker": event.tickers[0] if event.tickers else "",
             "horizon_min": self.settings.default_horizon_min,
             "horizon_profile": None,
             "position_pct_suggestion": None,
-            "reason": f"fallback rule for {event.event_type}",
+            "reason": f"fallback rule for {analysis_event_type}",
         }
 
     def _llm_cache_key(self, event: Event) -> tuple[Any, ...]:

@@ -182,6 +182,35 @@ def test_sec_filing_excluded_type_rejected(validator):
     )
 
 
+def test_unknown_hard_catalyst_not_auto_rejected(validator):
+    e = _event(
+        event_type="unknown",
+        severity=70,
+        confidence=72,
+        summary="Honeywell settles litigation with Flexjet and extends maintenance deal",
+    )
+    result = validator.validate(event=e, signal=_signal(action="BUY"))
+    assert result.event_strength in (EventStrength.WEAK, EventStrength.MODERATE)
+    assert "unknown_event_type" in result.issue_tags
+    assert "excluded_event_type" not in result.issue_tags
+    assert result.execution_recommendation in (
+        ExecutionRecommendation.APPROVE,
+        ExecutionRecommendation.DOWNWEIGHT,
+    )
+
+
+def test_positive_resolution_summary_drops_taxonomy_conflict(validator):
+    e = _event(
+        event_type="regulatory_penalty",
+        severity=70,
+        confidence=72,
+        summary="Honeywell posts higher sales and will spin off aerospace unit sooner than expected",
+    )
+    result = validator.validate(event=e, signal=_signal(action="BUY"))
+    assert "direction_vs_taxonomy_conflict" not in result.issue_tags
+    assert result.execution_recommendation != ExecutionRecommendation.REJECT
+
+
 # ── Event Strength: Weak → DOWNWEIGHT ────────────────────────────────────────
 
 def test_weak_event_downweighted(validator):

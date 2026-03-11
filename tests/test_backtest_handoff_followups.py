@@ -160,6 +160,99 @@ def test_backtest_dedup_same_day_event(session, settings):
     assert result_dedup.metrics["dedup_dropped"] == 1
 
 
+def test_backtest_dedup_earnings_window_across_days(session, settings):
+    event_time = datetime(2026, 1, 27, 21, 40, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            Event(
+                event_type="earnings_miss",
+                entities=["TXN"],
+                tickers=["TXN"],
+                severity=70,
+                event_time=event_time,
+                confidence=80,
+                validation_status="VALID",
+                summary="Texas Instruments misses estimates in fourth quarter",
+            ),
+            Event(
+                event_type="earnings_miss",
+                entities=["TXN"],
+                tickers=["TXN"],
+                severity=72,
+                event_time=event_time + timedelta(hours=16),
+                confidence=82,
+                validation_status="VALID",
+                summary="Texas Instruments posts another earnings update after quarterly results",
+            ),
+        ]
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="TXN",
+                ts=event_time + timedelta(minutes=1),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="TXN",
+                ts=event_time + timedelta(minutes=61),
+                open=99.0,
+                high=100.0,
+                low=98.0,
+                close=99.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="TXN",
+                ts=event_time + timedelta(hours=16, minutes=1),
+                open=98.0,
+                high=99.0,
+                low=97.0,
+                close=98.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="TXN",
+                ts=event_time + timedelta(hours=17, minutes=1),
+                open=97.0,
+                high=98.0,
+                low=96.0,
+                close=97.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    base_params = {
+        "start_date": "2026-01-27",
+        "end_date": "2026-01-29",
+        "min_confidence": 70,
+        "horizon_min": 60,
+        "hard_stops": False,
+        "risk_sizing": False,
+        "entry_window_min": 120,
+        "use_signal_validation": False,
+        "regular_session_only": False,
+    }
+
+    result_no_dedup = svc.run(session, params={**base_params, "dedup_same_day_event": False})
+    result_dedup = svc.run(session, params={**base_params, "dedup_same_day_event": True})
+
+    assert result_no_dedup.metrics["trades"] == 2
+    assert result_dedup.metrics["trades"] == 1
+    assert result_dedup.metrics["earnings_window_dedup_dropped"] == 1
+
+
 def test_backtest_regime_risk_adjust_multiplier(session, settings):
     event_time = datetime(2026, 1, 10, 14, 30, tzinfo=timezone.utc)
     session.add(

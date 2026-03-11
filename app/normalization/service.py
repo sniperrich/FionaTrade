@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.analysis.taxonomy import EVENT_KEYWORDS
+from app.analysis.taxonomy import EVENT_KEYWORDS, resolve_event_type_for_text
 from app.core.company_names import COMPANY_NAME_TO_TICKER
 from app.core.config import Settings
 from app.core.utils import minute_bucket
@@ -129,7 +129,7 @@ class NormalizationService:
         for event_type, keywords in EVENT_KEYWORDS.items():
             for keyword in keywords:
                 if keyword in lowered:
-                    return event_type
+                    return resolve_event_type_for_text(event_type, lowered)
         return "unknown"
 
     def _llm_classify(self, text: str) -> str:
@@ -160,7 +160,7 @@ class NormalizationService:
         if result != "unknown":
             return result
         # Fall back to LLM classifier for ambiguous items
-        return self._llm_classify(text)
+        return resolve_event_type_for_text(self._llm_classify(text), text)
 
     def _is_routine_filing_item(self, item: RawItem, text: str) -> bool:
         title = (item.title or "").lower()

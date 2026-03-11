@@ -18,6 +18,7 @@ from app.analysis.signal_validator import (
     ExecutionRecommendation,
     SignalValidator,
 )
+from app.analysis.taxonomy import is_earnings_window_event, is_price_action_recap, resolve_event_type_for_text
 from app.core.config import Settings
 from app.core.logging import ensure_logging, get_app_logger, log_writeout
 from app.core.utils import ensure_utc, utc_now
@@ -316,6 +317,35 @@ class BacktestEngineService:
         deduped.sort(key=lambda e: ensure_utc(e.event_time))
         return deduped
 
+    def _deduplicate_earnings_window_events(self, events: list[Event], window_hours: int = 36) -> list[Event]:
+        """Keep only the first anchor event for a ticker's earnings window, skip later recaps/follow-ups."""
+        deduped: list[Event] = []
+        last_anchor_ts_by_ticker: dict[str, datetime] = {}
+        window = timedelta(hours=max(1, window_hours))
+
+        for event in events:
+            if not event.tickers:
+                deduped.append(event)
+                continue
+
+            ticker = str(event.tickers[0]).upper()
+            event_ts = ensure_utc(event.event_time)
+            summary = event.summary or ""
+            effective_event_type = resolve_event_type_for_text(event.event_type, summary)
+            is_anchor = is_earnings_window_event(effective_event_type, summary)
+            is_followup = is_price_action_recap(summary)
+
+            last_anchor_ts = last_anchor_ts_by_ticker.get(ticker)
+            within_window = bool(last_anchor_ts and event_ts - last_anchor_ts <= window)
+            if within_window and (is_anchor or is_followup):
+                continue
+
+            if is_anchor:
+                last_anchor_ts_by_ticker[ticker] = event_ts
+            deduped.append(event)
+
+        return deduped
+
     def _first_barrier_hit(
         self,
         session: Session,
@@ -552,9 +582,14 @@ class BacktestEngineService:
 
         events = session.execute(stmt.order_by(Event.event_time.asc())).scalars().all()
         events_before_dedup = len(events)
+        same_day_dedup_dropped = 0
+        earnings_window_dedup_dropped = 0
         if dedup_same_day_event:
-            events = self._deduplicate_same_day_events(events)
-        dedup_dropped = max(0, events_before_dedup - len(events))
+            same_day_events = self._deduplicate_same_day_events(events)
+            same_day_dedup_dropped = max(0, len(events) - len(same_day_events))
+            events = self._deduplicate_earnings_window_events(same_day_events)
+            earnings_window_dedup_dropped = max(0, len(same_day_events) - len(events))
+        dedup_dropped = same_day_dedup_dropped + earnings_window_dedup_dropped
         started = time.perf_counter()
 
         self.logger.info(
@@ -588,6 +623,8 @@ class BacktestEngineService:
                 "regime_bear_risk_multiplier": regime_bear_risk_multiplier,
                 "dedup_same_day_event": dedup_same_day_event,
                 "dedup_dropped": dedup_dropped,
+                "same_day_dedup_dropped": same_day_dedup_dropped,
+                "earnings_window_dedup_dropped": earnings_window_dedup_dropped,
                 "slippage_bps": slippage_bps,
                 "daily_circuit_breaker": daily_circuit_breaker,
                 "enable_term_horizon": enable_term_horizon,
@@ -1102,6 +1139,8 @@ class BacktestEngineService:
         metrics["regime_bear_risk_multiplier"] = regime_bear_risk_multiplier
         metrics["dedup_same_day_event"] = dedup_same_day_event
         metrics["dedup_dropped"] = dedup_dropped
+        metrics["same_day_dedup_dropped"] = same_day_dedup_dropped
+        metrics["earnings_window_dedup_dropped"] = earnings_window_dedup_dropped
         metrics["regime_trade_counts"] = regime_trade_counts
         metrics["slippage_bps"] = slippage_bps
         metrics["exit_reason_counts"] = exit_reason_counts

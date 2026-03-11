@@ -164,6 +164,27 @@ python scripts/backfill_sec_bodies.py --limit 500
 ## 近期变更
 
 ### 2026-03-11
+- 事件类型解析新增文本纠偏：`resolve_event_type_for_text()` 会根据标题/摘要中的正负面措辞修正陈旧 taxonomy 标签，避免 `guides above estimates` 仍被当成 `earnings_miss`、`settles litigation` 仍被当成负面诉讼。
+- `NormalizationService` 与 `AnalysisService` 统一改用“文本修正后的有效事件类型”：
+  - LLM prompt 里同时提供 `original_event_type` 和 `effective_event_type`
+  - 若存量标签与正文冲突，优先信正文
+  - 规则 fallback 也基于修正后的事件类型出方向
+- `SignalValidator` 不再对所有 `unknown` 一刀切拒绝：
+  - 带硬催化剂措辞的 `unknown`（如产品召回、监管调查、CEO 变动、并购确认等）可进入 `WEAK/MODERATE` 审核流
+  - 仍会对纯观点、估值、价格复盘型 `unknown` 继续拒绝
+- 回测新增“财报窗口跨日去重”：
+  - 同一 `ticker` 在 36 小时财报窗口内的 follow-up / price recap / after-earnings commentary 只保留首个 anchor 事件
+  - metrics 新增 `earnings_window_dedup_dropped`
+- 新增测试：
+  - `tests/test_normalization_service.py` 覆盖正面财报/正面诉讼标题不再误落入负面事件类型
+  - `tests/test_signal_validator.py` 覆盖 hard-catalyst `unknown` 不再被自动拒绝
+  - `tests/test_backtest_handoff_followups.py` 覆盖财报窗口跨日去重
+- 2025-10 整月参考结果（run_id=56，LLM + 重新跑 tradeability/source 筛选 + earnings-window dedup）：
+  - `raw_items=3380`，`events=2931`，`valid_events=2924`
+  - 预过滤后：`same_day_dedup_dropped=1981`，`earnings_window_dedup_dropped=14`，`events_considered=929`
+  - 进入 LLM：`llm_signals=408`，`tradeability_filtered=368`，`validation_blocked=100`
+  - 成交：`trades=10`，`win_rate=50.00%`，`total_return=+0.2114%`，`profit_factor=3.63`
+  - 来源归因：`yahoo=+$204.01`，`dowjones=+$7.66`，`seekingalpha=-$0.26`
 - 回测默认仓位参数上调：
   - `MAX_POSITION_PCT: 10% -> 15%`
   - `BACKTEST_RISK_PER_TRADE_PCT: 0.1% -> 0.2%`
@@ -198,6 +219,11 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 整月参考结果（run_id=55，2026-01-01~2026-02-01，采用新的默认仓位参数）：
   - `events=308`，`tradeability_filtered=73`，`validation_blocked=25`，`llm_signals=91`，`trades=7`
   - `win_rate=42.86%`，`total_return=-0.1690%`，`next_session_entry_used=6`，`entry_late_skipped=2`
+- 整月参考结果（run_id=56，2025-10-01~2025-11-01，重新跑消息源筛选/事件纠偏/财报窗口去重）：
+  - `raw_items=3380`，`events=2931`，`valid_events=2924`
+  - `same_day_dedup_dropped=1981`，`earnings_window_dedup_dropped=14`，`events_considered=929`
+  - `tradeability_filtered=368`，`validation_blocked=100`，`llm_signals=408`，`trades=10`
+  - `win_rate=50.00%`，`profit_factor=3.63`，`total_return=+0.2114%`
 - 参考结果（run_id=50，2026-01-21~2026-01-28，LLM）：
   - `events=88`，`trades=18`，`win_rate=55.56%`，`total_return=+0.0934%`，`llm_fallback=1`，`next_session_entry_used=12`。
 
