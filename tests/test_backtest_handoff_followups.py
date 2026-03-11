@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.backtest_engine.service import BacktestEngineService
 from app.db.models import Bar1m, Event
+from app.schemas.types import TradeSignal
 
 
 def test_backtest_entry_window_configurable(session, settings):
@@ -55,6 +56,7 @@ def test_backtest_entry_window_configurable(session, settings):
         "hard_stops": False,
         "risk_sizing": False,
         "use_signal_validation": False,
+        "allow_next_session_entry": False,
     }
 
     result_60 = svc.run(session, params={**base_params, "entry_window_min": 60})
@@ -442,3 +444,129 @@ def test_backtest_quality_filter_blocks_low_score(session, settings):
     )
     assert result.metrics["trades"] == 0
     assert result.metrics["quality_filtered"] == 1
+
+
+def test_backtest_allows_unknown_events_in_llm_mode(session, settings):
+    event_time = datetime(2026, 1, 22, 8, 0, tzinfo=timezone.utc)
+    event = Event(
+        event_type="unknown",
+        entities=["AAPL"],
+        tickers=["AAPL"],
+        severity=55,
+        event_time=event_time,
+        confidence=80,
+        validation_status="VALID",
+        summary="company specific event headline",
+    )
+    session.add(event)
+    session.add_all(
+        [
+            Bar1m(
+                ticker="AAPL",
+                ts=datetime(2026, 1, 22, 8, 1, tzinfo=timezone.utc),
+                open=100.0,
+                high=100.5,
+                low=99.5,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=datetime(2026, 1, 22, 10, 1, tzinfo=timezone.utc),
+                open=101.0,
+                high=101.0,
+                low=100.0,
+                close=101.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    svc.analysis.event_to_signal = lambda _event, **_kwargs: TradeSignal(  # noqa: SLF001
+        action="BUY",
+        ticker="AAPL",
+        confidence=80,
+        horizon_min=120,
+        reason="llm unknown allowed",
+        expires_at=event_time + timedelta(minutes=120),
+        fallback_used=False,
+    )
+    base_params = {
+        "start_date": "2026-01-22",
+        "end_date": "2026-01-23",
+        "min_confidence": 30,
+        "use_llm": True,
+        "use_signal_validation": False,
+        "hard_stops": False,
+        "risk_sizing": False,
+        "entry_window_min": 120,
+        "allow_next_session_entry": False,
+    }
+    blocked = svc.run(session, params={**base_params, "allow_unknown_with_llm": False})
+    allowed = svc.run(session, params={**base_params, "allow_unknown_with_llm": True})
+    assert blocked.metrics["trades"] == 0
+    assert allowed.metrics["trades"] == 1
+
+
+def test_backtest_allows_next_session_open_entry(session, settings):
+    event_time = datetime(2026, 1, 22, 8, 0, tzinfo=timezone.utc)
+    session.add(
+        Event(
+            event_type="policy_shock",
+            entities=["AAPL"],
+            tickers=["AAPL"],
+            severity=70,
+            event_time=event_time,
+            confidence=80,
+            validation_status="VALID",
+            summary="policy event premarket",
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="AAPL",
+                ts=datetime(2026, 1, 22, 14, 30, tzinfo=timezone.utc),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=datetime(2026, 1, 22, 16, 30, tzinfo=timezone.utc),
+                open=101.0,
+                high=102.0,
+                low=100.0,
+                close=101.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    base_params = {
+        "start_date": "2026-01-22",
+        "end_date": "2026-01-23",
+        "min_confidence": 30,
+        "use_llm": False,
+        "use_signal_validation": False,
+        "hard_stops": False,
+        "risk_sizing": False,
+        "horizon_min": 120,
+        "entry_window_min": 120,
+    }
+    blocked = svc.run(session, params={**base_params, "allow_next_session_entry": False})
+    allowed = svc.run(session, params={**base_params, "allow_next_session_entry": True})
+    assert blocked.metrics["trades"] == 0
+    assert blocked.metrics["entry_late_skipped"] == 1
+    assert allowed.metrics["trades"] == 1
+    assert allowed.metrics["next_session_entry_used"] == 1

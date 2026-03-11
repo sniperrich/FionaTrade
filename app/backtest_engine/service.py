@@ -154,6 +154,29 @@ class BacktestEngineService:
             return False
         return True
 
+    @staticmethod
+    def _is_event_excluded(event_type: str | None, use_llm: bool, allow_unknown_with_llm: bool) -> bool:
+        from app.analysis.taxonomy import EXCLUDED_FROM_TRADING
+
+        et = (event_type or "").strip()
+        if et == "unknown" and use_llm and allow_unknown_with_llm:
+            return False
+        return et in EXCLUDED_FROM_TRADING
+
+    def _is_first_bar_of_day(self, session: Session, ticker: str, ts: datetime) -> bool:
+        bar_ts = ensure_utc(ts)
+        day_start = bar_ts.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        first = session.execute(
+            select(Bar1m)
+            .where(and_(Bar1m.ticker == ticker, Bar1m.ts >= day_start, Bar1m.ts < day_end))
+            .order_by(Bar1m.ts.asc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if not first:
+            return False
+        return ensure_utc(first.ts) == bar_ts
+
     def _market_regime_for_event(self, session: Session, event_ts: datetime) -> tuple[str, float | None]:
         """Infer broad market regime from SPY return over ~20 trading days."""
         start_ts = ensure_utc(event_ts) - timedelta(days=28)
@@ -351,6 +374,14 @@ class BacktestEngineService:
             params.get("enable_term_horizon"),
             default=self.settings.backtest_enable_term_horizon,
         )
+        allow_unknown_with_llm = self._as_bool(
+            params.get("allow_unknown_with_llm"),
+            default=self.settings.backtest_allow_unknown_with_llm,
+        )
+        allow_next_session_entry = self._as_bool(
+            params.get("allow_next_session_entry"),
+            default=self.settings.backtest_allow_next_session_entry,
+        )
         use_event_quality_filter = self._as_bool(
             params.get("use_event_quality_filter"),
             default=self.settings.backtest_use_event_quality_filter,
@@ -438,6 +469,8 @@ class BacktestEngineService:
                 "slippage_bps": slippage_bps,
                 "daily_circuit_breaker": daily_circuit_breaker,
                 "enable_term_horizon": enable_term_horizon,
+                "allow_unknown_with_llm": allow_unknown_with_llm,
+                "allow_next_session_entry": allow_next_session_entry,
                 "use_event_quality_filter": use_event_quality_filter,
                 "event_quality_min_score": event_quality_min_score,
                 "event_quality_fail_open": event_quality_fail_open,
@@ -460,6 +493,8 @@ class BacktestEngineService:
         routine_filing_skipped = 0
         quality_filtered = 0
         quality_filter_errors = 0
+        entry_late_skipped = 0
+        next_session_entry_used = 0
 
         current_day: date | None = None
         day_start_equity = equity
@@ -520,7 +555,7 @@ class BacktestEngineService:
             )
             tradeable_events = [
                 e for e in events
-                if e.tickers and e.event_type not in EXCLUDED_FROM_TRADING
+                if e.tickers and not self._is_event_excluded(e.event_type, use_llm=use_llm, allow_unknown_with_llm=allow_unknown_with_llm)
                 and (min_severity == 0 or (e.severity or 0) >= min_severity)
                 and not self._is_routine_filing_event(e)
                 and not any(p in (e.summary or "").lower() for p in _MACRO_NOISE_PREFETCH)
@@ -614,8 +649,7 @@ class BacktestEngineService:
                 emit_progress(idx)
                 continue
 
-            from app.analysis.taxonomy import EXCLUDED_FROM_TRADING  # noqa: already imported above if use_llm
-            if event.event_type in EXCLUDED_FROM_TRADING:
+            if self._is_event_excluded(event.event_type, use_llm=use_llm, allow_unknown_with_llm=allow_unknown_with_llm):
                 emit_progress(idx)
                 continue
 
@@ -719,9 +753,19 @@ class BacktestEngineService:
 
             entry_bar = self._bar_at_or_after(session, ticker, event_ts + timedelta(minutes=1))
             # Skip if no bar within configured entry window of event.
-            if not entry_bar or ensure_utc(entry_bar.ts) > event_ts + timedelta(minutes=entry_window_min):
+            if not entry_bar:
                 emit_progress(idx)
                 continue
+            if ensure_utc(entry_bar.ts) > event_ts + timedelta(minutes=entry_window_min):
+                allow_next_session = (
+                    allow_next_session_entry
+                    and self._is_first_bar_of_day(session, ticker, ensure_utc(entry_bar.ts))
+                )
+                if not allow_next_session:
+                    entry_late_skipped += 1
+                    emit_progress(idx)
+                    continue
+                next_session_entry_used += 1
             planned_exit_ts = ensure_utc(entry_bar.ts) + timedelta(minutes=local_horizon_min)
             planned_exit_bar = self._bar_at_or_after(session, ticker, planned_exit_ts)
             if not planned_exit_bar:
@@ -876,6 +920,10 @@ class BacktestEngineService:
         metrics["event_quality_fail_open"] = event_quality_fail_open
         metrics["quality_filtered"] = quality_filtered
         metrics["quality_filter_errors"] = quality_filter_errors
+        metrics["allow_unknown_with_llm"] = allow_unknown_with_llm
+        metrics["allow_next_session_entry"] = allow_next_session_entry
+        metrics["entry_late_skipped"] = entry_late_skipped
+        metrics["next_session_entry_used"] = next_session_entry_used
 
         run.metrics = metrics
         run.equity_curve = equity_curve

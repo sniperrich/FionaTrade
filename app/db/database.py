@@ -10,7 +10,14 @@ from app.core.config import get_settings
 Base = declarative_base()
 
 settings = get_settings()
-engine = create_engine(settings.database_url, future=True)
+
+engine_kwargs = {"future": True}
+if settings.database_url.startswith("sqlite"):
+    engine_kwargs["connect_args"] = {
+        "check_same_thread": False,
+        "timeout": settings.sqlite_busy_timeout_seconds,
+    }
+engine = create_engine(settings.database_url, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 
 

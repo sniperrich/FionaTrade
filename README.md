@@ -129,6 +129,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 
 - 默认已预置 `LLM_BASE_URL=https://api.duojie.games`、`LLM_MODEL=claude-sonnet-4-5`；如网关要求鉴权请补 `LLM_API_KEY`。
 - 网关调优参数（建议先保守）：`LLM_TIMEOUT_SECONDS=30`、`LLM_MAX_RETRIES=3`、`LLM_RETRY_BACKOFF_SECONDS=1.5`、`LLM_RETRY_BACKOFF_MULTIPLIER=1.8`、`LLM_RETRY_MAX_DELAY_SECONDS=12`。
+- SQLite 锁等待可配置：`SQLITE_BUSY_TIMEOUT_SECONDS=30`（避免并发写入时立刻 `database is locked`）。
 - 未配置 `LLM_BASE_URL` 或 `LLM_MODEL` 时，系统自动使用规则回退分析（不会中断主链路）。
 - Finnhub Basic 订阅需设置 `FINNHUB_API_KEY`，开启 `MARKET_BACKFILL_ALLOW_STOOQ_FALLBACK=false`。
 - SEC 抓取已增加重试和 404 原子订阅回退（ATOM feed）；`SEC_USER_AGENT` 请填写真实邮箱。
@@ -141,6 +142,8 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 回测新增 routine filing 硬过滤：`<ticker> filed 8-K/10-Q/10-K...` 且无实质负面关键词时直接跳过，避免误分类触发交易。
 - 回测出场锚点修复：`planned_exit` 按 `entry_ts + horizon` 计算，不再用 `event_ts + horizon`。
 - 回测支持可选 Gemini 质量筛选：`use_event_quality_filter=true` + `event_quality_min_score=70`，过滤低质量事件。
+- 回测支持 unknown 放行策略：`allow_unknown_with_llm=true` 时，`unknown` 在 LLM 模式可进入方向判断，不再被一刀切排除。
+- 回测支持下一交易时段开盘进场：`allow_next_session_entry=true` 时，超出 `entry_window_min` 的事件可在“下一时段首根 bar”进场（适配盘前/盘后事件）。
 - 回测支持 `slippage_bps` 参数，可先用 `0` 做无摩擦诊断；默认滑点已调为 `4 bps`。
 - `MIN_TRADE_CONFIDENCE` 默认调整为 `70`（避免实时链路在 `75` 下几乎全部被过滤）。
 - 已写入短中长线管理（`SHORT/MID/LONG` 周期桶），默认开启：`ENABLE_TERM_MANAGEMENT=true`。
@@ -148,11 +151,24 @@ python scripts/backfill_sec_bodies.py --limit 500
 - LLM 可输出仓位建议：`position_pct_suggestion`（0~1，表示“最大允许仓位”的比例），执行层始终受硬风控上限钳制。
 - 支持一周网格回测（不跑月度）+ 最小交易数过滤，命令：`python scripts/run_weekly_backtest_grid.py --min-trades 5`。
 - 支持 1m 行情覆盖审计：`python scripts/audit_bar_coverage.py --start-date 2026-01-02 --end-date 2026-01-10`。
+- 支持历史 routine filing 事件重标注：`python scripts/relabel_routine_filings.py --start-date 2026-01-01 --end-date 2026-02-01`。
 - 支持 LLM 一致性测试（同窗重复 3 次）：`python scripts/run_llm_consistency_check.py --runs 3`。
 - 回测并发 LLM workers 可通过参数 `llm_workers`（默认 8）调整。
 - 回测支持 `min_severity` 参数（默认 0 不过滤；70 = 只交易强信号事件 regulatory/accident/supply_chain/litigation 类）。
 
 ## 近期变更
+
+### 2026-03-11
+- 新增 SQLite busy timeout 配置：`SQLITE_BUSY_TIMEOUT_SECONDS`，`app/db/database.py` 对 SQLite 引擎启用 `timeout + check_same_thread=False`。
+- 新增回测开关：
+  - `allow_unknown_with_llm=true`：LLM 回测允许 `unknown` 事件进入方向判断。
+  - `allow_next_session_entry=true`：盘前/盘后事件超窗口时可在下一时段首根 bar 进场。
+- 新增 `scripts/relabel_routine_filings.py`：可批量将历史 routine filing 重标注为 `sec_filing`。
+- 新增测试：
+  - `tests/test_backtest_handoff_followups.py` 覆盖 unknown 放行与下一时段进场。
+  - `tests/test_relabel_routine_filings.py` 覆盖 routine filing 识别。
+- 参考结果（run_id=50，2026-01-21~2026-01-28，LLM）：
+  - `events=88`，`trades=18`，`win_rate=55.56%`，`total_return=+0.0934%`，`llm_fallback=1`，`next_session_entry_used=12`。
 
 ### 2026-03-10
 - 回测引擎新增 `entry_window_min` 参数（默认取 `BACKTEST_ENTRY_WINDOW_MIN=120`），事件后 120 分钟内有 bar 才允许进场。
@@ -167,6 +183,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - `TradeSignal` 新增 `position_pct_suggestion`，LLM 可建议 0~1 仓位比例；执行层做硬上限钳制（不突破 max_position/risk cap）。
 - 新增可选 Gemini 质量筛选（`use_event_quality_filter`），低于阈值事件直接过滤，支持 `event_quality_fail_open`。
 - LLM 网关重试改为配置化参数（超时/重试/指数退避），`event_to_signal` 会按配置自动退避重试，降低 429/502 造成的全量 fallback。
+- 回测新增 `allow_unknown_with_llm` 与 `allow_next_session_entry` 两个开关，解决 `unknown` 事件硬过滤和盘前/盘后 `entry_late` 导致的样本过少问题。
 
 ### 2026-03-08 (第三批 — Signal Validation Layer)
 - **新增 `app/analysis/signal_validator.py`**：Signal Validation Layer，纯规则、无 LLM、同步执行。输出 `SignalValidationResult`（8维评估 + `review_score` + `execution_recommendation`）。

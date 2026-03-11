@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     app_name: str = "FionaTrade"
     env: str = "dev"
     database_url: str = "sqlite:///./fionatrade.db"
+    sqlite_busy_timeout_seconds: float = 30.0
 
     poll_interval_seconds: int = 60
     enable_scheduler: bool = True
@@ -68,6 +69,8 @@ class Settings(BaseSettings):
     backtest_use_event_quality_filter: bool = False
     backtest_event_quality_min_score: int = 70
     backtest_event_quality_fail_open: bool = True
+    backtest_allow_unknown_with_llm: bool = True
+    backtest_allow_next_session_entry: bool = True
 
     min_trade_confidence: int = 70
 
