@@ -921,4 +921,4 @@ def test_backtest_conviction_position_sizing_lifts_strong_event_size(session, se
     assert float(boosted_run.metrics["risk_per_trade_pct"]) == float(base_run.metrics["risk_per_trade_pct"])
     assert boosted_run.metrics["conviction_position_sizing"] is True
     assert float(boosted_row.trade_log[0]["qty"]) > float(base_row.trade_log[0]["qty"])
-    assert float(boosted_row.trade_log[0]["effective_position_pct_suggestion"]) >= 0.45
+    assert float(boosted_row.trade_log[0]["effective_position_pct_suggestion"]) >= settings.backtest_conviction_position_floor

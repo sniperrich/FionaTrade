@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     term_long_horizon_min: int = 1440
 
     initial_nav: float = 100_000.0
-    max_position_pct: float = 0.10
+    max_position_pct: float = 0.15
     max_gross_exposure_pct: float = 1.00
     daily_loss_limit_pct: float = -0.03
     default_slippage_bps: float = 4.0
@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     take_profit_pct: float = 0.04
     backtest_hard_stops: bool = True
     backtest_risk_sizing: bool = True
-    backtest_risk_per_trade_pct: float = 0.001
+    backtest_risk_per_trade_pct: float = 0.002
     backtest_daily_circuit_breaker: bool = True
     backtest_enable_term_horizon: bool = False
     backtest_entry_window_min: int = 120
@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     backtest_conviction_position_sizing: bool = True
     backtest_conviction_min_risk_multiplier: float = 1.0
     backtest_conviction_max_risk_multiplier: float = 2.5
-    backtest_conviction_position_floor: float = 0.45
+    backtest_conviction_position_floor: float = 0.60
 
     min_trade_confidence: int = 70
 

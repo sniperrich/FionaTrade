@@ -378,9 +378,20 @@ class BacktestEngineService:
         final_nav = equity_curve[-1]["equity"] if equity_curve else initial_nav
         total_return = (final_nav - initial_nav) / initial_nav if initial_nav else 0.0
 
-        minutes = max(1, len(equity_curve))
+        minutes = 1.0
+        if len(equity_curve) >= 2:
+            try:
+                started_at = ensure_utc(datetime.fromisoformat(str(equity_curve[0]["ts"])))
+                ended_at = ensure_utc(datetime.fromisoformat(str(equity_curve[-1]["ts"])))
+                minutes = max((ended_at - started_at).total_seconds() / 60.0, 1.0)
+            except (TypeError, ValueError):
+                minutes = float(max(1, len(equity_curve)))
         annualization_factor = (252 * 390) / minutes
-        annualized_return = (1 + total_return) ** annualization_factor - 1 if total_return > -1 else -1
+        if total_return <= -1:
+            annualized_return = -1.0
+        else:
+            annualized_log_return = math.log1p(total_return) * annualization_factor
+            annualized_return = math.expm1(min(annualized_log_return, 700.0))
 
         returns = []
         for i in range(1, len(equity_curve)):

@@ -148,5 +148,5 @@ def test_backtest_llm_position_pct_suggestion_caps_position(session, settings):
     run = svc.get_run(session, result.run_id)
     assert run is not None
     assert result.metrics["trades"] == 1
-    # max_position_pct=10%, suggestion=50% => 5% NAV => qty = 50 at $100 entry.
-    assert abs(float(run.trade_log[0]["qty"]) - 50.0) < 1e-6
+    expected_qty = settings.initial_nav * settings.max_position_pct * 0.5 / 100.0
+    assert abs(float(run.trade_log[0]["qty"]) - expected_qty) < 1e-6

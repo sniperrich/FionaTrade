@@ -148,6 +148,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 回测支持下一交易时段开盘进场：`allow_next_session_entry=true` 时，超出 `entry_window_min` 的事件可在“下一时段首根 bar”进场（适配盘前/盘后事件）。
 - 回测新增时间轴约束：`regular_session_only=true` 时仅使用美股正式交易时段 bar；`max_next_session_delay_min=1080` 限制 next-session 进场不能拖过久（默认 18 小时，避免周末事件拖到下周还进场）。
 - 回测支持 `slippage_bps` 参数，可先用 `0` 做无摩擦诊断；默认滑点已调为 `4 bps`。
+- 回测默认仓位参数已上调：`MAX_POSITION_PCT=0.15`、`BACKTEST_RISK_PER_TRADE_PCT=0.002`、`BACKTEST_CONVICTION_POSITION_FLOOR=0.60`。
 - `MIN_TRADE_CONFIDENCE` 默认调整为 `70`（避免实时链路在 `75` 下几乎全部被过滤）。
 - 已写入短中长线管理（`SHORT/MID/LONG` 周期桶），默认开启：`ENABLE_TERM_MANAGEMENT=true`。
 - 回测默认不启用周期桶：`BACKTEST_ENABLE_TERM_HORIZON=false`（需要时可在回测参数 `enable_term_horizon=true` 打开）。
@@ -163,6 +164,11 @@ python scripts/backfill_sec_bodies.py --limit 500
 ## 近期变更
 
 ### 2026-03-11
+- 回测默认仓位参数上调：
+  - `MAX_POSITION_PCT: 10% -> 15%`
+  - `BACKTEST_RISK_PER_TRADE_PCT: 0.1% -> 0.2%`
+  - `BACKTEST_CONVICTION_POSITION_FLOOR: 0.45 -> 0.60`
+- 修复回测 `annualized_return` 计算：改为按实际时间跨度年化，并对极端短样本做对数/上限保护，避免高收益短样本直接 `OverflowError`。
 - 新增 SQLite busy timeout 配置：`SQLITE_BUSY_TIMEOUT_SECONDS`，`app/db/database.py` 对 SQLite 引擎启用 `timeout + check_same_thread=False`。
 - 新增规则 tradeability 过滤：`AnalysisService.assess_tradeability()` 会硬过滤观点/估值/技术分析/价格复盘类内容；`event_to_signal()` 与回测预取阶段都会拦截。
 - 新增 conviction position sizing：高质量 LLM 信号会自动抬高 `effective_position_pct_suggestion` 和 `effective_risk_per_trade_pct`，避免强信号被明显低配。
@@ -189,6 +195,9 @@ python scripts/backfill_sec_bodies.py --limit 500
 - timeline 修复后参考结果：
   - `run_id=53`（2026-01-12~2026-01-19）：`trades=2`，`win_rate=50.00%`，`total_return=+0.0125%`
   - `run_id=54`（2026-01-21~2026-01-28）：`trades=9`，`win_rate=66.67%`，`total_return=+0.1925%`，`entry_late_skipped=2`
+- 整月参考结果（run_id=55，2026-01-01~2026-02-01，采用新的默认仓位参数）：
+  - `events=308`，`tradeability_filtered=73`，`validation_blocked=25`，`llm_signals=91`，`trades=7`
+  - `win_rate=42.86%`，`total_return=-0.1690%`，`next_session_entry_used=6`，`entry_late_skipped=2`
 - 参考结果（run_id=50，2026-01-21~2026-01-28，LLM）：
   - `events=88`，`trades=18`，`win_rate=55.56%`，`total_return=+0.0934%`，`llm_fallback=1`，`next_session_entry_used=12`。
 
