@@ -30,6 +30,8 @@ USE_TRADEABILITY_FILTER = True    # 规则硬过滤：观点/估值/技术分析
 TRADEABILITY_MIN_SCORE = 55       # 规则 tradeability 分阈值（0-100）
 ALLOW_UNKNOWN_WITH_LLM = True     # unknown 事件在 LLM 模式下允许进入方向判断
 ALLOW_NEXT_SESSION_ENTRY = True   # 超过窗口时，允许“下一交易时段首根bar”进场
+REGULAR_SESSION_ONLY = True       # 仅使用美股正式交易时段 bar（默认屏蔽盘前/盘后）
+MAX_NEXT_SESSION_DELAY_MIN = 1080 # next session 最长允许延迟（默认18小时，避免周末拖太久还交易）
 CONVICTION_POSITION_SIZING = True # 高质量事件自动放大风险预算与最小仓位建议
 
 AUDIT_TOP_N      = 15             # acceptance audit 显示 top N 亏损
@@ -171,6 +173,7 @@ def main() -> None:
     print(f"  filter    : {'ON' if USE_TRADEABILITY_FILTER else 'OFF'}   tradeability: {TRADEABILITY_MIN_SCORE}")
     print(f"  unknown   : {'ALLOW' if ALLOW_UNKNOWN_WITH_LLM else 'BLOCK'}   "
           f"next_open: {'ALLOW' if ALLOW_NEXT_SESSION_ENTRY else 'BLOCK'}")
+    print(f"  session   : {'REGULAR' if REGULAR_SESSION_ONLY else 'ALL_BARS'}   next_delay: {MAX_NEXT_SESSION_DELAY_MIN}m")
     print(f"  validation: {'ON' if USE_VALIDATION else 'OFF'}   "
           f"hard_stops: {'ON' if HARD_STOPS else 'OFF'}   conviction: {'ON' if CONVICTION_POSITION_SIZING else 'OFF'}")
     print(_bold("═" * 62))
@@ -194,6 +197,8 @@ def main() -> None:
         "event_quality_min_score": EVENT_QUALITY_MIN_SCORE,
         "allow_unknown_with_llm": ALLOW_UNKNOWN_WITH_LLM,
         "allow_next_session_entry": ALLOW_NEXT_SESSION_ENTRY,
+        "regular_session_only": REGULAR_SESSION_ONLY,
+        "max_next_session_delay_min": MAX_NEXT_SESSION_DELAY_MIN,
         "conviction_position_sizing": CONVICTION_POSITION_SIZING,
         "daily_circuit_breaker": True,
         "slippage_bps"       : SLIPPAGE_BPS,

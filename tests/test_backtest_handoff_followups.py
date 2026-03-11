@@ -57,6 +57,7 @@ def test_backtest_entry_window_configurable(session, settings):
         "risk_sizing": False,
         "use_signal_validation": False,
         "allow_next_session_entry": False,
+        "regular_session_only": False,
     }
 
     result_60 = svc.run(session, params={**base_params, "entry_window_min": 60})
@@ -148,6 +149,7 @@ def test_backtest_dedup_same_day_event(session, settings):
         "risk_sizing": False,
         "entry_window_min": 120,
         "use_signal_validation": False,
+        "regular_session_only": False,
     }
 
     result_no_dedup = svc.run(session, params={**base_params, "dedup_same_day_event": False})
@@ -230,6 +232,7 @@ def test_backtest_regime_risk_adjust_multiplier(session, settings):
         "entry_window_min": 120,
         "use_signal_validation": False,
         "conviction_position_sizing": False,
+        "regular_session_only": False,
     }
 
     baseline = svc.run(session, params={**base_params, "regime_risk_adjust": False})
@@ -311,12 +314,13 @@ def test_backtest_exit_anchors_to_entry_time(session, settings):
             "end_date": "2026-01-11",
             "min_confidence": 70,
             "horizon_min": 60,
-            "hard_stops": False,
-            "risk_sizing": False,
-            "entry_window_min": 120,
-            "use_signal_validation": False,
-        },
-    )
+                "hard_stops": False,
+                "risk_sizing": False,
+                "entry_window_min": 120,
+                "use_signal_validation": False,
+                "regular_session_only": False,
+            },
+        )
     run = svc.get_run(session, result.run_id)
     assert run is not None
     assert result.metrics["trades"] == 1
@@ -507,6 +511,7 @@ def test_backtest_allows_unknown_events_in_llm_mode(session, settings):
         "entry_window_min": 120,
         "allow_next_session_entry": False,
         "use_tradeability_filter": False,
+        "regular_session_only": False,
     }
     blocked = svc.run(session, params={**base_params, "allow_unknown_with_llm": False})
     allowed = svc.run(session, params={**base_params, "allow_unknown_with_llm": True})
@@ -568,6 +573,141 @@ def test_backtest_allows_next_session_open_entry(session, settings):
     }
     blocked = svc.run(session, params={**base_params, "allow_next_session_entry": False})
     allowed = svc.run(session, params={**base_params, "allow_next_session_entry": True})
+    assert blocked.metrics["trades"] == 0
+    assert blocked.metrics["entry_late_skipped"] == 1
+    assert allowed.metrics["trades"] == 1
+    assert allowed.metrics["next_session_entry_used"] == 1
+
+
+def test_backtest_regular_session_only_uses_cash_open_not_premarket(session, settings):
+    event_time = datetime(2026, 1, 12, 7, 0, tzinfo=timezone.utc)
+    session.add(
+        Event(
+            event_type="policy_shock",
+            entities=["JPM"],
+            tickers=["JPM"],
+            severity=75,
+            event_time=event_time,
+            confidence=85,
+            validation_status="VALID",
+            summary="premarket macro event",
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="JPM",
+                ts=datetime(2026, 1, 12, 9, 0, tzinfo=timezone.utc),
+                open=100.0,
+                high=100.0,
+                low=99.0,
+                close=99.5,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="JPM",
+                ts=datetime(2026, 1, 12, 14, 30, tzinfo=timezone.utc),
+                open=99.0,
+                high=100.0,
+                low=98.0,
+                close=99.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="JPM",
+                ts=datetime(2026, 1, 12, 16, 30, tzinfo=timezone.utc),
+                open=98.0,
+                high=99.0,
+                low=97.0,
+                close=98.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    params = {
+        "start_date": "2026-01-12",
+        "end_date": "2026-01-13",
+        "min_confidence": 70,
+        "horizon_min": 120,
+        "hard_stops": False,
+        "risk_sizing": False,
+        "allow_next_session_entry": True,
+        "entry_window_min": 120,
+        "use_signal_validation": False,
+    }
+    premarket_allowed = svc.run(session, params={**params, "regular_session_only": False})
+    cash_only = svc.run(session, params={**params, "regular_session_only": True})
+    premarket_row = svc.get_run(session, premarket_allowed.run_id)
+    cash_row = svc.get_run(session, cash_only.run_id)
+    assert premarket_row is not None and cash_row is not None
+    assert premarket_allowed.metrics["trades"] == 1
+    assert cash_only.metrics["trades"] == 1
+    assert premarket_row.trade_log[0]["entry_ts"].startswith("2026-01-12T09:00:00")
+    assert cash_row.trade_log[0]["entry_ts"].startswith("2026-01-12T14:30:00")
+    assert cash_only.metrics["next_session_entry_used"] == 1
+
+
+def test_backtest_blocks_weekend_event_when_next_session_gap_too_large(session, settings):
+    event_time = datetime(2026, 1, 24, 16, 6, tzinfo=timezone.utc)
+    session.add(
+        Event(
+            event_type="major_litigation",
+            entities=["HON"],
+            tickers=["HON"],
+            severity=80,
+            event_time=event_time,
+            confidence=85,
+            validation_status="VALID",
+            summary="weekend litigation update",
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="HON",
+                ts=datetime(2026, 1, 26, 14, 30, tzinfo=timezone.utc),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="HON",
+                ts=datetime(2026, 1, 26, 16, 30, tzinfo=timezone.utc),
+                open=101.0,
+                high=102.0,
+                low=100.0,
+                close=101.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    params = {
+        "start_date": "2026-01-24",
+        "end_date": "2026-01-27",
+        "min_confidence": 70,
+        "horizon_min": 120,
+        "hard_stops": False,
+        "risk_sizing": False,
+        "allow_next_session_entry": True,
+        "entry_window_min": 120,
+        "use_signal_validation": False,
+        "regular_session_only": True,
+    }
+    blocked = svc.run(session, params={**params, "max_next_session_delay_min": 1080})
+    allowed = svc.run(session, params={**params, "max_next_session_delay_min": 4000})
     assert blocked.metrics["trades"] == 0
     assert blocked.metrics["entry_late_skipped"] == 1
     assert allowed.metrics["trades"] == 1

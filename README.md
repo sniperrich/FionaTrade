@@ -146,6 +146,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 回测默认启用规则 tradeability 过滤：`use_tradeability_filter=true` + `tradeability_min_score=55`，会在进入 LLM/执行前硬过滤弱事件与观点型内容。
 - 回测支持 unknown 放行策略：`allow_unknown_with_llm=true` 时，`unknown` 在 LLM 模式可进入方向判断，不再被一刀切排除。
 - 回测支持下一交易时段开盘进场：`allow_next_session_entry=true` 时，超出 `entry_window_min` 的事件可在“下一时段首根 bar”进场（适配盘前/盘后事件）。
+- 回测新增时间轴约束：`regular_session_only=true` 时仅使用美股正式交易时段 bar；`max_next_session_delay_min=1080` 限制 next-session 进场不能拖过久（默认 18 小时，避免周末事件拖到下周还进场）。
 - 回测支持 `slippage_bps` 参数，可先用 `0` 做无摩擦诊断；默认滑点已调为 `4 bps`。
 - `MIN_TRADE_CONFIDENCE` 默认调整为 `70`（避免实时链路在 `75` 下几乎全部被过滤）。
 - 已写入短中长线管理（`SHORT/MID/LONG` 周期桶），默认开启：`ENABLE_TERM_MANAGEMENT=true`。
@@ -165,19 +166,29 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 新增 SQLite busy timeout 配置：`SQLITE_BUSY_TIMEOUT_SECONDS`，`app/db/database.py` 对 SQLite 引擎启用 `timeout + check_same_thread=False`。
 - 新增规则 tradeability 过滤：`AnalysisService.assess_tradeability()` 会硬过滤观点/估值/技术分析/价格复盘类内容；`event_to_signal()` 与回测预取阶段都会拦截。
 - 新增 conviction position sizing：高质量 LLM 信号会自动抬高 `effective_position_pct_suggestion` 和 `effective_risk_per_trade_pct`，避免强信号被明显低配。
+- 修复 backtest timeline：
+  - 默认只允许正式交易时段（RTH）bar 参与进出场与止盈止损判断。
+  - `next_session_entry` 改为只接受正式开盘 bar，不再把盘前首根 bar 误当成“下一时段开盘”。
+  - 新增 `max_next_session_delay_min=1080`，阻止周末/隔太久事件延迟进场。
 - 新增回测开关：
   - `allow_unknown_with_llm=true`：LLM 回测允许 `unknown` 事件进入方向判断。
   - `allow_next_session_entry=true`：盘前/盘后事件超窗口时可在下一时段首根 bar 进场。
   - `use_tradeability_filter=true`：进入 LLM 前就过滤弱事件/观点型内容。
+  - `regular_session_only=true`：只用正式交易时段 bar。
+  - `max_next_session_delay_min=1080`：限制 next-session 最长延迟。
   - `conviction_position_sizing=true`：仅在 LLM 回测中启用的仓位放大器。
 - 新增 `scripts/relabel_routine_filings.py`：可批量将历史 routine filing 重标注为 `sec_filing`。
 - 新增测试：
   - `tests/test_backtest_handoff_followups.py` 覆盖 unknown 放行与下一时段进场。
   - `tests/test_backtest_handoff_followups.py` 覆盖观点文过滤与 conviction 仓位放大。
+  - `tests/test_backtest_handoff_followups.py` 覆盖正式交易时段约束与周末延迟进场上限。
   - `tests/test_relabel_routine_filings.py` 覆盖 routine filing 识别。
 - 参考结果（run_id=51，2026-01-21~2026-01-28，LLM + tradeability filter + conviction sizing）：
   - `events=88`，`tradeability_filtered=25`，`llm_signals=30`，`trades=10`
   - `win_rate=70.00%`，`total_return=+0.1680%`，`next_session_entry_used=7`
+- timeline 修复后参考结果：
+  - `run_id=53`（2026-01-12~2026-01-19）：`trades=2`，`win_rate=50.00%`，`total_return=+0.0125%`
+  - `run_id=54`（2026-01-21~2026-01-28）：`trades=9`，`win_rate=66.67%`，`total_return=+0.1925%`，`entry_late_skipped=2`
 - 参考结果（run_id=50，2026-01-21~2026-01-28，LLM）：
   - `events=88`，`trades=18`，`win_rate=55.56%`，`total_return=+0.0934%`，`llm_fallback=1`，`next_session_entry_used=12`。
 

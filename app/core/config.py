@@ -73,6 +73,8 @@ class Settings(BaseSettings):
     backtest_event_quality_fail_open: bool = True
     backtest_allow_unknown_with_llm: bool = True
     backtest_allow_next_session_entry: bool = True
+    backtest_regular_session_only: bool = True
+    backtest_max_next_session_delay_min: int = 1080
     backtest_conviction_position_sizing: bool = True
     backtest_conviction_min_risk_multiplier: float = 1.0
     backtest_conviction_max_risk_multiplier: float = 2.5

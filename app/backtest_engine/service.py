@@ -5,8 +5,9 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from statistics import mean, pstdev
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
@@ -31,6 +32,9 @@ class BacktestResult:
 
 
 class BacktestEngineService:
+    _NY_TZ = ZoneInfo("America/New_York")
+    _REGULAR_SESSION_OPEN = dt_time(9, 30)
+    _REGULAR_SESSION_CLOSE = dt_time(16, 0)
     _ROUTINE_FILING_RE = re.compile(
         r"\bfiled\s+(?:form\s+)?(?:8-k|10-k|10-q|6-k|13d|13g|sc\s*13d|sc\s*13g)\b",
         re.IGNORECASE,
@@ -81,16 +85,56 @@ class BacktestEngineService:
             return None
         return (current - base) / base
 
-    def _bar_at_or_after(self, session: Session, ticker: str, ts) -> Bar1m | None:
-        return session.execute(
+    @classmethod
+    def _is_regular_session_bar(cls, ts: datetime) -> bool:
+        local = ensure_utc(ts).astimezone(cls._NY_TZ)
+        if local.weekday() >= 5:
+            return False
+        local_clock = local.timetz().replace(tzinfo=None)
+        return cls._REGULAR_SESSION_OPEN <= local_clock < cls._REGULAR_SESSION_CLOSE
+
+    @classmethod
+    def _is_regular_session_open_bar(cls, ts: datetime) -> bool:
+        local = ensure_utc(ts).astimezone(cls._NY_TZ)
+        if local.weekday() >= 5:
+            return False
+        return local.hour == cls._REGULAR_SESSION_OPEN.hour and local.minute == cls._REGULAR_SESSION_OPEN.minute
+
+    def _bar_at_or_after(
+        self,
+        session: Session,
+        ticker: str,
+        ts,
+        regular_session_only: bool = False,
+    ) -> Bar1m | None:
+        stmt = (
             select(Bar1m)
             .where(and_(Bar1m.ticker == ticker, Bar1m.ts >= ts))
             .order_by(Bar1m.ts.asc())
-            .limit(1)
-        ).scalar_one_or_none()
+        )
+        if not regular_session_only:
+            return session.execute(stmt.limit(1)).scalar_one_or_none()
 
-    def _bars_between(self, session: Session, ticker: str, start_ts, end_ts) -> list[Bar1m]:
-        return (
+        search_end = ensure_utc(ts) + timedelta(days=5)
+        bars = (
+            session.execute(stmt.where(Bar1m.ts < search_end).limit(10000))
+            .scalars()
+            .all()
+        )
+        for bar in bars:
+            if self._is_regular_session_bar(bar.ts):
+                return bar
+        return None
+
+    def _bars_between(
+        self,
+        session: Session,
+        ticker: str,
+        start_ts,
+        end_ts,
+        regular_session_only: bool = False,
+    ) -> list[Bar1m]:
+        bars = (
             session.execute(
                 select(Bar1m)
                 .where(
@@ -105,6 +149,9 @@ class BacktestEngineService:
             .scalars()
             .all()
         )
+        if not regular_session_only:
+            return bars
+        return [bar for bar in bars if self._is_regular_session_bar(bar.ts)]
 
     def _apply_slippage(self, price: float, side: str, leg: str, slippage_bps: float | None = None) -> float:
         bps = self.settings.default_slippage_bps if slippage_bps is None else max(float(slippage_bps), 0.0)
@@ -216,20 +263,6 @@ class BacktestEngineService:
             return False
         return et in EXCLUDED_FROM_TRADING
 
-    def _is_first_bar_of_day(self, session: Session, ticker: str, ts: datetime) -> bool:
-        bar_ts = ensure_utc(ts)
-        day_start = bar_ts.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = day_start + timedelta(days=1)
-        first = session.execute(
-            select(Bar1m)
-            .where(and_(Bar1m.ticker == ticker, Bar1m.ts >= day_start, Bar1m.ts < day_end))
-            .order_by(Bar1m.ts.asc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if not first:
-            return False
-        return ensure_utc(first.ts) == bar_ts
-
     def _market_regime_for_event(self, session: Session, event_ts: datetime) -> tuple[str, float | None]:
         """Infer broad market regime from SPY return over ~20 trading days."""
         start_ts = ensure_utc(event_ts) - timedelta(days=28)
@@ -293,11 +326,18 @@ class BacktestEngineService:
         entry_px: float,
         stop_loss_pct: float,
         take_profit_pct: float,
+        regular_session_only: bool = False,
     ) -> tuple[datetime, float, str] | None:
         if stop_loss_pct <= 0 and take_profit_pct <= 0:
             return None
 
-        bars = self._bars_between(session, ticker, entry_ts, end_ts)
+        bars = self._bars_between(
+            session,
+            ticker,
+            entry_ts,
+            end_ts,
+            regular_session_only=regular_session_only,
+        )
         if not bars:
             return None
 
@@ -435,6 +475,13 @@ class BacktestEngineService:
             params.get("allow_next_session_entry"),
             default=self.settings.backtest_allow_next_session_entry,
         )
+        regular_session_only = self._as_bool(
+            params.get("regular_session_only"),
+            default=self.settings.backtest_regular_session_only,
+        )
+        max_next_session_delay_min = int(
+            params.get("max_next_session_delay_min", self.settings.backtest_max_next_session_delay_min)
+        )
         use_tradeability_filter = self._as_bool(
             params.get("use_tradeability_filter"),
             default=self.settings.event_tradeability_filter_enabled,
@@ -535,6 +582,8 @@ class BacktestEngineService:
                 "enable_term_horizon": enable_term_horizon,
                 "allow_unknown_with_llm": allow_unknown_with_llm,
                 "allow_next_session_entry": allow_next_session_entry,
+                "regular_session_only": regular_session_only,
+                "max_next_session_delay_min": max_next_session_delay_min,
                 "use_tradeability_filter": use_tradeability_filter,
                 "tradeability_min_score": tradeability_min_score,
                 "use_event_quality_filter": use_event_quality_filter,
@@ -869,15 +918,22 @@ class BacktestEngineService:
                         continue
             # ─────────────────────────────────────────────────────────────────
 
-            entry_bar = self._bar_at_or_after(session, ticker, event_ts + timedelta(minutes=1))
+            entry_bar = self._bar_at_or_after(
+                session,
+                ticker,
+                event_ts + timedelta(minutes=1),
+                regular_session_only=regular_session_only,
+            )
             # Skip if no bar within configured entry window of event.
             if not entry_bar:
                 emit_progress(idx)
                 continue
             if ensure_utc(entry_bar.ts) > event_ts + timedelta(minutes=entry_window_min):
+                delay_min = (ensure_utc(entry_bar.ts) - event_ts).total_seconds() / 60.0
                 allow_next_session = (
                     allow_next_session_entry
-                    and self._is_first_bar_of_day(session, ticker, ensure_utc(entry_bar.ts))
+                    and self._is_regular_session_open_bar(ensure_utc(entry_bar.ts))
+                    and delay_min <= max_next_session_delay_min
                 )
                 if not allow_next_session:
                     entry_late_skipped += 1
@@ -885,7 +941,12 @@ class BacktestEngineService:
                     continue
                 next_session_entry_used += 1
             planned_exit_ts = ensure_utc(entry_bar.ts) + timedelta(minutes=local_horizon_min)
-            planned_exit_bar = self._bar_at_or_after(session, ticker, planned_exit_ts)
+            planned_exit_bar = self._bar_at_or_after(
+                session,
+                ticker,
+                planned_exit_ts,
+                regular_session_only=regular_session_only,
+            )
             if not planned_exit_bar:
                 emit_progress(idx)
                 continue
@@ -932,6 +993,7 @@ class BacktestEngineService:
                     entry_px=entry_px,
                     stop_loss_pct=stop_loss_pct,
                     take_profit_pct=take_profit_pct,
+                    regular_session_only=regular_session_only,
                 )
                 if hit:
                     exit_ts, exit_base_px, exit_reason = hit
@@ -1049,6 +1111,8 @@ class BacktestEngineService:
         metrics["quality_filter_errors"] = quality_filter_errors
         metrics["allow_unknown_with_llm"] = allow_unknown_with_llm
         metrics["allow_next_session_entry"] = allow_next_session_entry
+        metrics["regular_session_only"] = regular_session_only
+        metrics["max_next_session_delay_min"] = max_next_session_delay_min
         metrics["conviction_position_sizing"] = conviction_position_sizing
         metrics["conviction_min_risk_multiplier"] = self.settings.backtest_conviction_min_risk_multiplier
         metrics["conviction_max_risk_multiplier"] = self.settings.backtest_conviction_max_risk_multiplier
