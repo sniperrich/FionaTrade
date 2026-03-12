@@ -92,3 +92,30 @@ def test_validation_second_source_upgrades_without_merging(session, settings):
     second_result = validator.validate_and_store(session, second_clusters)
     assert second_result.created_events == 1
     assert second_result.valid_events == 1
+
+
+def test_validation_single_tier0_source_is_valid(session, settings):
+    now = utc_now()
+    session.add(
+        RawItem(
+            source="sec",
+            source_tier=0,
+            url="https://sec.example/aapl-8k",
+            title="AAPL reports quarterly results under Item 2.02",
+            body="Apple posted quarterly revenue of $143.8 billion and diluted EPS of $2.84.",
+            published_at=now,
+            ingested_at=now,
+            item_hash=make_hash("sec", "tier0-aapl"),
+            metadata_json={"ticker": "AAPL", "event_type_hint": "sec_earnings_release"},
+            processed=False,
+        )
+    )
+    session.flush()
+
+    norm = NormalizationService(settings)
+    clusters = norm.build_clusters(session)
+    result = ValidationService().validate_and_store(session, clusters)
+
+    assert result.created_events == 1
+    assert result.valid_events == 1
+    assert result.watch_events == 0

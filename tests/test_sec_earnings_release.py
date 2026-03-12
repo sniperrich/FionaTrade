@@ -75,3 +75,92 @@ def test_normalize_sec_doc_url_strips_ix_wrapper(settings):
     client = SecClient(settings.model_copy(update={"enable_sec": True}))
     wrapped = "https://www.sec.gov/ix?doc=/Archives/edgar/data/320193/000032019326000005/aapl-20260129.htm"
     assert client._normalize_sec_doc_url(wrapped) == "https://www.sec.gov/Archives/edgar/data/320193/000032019326000005/aapl-20260129.htm"
+
+
+def test_sec_client_fetch_can_target_single_ticker_and_stop_after_first_earnings(session, settings):
+    client = SecClient(settings.model_copy(update={"enable_sec": True}))
+    client._ticker_cik_map = lambda: {"AAPL": "0000320193", "MSFT": "0000789019"}  # noqa: SLF001
+    client._request_json_with_retry = lambda _client, _url: (_sec_submissions_payload(), 200, None)  # noqa: SLF001
+    client._fetch_html = lambda _client, url: (  # noqa: SLF001
+        '<table><tr><td>EX-99.1</td><td><a href="ex991.htm">earnings release</a></td></tr></table>'
+        if url.endswith("-index.html")
+        else ""
+    )
+    client._fetch_filing_text = lambda _client, _url, max_chars=8000: (  # noqa: SLF001
+        "Item 2.02 Results of Operations and Financial Condition. The company issued a quarterly earnings release."
+    )
+    client._summarize_sec_earnings = lambda ticker, filing_text, exhibit_text: (  # noqa: SLF001
+        f"{ticker} reports quarterly results",
+        f"{ticker} 财报摘要",
+    )
+
+    items, check = client.fetch(
+        session,
+        tickers=["AAPL"],
+        max_forms_per_ticker=1,
+        stop_after_first_earnings=True,
+    )
+
+    assert check.status == "ONLINE"
+    assert check.details["selected_tickers"] == 1
+    assert check.details["sec_earnings_items"] == 1
+    assert len(items) == 1
+    assert items[0].metadata["ticker"] == "AAPL"
+
+
+def test_sec_client_summary_uses_http_gateway(monkeypatch, settings):
+    client = SecClient(
+        settings.model_copy(
+            update={
+                "llm_base_url": "https://api.example.com",
+                "llm_api_key": "test-key",
+                "sec_summary_model": "gemini-3-flash",
+            }
+        )
+    )
+    called = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "苹果第一财季营收1438亿美元、稀释EPS 2.84美元。"
+                        }
+                    }
+                ]
+            }
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            called["url"] = url
+            called["headers"] = headers
+            called["json"] = json
+            return _Resp()
+
+    monkeypatch.setattr("app.ingestion.sec_client.httpx.Client", _Client)
+
+    headline, summary = client._summarize_sec_earnings(
+        "AAPL",
+        "Item 2.02 Results of Operations and Financial Condition.",
+        "Apple posted quarterly revenue of $143.8 billion and diluted EPS of $2.84.",
+    )
+
+    assert headline == "AAPL SEC earnings release filed under 8-K Item 2.02"
+    assert summary == "苹果第一财季营收1438亿美元、稀释EPS 2.84美元。"
+    assert called["url"] == "https://api.example.com/v1/chat/completions"
+    assert called["headers"]["Authorization"] == "Bearer test-key"
+    assert called["json"]["model"] == "gemini-3-flash"

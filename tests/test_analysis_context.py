@@ -210,3 +210,50 @@ def test_build_earnings_review_flags_high_bar_ticker(session, settings):
     tradeability = svc.assess_tradeability(event, session=session)
     assert tradeability["tradeable"] is False
     assert tradeability["reason"] == "earnings_high_bar_risk"
+
+
+def test_tradeability_counts_tier0_source_as_strong(session, settings):
+    svc = AnalysisService(settings)
+    event_ts = datetime(2026, 1, 29, 16, 30, tzinfo=timezone.utc)
+    event = Event(
+        event_type="sec_earnings_release",
+        tickers=["AAPL"],
+        entities=["AAPL"],
+        severity=55,
+        confidence=70,
+        validation_status="VALID",
+        summary="Apple reports quarterly results",
+        event_time=event_ts,
+    )
+    session.add(event)
+    session.flush()
+
+    raw = RawItem(
+        source="sec",
+        source_tier=0,
+        url="https://sec.example/aapl-earnings",
+        title="Apple reports quarterly results",
+        body="Apple posted quarterly revenue of $143.8 billion and diluted EPS of $2.84 with record iPhone sales.",
+        published_at=event_ts,
+        ingested_at=event_ts,
+        item_hash="analysis-tier0-strong-source",
+        metadata_json={"ticker": "AAPL", "event_type_hint": "sec_earnings_release"},
+        processed=True,
+    )
+    session.add(raw)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=raw.source,
+            source_tier=raw.source_tier,
+            summary=raw.title,
+        )
+    )
+    session.flush()
+
+    tradeability = svc.assess_tradeability(event, session=session)
+    assert tradeability["strong_sources"] == 1
+    assert tradeability["tradeable"] is True

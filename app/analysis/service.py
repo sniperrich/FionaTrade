@@ -352,6 +352,15 @@ class AnalysisService:
             (event.summary or "")[:500],
         )
 
+    @staticmethod
+    def _normalize_source_tier(raw_tier: object) -> int:
+        if raw_tier is None:
+            return 9
+        try:
+            return int(raw_tier)
+        except (TypeError, ValueError):
+            return 9
+
     def assess_tradeability(self, event: Event, session: Session | None = None) -> dict[str, Any]:
         cache_key = self._tradeability_cache_key(event)
         cached = self._tradeability_cache.get(cache_key)
@@ -376,7 +385,7 @@ class AnalysisService:
         hard_event_hits = 0
         ticker_specific_hits = 0
         unique_sources = {str(item.get("source") or "").strip().lower() for item in candidates if item.get("source")}
-        strong_sources = sum(1 for item in candidates if int(item.get("source_tier") or 9) <= 1)
+        strong_sources = sum(1 for item in candidates if self._normalize_source_tier(item.get("source_tier")) <= 1)
         weak_source_only = bool(unique_sources) and all(source in self._WEAK_OPINION_SOURCES for source in unique_sources)
 
         for item in candidates:

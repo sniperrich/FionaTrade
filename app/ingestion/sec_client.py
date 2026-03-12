@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 from time import sleep
@@ -12,11 +11,6 @@ import httpx
 from dateutil import parser as dt_parser
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
-try:
-    from openai import OpenAI
-except Exception:  # pragma: no cover - optional dependency fallback
-    OpenAI = None
 
 from app.core.config import Settings
 from app.core.utils import make_hash, utc_now
@@ -54,12 +48,6 @@ class SecClient:
             "User-Agent": settings.sec_user_agent,
             "Accept": "application/json",
         }
-        self._llm_client = None
-        if OpenAI is not None and settings.llm_base_url and settings.llm_api_key and settings.sec_summary_model:
-            base = settings.llm_base_url.rstrip("/")
-            if not base.endswith("/v1"):
-                base = base + "/v1"
-            self._llm_client = OpenAI(base_url=base, api_key=settings.llm_api_key)
 
     def _get_cursor(self, session: Session, key: str, default: str) -> str:
         row = session.execute(select(IngestionCursor).where(IngestionCursor.cursor_key == key)).scalar_one_or_none()
@@ -209,30 +197,6 @@ class SecClient:
         has_exhibit_summary = bool(exhibit_text and _SEC_EARNINGS_SIGNAL_RE.search(exhibit_text))
         return (has_item_202 and has_earnings_text) or has_exhibit_summary
 
-    @staticmethod
-    def _parse_llm_json(content: str) -> dict:
-        text = (content or "").strip()
-        if not text:
-            raise ValueError("empty llm content")
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-        fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
-        if fence_match:
-            parsed = json.loads(fence_match.group(1))
-            if isinstance(parsed, dict):
-                return parsed
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            parsed = json.loads(text[start : end + 1])
-            if isinstance(parsed, dict):
-                return parsed
-        raise ValueError("llm response did not contain json")
-
     def _fallback_earnings_summary(self, ticker: str, filing_text: str, exhibit_text: str) -> tuple[str, str]:
         primary = exhibit_text or self._extract_item_202_section(filing_text) or filing_text
         compact = re.sub(r"\s+", " ", primary).strip()
@@ -240,9 +204,45 @@ class SecClient:
         summary = compact[: max(180, int(self.settings.sec_summary_max_chars))]
         return headline[:220], summary
 
+    def _llm_enabled(self) -> bool:
+        return bool(self.settings.llm_base_url and self.settings.llm_api_key and self.settings.sec_summary_model)
+
+    def _llm_endpoint(self) -> str:
+        base = self.settings.llm_base_url.strip()
+        if base.endswith("/v1/chat/completions") or base.endswith("/chat/completions"):
+            return base
+        return f"{base.rstrip('/')}/v1/chat/completions"
+
+    def _llm_headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.settings.llm_api_key}",
+        }
+
+    @staticmethod
+    def _extract_llm_content(body: dict) -> str:
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Invalid SEC summary response: choices missing")
+        message = choices[0].get("message", {})
+        content = message.get("content")
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if text:
+                        parts.append(str(text))
+            return "\n".join(parts).strip()
+        if isinstance(content, str):
+            return content.strip()
+        raise ValueError("Invalid SEC summary response: content missing")
+
     def _summarize_sec_earnings(self, ticker: str, filing_text: str, exhibit_text: str) -> tuple[str, str]:
         fallback_headline, fallback_summary = self._fallback_earnings_summary(ticker, filing_text, exhibit_text)
-        if self._llm_client is None:
+        if not self._llm_enabled():
             return fallback_headline, fallback_summary
 
         source_text = exhibit_text or self._extract_item_202_section(filing_text) or filing_text
@@ -252,31 +252,34 @@ class SecClient:
 
         prompt = (
             "You summarize SEC 8-K earnings releases (Item 2.02 / Exhibit 99.1). "
-            "Return JSON only with keys headline_en and summary_zh. "
-            f"summary_zh must be <= {int(self.settings.sec_summary_max_chars)} Chinese characters, concise, and preserve exact numbers/units from the filing. "
+            f"Return plain Chinese text only, no JSON, no markdown, no bullets, within {int(self.settings.sec_summary_max_chars)} Chinese characters. "
+            "Keep exact numbers and units from the filing. "
             "Do not invent analyst estimates or market reaction if absent. "
-            "If available, mention EPS actual/estimate, revenue actual/estimate, guidance, margin, capex, backlog, and management outlook. "
-            "headline_en should be one short English line that still contains the core numbers or beat/miss/guidance direction."
+            "If available, mention EPS actual, revenue actual, guidance, margin, capex, backlog, and management outlook."
         )
         try:
-            resp = self._llm_client.chat.completions.create(
-                model=self.settings.sec_summary_model,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {
-                        "role": "user",
-                        "content": f"Ticker: {ticker}\n\nSEC source text:\n{source_text}",
+            with httpx.Client(timeout=max(5.0, float(self.settings.llm_timeout_seconds))) as client:
+                resp = client.post(
+                    self._llm_endpoint(),
+                    headers=self._llm_headers(),
+                    json={
+                        "model": self.settings.sec_summary_model,
+                        "messages": [
+                            {"role": "system", "content": prompt},
+                            {
+                                "role": "user",
+                                "content": f"Ticker: {ticker}\n\nSEC source text:\n{source_text}",
+                            },
+                        ],
+                        "max_tokens": 900,
+                        "temperature": 0.0,
                     },
-                ],
-                max_tokens=900,
-                temperature=0.0,
-            )
-            content = (resp.choices[0].message.content or "").strip()
-            parsed = self._parse_llm_json(content)
-            headline = str(parsed.get("headline_en") or "").strip()[:220]
-            summary = str(parsed.get("summary_zh") or "").strip()[: int(self.settings.sec_summary_max_chars)]
-            if headline and summary:
-                return headline, summary
+                )
+                resp.raise_for_status()
+                content = self._extract_llm_content(resp.json())
+            summary = re.sub(r"\s+", " ", content).strip()[: int(self.settings.sec_summary_max_chars)]
+            if summary:
+                return fallback_headline, summary
         except Exception as exc:
             logger.warning("SEC earnings summary LLM failed for %s: %s", ticker, exc)
         return fallback_headline, fallback_summary
@@ -394,7 +397,13 @@ class SecClient:
             return [], "ATOM fallback entries parsed but none matched supported forms"
         return out, None
 
-    def fetch(self, session: Session) -> tuple[list[RawNewsItem], SourceCheck]:
+    def fetch(
+        self,
+        session: Session,
+        tickers: list[str] | None = None,
+        max_forms_per_ticker: int | None = None,
+        stop_after_first_earnings: bool = False,
+    ) -> tuple[list[RawNewsItem], SourceCheck]:
         if not self.settings.enable_sec:
             return [], SourceCheck(
                 source_key="sec",
@@ -418,8 +427,18 @@ class SecClient:
                 error_message=f"Ticker map request failed: {exc}",
             )
 
-        tickers = [t for t in self.settings.sp100_tickers if t in mapping]
-        selected = list(self._round_robin_tickers(session, tickers, batch_size=10))
+        if tickers is None:
+            universe = [t for t in self.settings.sp100_tickers if t in mapping]
+            selected = list(self._round_robin_tickers(session, universe, batch_size=10))
+        else:
+            normalized = []
+            seen = set()
+            for raw in tickers:
+                ticker = str(raw or "").upper().strip()
+                if ticker and ticker in mapping and ticker not in seen:
+                    normalized.append(ticker)
+                    seen.add(ticker)
+            selected = normalized
         if not selected:
             return [], SourceCheck(
                 source_key="sec",
@@ -472,7 +491,10 @@ class SecClient:
                 accessions = recent.get("accessionNumber", [])
                 docs = recent.get("primaryDocument", [])
 
-                rows = zip(forms, filing_dates, acceptance_datetimes, accessions, docs, strict=False)
+                rows = list(zip(forms, filing_dates, acceptance_datetimes, accessions, docs, strict=False))
+                if max_forms_per_ticker is not None and max_forms_per_ticker > 0:
+                    rows = rows[: max_forms_per_ticker]
+
                 for form, filing_date, acceptance_datetime, accession, doc in rows:
                     if form not in SUPPORTED_FORMS or not accession:
                         continue
@@ -512,6 +534,8 @@ class SecClient:
                                 )
                             )
                             sec_earnings_items += 1
+                            if stop_after_first_earnings:
+                                break
                             continue
 
                     if form in FETCH_BODY_FORMS:
@@ -540,7 +564,6 @@ class SecClient:
                             },
                         )
                     )
-
         unique: dict[str, RawNewsItem] = {}
         for item in items:
             unique[item.hash] = item

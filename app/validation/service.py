@@ -36,6 +36,15 @@ class ValidationService:
         self.corroboration_window = timedelta(minutes=max(1, int(corroboration_window_minutes)))
 
     @staticmethod
+    def _normalize_source_tier(raw_tier: object) -> int:
+        if raw_tier is None:
+            return 9
+        try:
+            return int(raw_tier)
+        except (TypeError, ValueError):
+            return 9
+
+    @staticmethod
     def _event_family(event_type: str, summary: str) -> str:
         effective = resolve_event_type_for_text(event_type, summary)
         if effective in {"earnings_miss", "guidance_cut", "sec_earnings_release"}:
@@ -126,7 +135,7 @@ class ValidationService:
         event_time = ensure_utc(cluster.canonical.event_time)
         summary = cluster.canonical.summary or self._current_text(cluster)
         sources = {str(item.source or "").lower() for item in cluster.raw_items if item.source}
-        tiers = [int(item.source_tier or 9) for item in cluster.raw_items]
+        tiers = [self._normalize_source_tier(item.source_tier) for item in cluster.raw_items]
         conflict_texts = [summary]
 
         for snapshot in recent_history:
@@ -157,15 +166,14 @@ class ValidationService:
             return confidence, "VALID", None
         return confidence, "WATCH", "single_source_only"
 
-    @staticmethod
-    def _snapshot_from_cluster(cluster: NormalizedCluster) -> _RecentEventSnapshot:
+    def _snapshot_from_cluster(self, cluster: NormalizedCluster) -> _RecentEventSnapshot:
         return _RecentEventSnapshot(
             event_time=ensure_utc(cluster.canonical.event_time),
             tickers=[str(t).upper() for t in (cluster.canonical.tickers or [])],
             event_type=cluster.canonical.event_type,
             summary=cluster.canonical.summary or "",
             sources={str(item.source or "").lower() for item in cluster.raw_items if item.source},
-            tiers=[int(item.source_tier or 9) for item in cluster.raw_items] or [2],
+            tiers=[self._normalize_source_tier(item.source_tier) for item in cluster.raw_items] or [2],
         )
 
     def validate_and_store(self, session: Session, clusters: list[NormalizedCluster]) -> ValidationResult:
