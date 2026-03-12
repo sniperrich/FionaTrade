@@ -160,6 +160,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 支持历史 routine filing 事件重标注：`python scripts/relabel_routine_filings.py --start-date 2026-01-01 --end-date 2026-02-01`。
 - 支持 SP100 财报日历自动回填：`python scripts/backfill_earnings_calendar.py --from 2025-10-01 --to 2025-12-31`。
 - 支持按当前 normalization/validation 逻辑重建历史事件：`python scripts/rebuild_events_from_raw.py --start-date 2025-10-01 --end-date 2025-11-01`。
+- `rebuild_events_from_raw.py` 现在会按批次重建大时间窗，避免 SQLite 在全年窗口下因 `raw_ids` 过多导致空结果。
 - 支持独立检查“财报数据是否拿到 + 当前是否可交易”：`python scripts/check_earnings_tradeability.py --ticker AAPL --event-time 2026-01-28T14:30:00+00:00 --event-type earnings_miss --event-summary "AAPL quarterly earnings beat estimates but stock falls on softer guidance"`。
 - 支持 LLM 一致性测试（同窗重复 3 次）：`python scripts/run_llm_consistency_check.py --runs 3`。
 - 回测并发 LLM workers 可通过参数 `llm_workers`（默认 8）调整。

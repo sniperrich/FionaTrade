@@ -16,6 +16,8 @@ from app.db.models import Event, EventEvidence, RawItem, Signal
 from app.normalization.service import NormalizationService
 from app.validation.service import ValidationService
 
+_BATCH_SIZE = 500
+
 
 def _parse_date(raw: str | None, end: bool = False) -> datetime | None:
     if not raw:
@@ -68,7 +70,11 @@ def main() -> None:
 
         norm = NormalizationService(settings)
         validator = ValidationService(settings.validation_corroboration_window_minutes)
-        clusters = norm.build_clusters(session, raw_ids=raw_ids)
+        clusters = []
+        for idx in range(0, len(raw_ids), _BATCH_SIZE):
+            chunk_ids = raw_ids[idx : idx + _BATCH_SIZE]
+            clusters.extend(norm.build_clusters(session, raw_ids=chunk_ids))
+        clusters.sort(key=lambda cluster: cluster.canonical.event_time)
         result = validator.validate_and_store(session, clusters)
 
     print(
