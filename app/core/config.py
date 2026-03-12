@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     llm_retry_backoff_seconds: float = 1.5
     llm_retry_backoff_multiplier: float = 1.8
     llm_retry_max_delay_seconds: float = 12.0
+    sec_summary_model: str = "gemini-3-flash"
+    sec_summary_max_chars: int = 1000
     event_tradeability_filter_enabled: bool = True
     event_tradeability_min_score: int = 55
     normalization_merge_window_min: int = 0

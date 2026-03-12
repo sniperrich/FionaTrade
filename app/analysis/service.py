@@ -421,7 +421,7 @@ class AnalysisService:
         earnings_review = None
         summary_lower = (event.summary or "").lower()
         if session is not None and (
-            effective_event_type in {"earnings_miss", "guidance_cut"}
+            effective_event_type in {"earnings_miss", "guidance_cut", "sec_earnings_release"}
             or "earnings" in summary_lower
             or "guidance" in summary_lower
             or "estimates" in summary_lower
@@ -751,7 +751,7 @@ class AnalysisService:
                     continue
                 summary = event.summary or ""
                 lowered = summary.lower()
-                if event.event_type not in {"earnings_miss", "guidance_cut"} and "earnings" not in lowered and "guidance" not in lowered:
+                if event.event_type not in {"earnings_miss", "guidance_cut", "sec_earnings_release"} and "earnings" not in lowered and "guidance" not in lowered:
                     continue
                 report_date_key = ensure_utc(event.event_time).date().isoformat()
                 if report_date_key in seen_dates:

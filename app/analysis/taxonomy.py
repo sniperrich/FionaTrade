@@ -8,6 +8,7 @@ EVENT_KEYWORDS = {
     "financial_fraud": ["fraud", "restatement", "misstatement", "accounting irregular"],
     "audit_issue": ["audit", "auditor resignation", "material weakness", "internal control"],
     "earnings_miss": ["missed estimates", "earnings miss", "below expectations"],
+    "sec_earnings_release": ["item 2.02", "exhibit 99.1", "earnings release", "quarterly results"],
     "guidance_cut": ["guidance cut", "lowered outlook", "cuts forecast", "warned"],
     "regulatory_penalty": ["fine", "penalty", "sec charge", "doj", "sec settlement", "doj settlement", "civil penalty"],
     "major_litigation": ["lawsuit", "litigation", "class action", "court ruling"],
@@ -141,7 +142,7 @@ def resolve_event_type_for_text(event_type: str | None, text: str) -> str:
 
 def is_earnings_window_event(event_type: str | None, text: str) -> bool:
     et = resolve_event_type_for_text(event_type, text)
-    return et in {"earnings_miss", "guidance_cut"} or bool(_EARNINGS_WINDOW_RE.search(text or ""))
+    return et in {"earnings_miss", "guidance_cut", "sec_earnings_release"} or bool(_EARNINGS_WINDOW_RE.search(text or ""))
 
 
 def is_price_action_recap(text: str) -> bool:

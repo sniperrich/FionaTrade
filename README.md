@@ -32,7 +32,7 @@ WebUI: <http://127.0.0.1:8000>
 
 | 来源 | 内容 | 订阅要求 |
 |------|------|----------|
-| SEC EDGAR | 8-K/6-K 原文 | 免费 |
+| SEC EDGAR | 8-K/6-K 原文 + 独立 `sec_earnings_release` 事件 | 免费 |
 | RSS (Bloomberg/CNBC/MarketWatch) | 实时新闻 | 免费 |
 | Finnhub `/company-news` | 每 ticker 公司新闻（1年历史，tier-1）| Basic+ |
 | Finnhub `/stock/candle` resolution=1 | 1 分钟 K 线（10年历史）| Basic+ |
@@ -217,6 +217,11 @@ python scripts/backfill_sec_bodies.py --limit 500
   - 基于本地 `earnings_calendar` 生成 `RawItem(source=earnings_release, source_tier=0)`
   - `published_at` 锚定到财报发布时间（`BMO/AMC/DMH`），不再依赖新闻评论文去猜“财报事件”
   - 默认纳入分钟轮询 ingestion；也可单独回填 `scripts/backfill_earnings_releases.py`
+- 新增独立 `sec_earnings_release` 事件：
+  - `SecClient` 现在会对 `8-K` 额外检查 `Item 2.02 / Exhibit 99.1`
+  - 命中后不再落成普通 `sec_filing`，而是写入独立事件类型 `sec_earnings_release`
+  - 会调用 `gemini-3-flash` 生成 `<=1000` 字摘要，要求保留具体数字；摘要写入 `summary_override`
+  - 新增检查脚本：`python scripts/check_sec_earnings_release.py --ticker AAPL`
 - Ticker 映射修复：
   - `NormalizationService` 现在只把 `metadata_json["ticker"]` 当弱提示
   - 只有“正文/标题明确提到该 ticker 或公司别名”或“结构化源（SEC / earnings_release）白名单”时才接受 metadata ticker
@@ -230,6 +235,7 @@ python scripts/backfill_sec_bodies.py --limit 500
   - `tests/test_normalization_service.py` 覆盖默认不合并消息、可选 merge 时 `event_time` 取最后证据时间
   - `tests/test_validation_scoring.py` 覆盖“第二独立来源到达后升级 VALID”
   - `tests/test_earnings_release_client.py` 覆盖结构化财报发布源生成、落库和 ticker/event_type 映射
+  - `tests/test_sec_earnings_release.py` 覆盖 `8-K Item 2.02 / 99.1` 被提升为独立财报事件，以及普通 `8-K` 不误判
 - 注意：
   - `run_id=56` 仍是旧事件库上的结果。
   - 要验证这轮新逻辑，先执行 `python scripts/rebuild_events_from_raw.py --start-date 2025-10-01 --end-date 2025-11-01`，再跑回测。

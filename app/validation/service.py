@@ -38,7 +38,7 @@ class ValidationService:
     @staticmethod
     def _event_family(event_type: str, summary: str) -> str:
         effective = resolve_event_type_for_text(event_type, summary)
-        if effective in {"earnings_miss", "guidance_cut"}:
+        if effective in {"earnings_miss", "guidance_cut", "sec_earnings_release"}:
             return "earnings_window"
         return effective
 

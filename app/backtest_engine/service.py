@@ -203,6 +203,8 @@ class BacktestEngineService:
         if profile_key == "earnings_only":
             if self._EARNINGS_EXCLUDE_RE.search(summary):
                 return False
+            if effective_event_type == "sec_earnings_release":
+                return True
             if effective_event_type == "earnings_miss":
                 return True
             if effective_event_type == "guidance_cut" and self._EARNINGS_KEYWORD_RE.search(summary):

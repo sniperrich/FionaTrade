@@ -148,7 +148,7 @@ _STRONG_EVENT_TYPES = frozenset(
     {"financial_fraud", "audit_issue", "regulatory_penalty", "accident_disaster"}
 )
 _MODERATE_EVENT_TYPES = frozenset(
-    {"earnings_miss", "guidance_cut", "major_litigation", "supply_chain_disruption"}
+    {"earnings_miss", "guidance_cut", "sec_earnings_release", "major_litigation", "supply_chain_disruption"}
 )
 _UNKNOWN_HARD_CATALYST_RE = re.compile(
     r"\b(settle[sd]?|settlement|acquire[sd]?|acquisition|merger|buyback|repurchase"

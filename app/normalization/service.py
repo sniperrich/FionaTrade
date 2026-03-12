@@ -155,6 +155,13 @@ class NormalizationService:
 
         return found
 
+    @staticmethod
+    def _item_summary(item: RawItem) -> str:
+        override = str((item.metadata_json or {}).get("summary_override") or "").strip()
+        if override:
+            return override[:1000]
+        return (item.title or "")[:280]
+
     def _keyword_classify(self, text: str) -> str:
         lowered = text.lower()
         for event_type, keywords in EVENT_KEYWORDS.items():
@@ -261,7 +268,7 @@ class NormalizationService:
                         severity=self._severity(event_type),
                         event_time=ensure_utc(item.published_at),
                         evidence_refs=[item.id],
-                        summary=item.title[:280],
+                        summary=self._item_summary(item),
                     ),
                     raw_items=[item],
                 )
@@ -279,6 +286,6 @@ class NormalizationService:
                 item_ts = ensure_utc(item.published_at)
                 if item_ts > ensure_utc(group.canonical.event_time):
                     group.canonical.event_time = item_ts
-                    group.canonical.summary = item.title[:280]
+                    group.canonical.summary = self._item_summary(item)
 
         return list(grouped.values())
