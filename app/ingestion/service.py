@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.core.utils import ensure_utc, normalize_title, utc_now
 from app.db.models import RawItem, SourceStatus
+from app.ingestion.earnings_release_client import EarningsReleaseClient
 from app.ingestion.finnhub_client import FinnhubNewsClient
 from app.ingestion.rss_client import RssClient
 from app.ingestion.sec_client import SecClient
@@ -30,6 +31,7 @@ class IngestionService:
         self.sec = SecClient(settings)
         self.rss = RssClient(settings)
         self.finnhub = FinnhubNewsClient(settings)
+        self.earnings_release = EarningsReleaseClient(settings)
 
     def _recent_titles(self, session: Session) -> set[str]:
         cutoff = utc_now() - timedelta(hours=6)
@@ -51,6 +53,10 @@ class IngestionService:
         finnhub_items, finnhub_check = self.finnhub.fetch()
         items.extend(finnhub_items)
         checks.append(finnhub_check)
+
+        earnings_items, earnings_check = self.earnings_release.fetch_recent(session)
+        items.extend(earnings_items)
+        checks.append(earnings_check)
 
         return items, checks
 
@@ -84,8 +90,7 @@ class IngestionService:
             if check.status == "ONLINE":
                 row.last_success_at = now
 
-    def run(self, session: Session) -> IngestionResult:
-        fetched_items, checks = self._collect(session)
+    def persist_items(self, session: Session, fetched_items: list[RawNewsItem], checks: list[SourceCheck]) -> IngestionResult:
         self._persist_source_checks(session, checks)
 
         recent_title_set = self._recent_titles(session)
@@ -127,3 +132,7 @@ class IngestionService:
             duplicate_dropped=duplicates,
             raw_item_ids=raw_ids,
         )
+
+    def run(self, session: Session) -> IngestionResult:
+        fetched_items, checks = self._collect(session)
+        return self.persist_items(session, fetched_items, checks)

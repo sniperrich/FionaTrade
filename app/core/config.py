@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     enable_sec: bool = True
     enable_rss: bool = True
     enable_finnhub: bool = True
+    enable_earnings_release_source: bool = True
 
     sec_user_agent: str = "FionaTrade/0.1 (your-email@example.com)"
     finnhub_api_key: str = ""
@@ -103,6 +104,7 @@ class Settings(BaseSettings):
     earnings_calendar_refresh_interval_hours: int = 24
     earnings_calendar_lookback_days: int = 30
     earnings_calendar_lookahead_days: int = 90
+    earnings_release_ingestion_lookback_days: int = 7
     macro_context_lookback_days: int = 30
 
     sec_poller_limit: int = 100

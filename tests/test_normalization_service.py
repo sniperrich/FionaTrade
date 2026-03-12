@@ -186,3 +186,27 @@ def test_optional_merge_window_uses_last_evidence_timestamp(session, settings):
     clusters = svc.build_clusters(session)
     assert len(clusters) == 1
     assert clusters[0].canonical.event_time == later
+
+
+def test_unverified_metadata_ticker_is_dropped_for_mismatched_article(session, settings):
+    now = datetime(2025, 10, 8, 12, 35, tzinfo=timezone.utc)
+    session.add(
+        RawItem(
+            source="yahoo",
+            source_tier=2,
+            url="https://example.com/penguin-solutions",
+            title="Penguin Solutions Earnings Beat Estimates. Why the Stock Has Dropped More Than 20%.",
+            body="Penguin Solutions says its soft fiscal-year outlook is meant to reflect a broader set of outcomes.",
+            published_at=now,
+            ingested_at=now,
+            item_hash="hash-penguin-meta-mismatch",
+            metadata_json={"ticker": "META"},
+            processed=False,
+        )
+    )
+    session.flush()
+
+    svc = NormalizationService(settings)
+    clusters = svc.build_clusters(session)
+    assert len(clusters) == 1
+    assert clusters[0].canonical.tickers == []

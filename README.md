@@ -159,9 +159,11 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 支持 1m 行情覆盖审计：`python scripts/audit_bar_coverage.py --start-date 2026-01-02 --end-date 2026-01-10`。
 - 支持历史 routine filing 事件重标注：`python scripts/relabel_routine_filings.py --start-date 2026-01-01 --end-date 2026-02-01`。
 - 支持 SP100 财报日历自动回填：`python scripts/backfill_earnings_calendar.py --from 2025-10-01 --to 2025-12-31`。
+- 支持独立的结构化财报发布源回填：`python scripts/backfill_earnings_releases.py --from 2025-10-01 --to 2025-12-31`。
 - 支持按当前 normalization/validation 逻辑重建历史事件：`python scripts/rebuild_events_from_raw.py --start-date 2025-10-01 --end-date 2025-11-01`。
 - `rebuild_events_from_raw.py` 现在会按批次重建大时间窗，避免 SQLite 在全年窗口下因 `raw_ids` 过多导致空结果。
 - 支持独立检查“财报数据是否拿到 + 当前是否可交易”：`python scripts/check_earnings_tradeability.py --ticker AAPL --event-time 2026-01-28T14:30:00+00:00 --event-type earnings_miss --event-summary "AAPL quarterly earnings beat estimates but stock falls on softer guidance"`。
+- 支持独立检查“结构化财报发布源是否落库 + 是否可交易”：`python scripts/check_earnings_release_source.py --ticker AAPL --from 2025-10-01 --to 2025-12-31`。
 - 支持 LLM 一致性测试（同窗重复 3 次）：`python scripts/run_llm_consistency_check.py --runs 3`。
 - 回测并发 LLM workers 可通过参数 `llm_workers`（默认 8）调整。
 - 回测支持 `min_severity` 参数（默认 0 不过滤；70 = 只交易强信号事件 regulatory/accident/supply_chain/litigation 类）。
@@ -211,6 +213,14 @@ python scripts/backfill_sec_bodies.py --limit 500
   - 新表 `earnings_calendar`
   - 调度器会自动刷新 Finnhub earnings calendar
   - `earnings_context` 现在按 `event_time` 读取上一次/下一次财报，而不是直接拿“今天看到的最新财报数据”
+- 新增独立 `earnings_release` 结构化原始消息源：
+  - 基于本地 `earnings_calendar` 生成 `RawItem(source=earnings_release, source_tier=0)`
+  - `published_at` 锚定到财报发布时间（`BMO/AMC/DMH`），不再依赖新闻评论文去猜“财报事件”
+  - 默认纳入分钟轮询 ingestion；也可单独回填 `scripts/backfill_earnings_releases.py`
+- Ticker 映射修复：
+  - `NormalizationService` 现在只把 `metadata_json["ticker"]` 当弱提示
+  - 只有“正文/标题明确提到该 ticker 或公司别名”或“结构化源（SEC / earnings_release）白名单”时才接受 metadata ticker
+  - 这会直接拦掉类似 “Penguin Solutions ...” 被错误映射成 `META` 的错票
 - `major_litigation` 继续收紧：`favorable court ruling`、`settle AI lawsuits`、`positive outlook following ruling` 这类弱/偏正面诉讼文会降回 `unknown`。
 - 新增脚本：
   - `scripts/backfill_earnings_calendar.py`
@@ -219,6 +229,7 @@ python scripts/backfill_sec_bodies.py --limit 500
   - `tests/test_analysis_context.py` 覆盖财报上下文按事件时点读取、未来证据过滤
   - `tests/test_normalization_service.py` 覆盖默认不合并消息、可选 merge 时 `event_time` 取最后证据时间
   - `tests/test_validation_scoring.py` 覆盖“第二独立来源到达后升级 VALID”
+  - `tests/test_earnings_release_client.py` 覆盖结构化财报发布源生成、落库和 ticker/event_type 映射
 - 注意：
   - `run_id=56` 仍是旧事件库上的结果。
   - 要验证这轮新逻辑，先执行 `python scripts/rebuild_events_from_raw.py --start-date 2025-10-01 --end-date 2025-11-01`，再跑回测。

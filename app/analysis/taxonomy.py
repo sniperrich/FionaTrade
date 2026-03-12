@@ -44,6 +44,7 @@ SOURCE_TIER = {
     "sec": 0,
     "exchange": 0,
     "company": 0,
+    "earnings_release": 0,
     "reuters": 1,
     "bloomberg": 1,
     "wsj": 1,

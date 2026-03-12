@@ -3,6 +3,8 @@ SP100 company name → ticker mapping.
 Covers common variants: full name, short name, brand name.
 """
 
+from collections import defaultdict
+
 COMPANY_NAME_TO_TICKER: dict[str, str] = {
     # A
     "apple": "AAPL",
@@ -149,4 +151,13 @@ COMPANY_NAME_TO_TICKER: dict[str, str] = {
     "exxon": "XOM",
     "exxonmobil": "XOM",
     "exxon mobil": "XOM",
+}
+
+_aliases: dict[str, list[str]] = defaultdict(list)
+for company_name, ticker in COMPANY_NAME_TO_TICKER.items():
+    _aliases[ticker].append(company_name)
+
+TICKER_TO_COMPANY_ALIASES: dict[str, tuple[str, ...]] = {
+    ticker: tuple(sorted(names, key=len, reverse=True))
+    for ticker, names in _aliases.items()
 }

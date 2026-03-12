@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.analysis.taxonomy import EVENT_KEYWORDS, resolve_event_type_for_text
-from app.core.company_names import COMPANY_NAME_TO_TICKER
+from app.core.company_names import COMPANY_NAME_TO_TICKER, TICKER_TO_COMPANY_ALIASES
 from app.core.config import Settings
 from app.core.utils import ensure_utc, minute_bucket
 from app.db.models import RawItem
@@ -84,6 +84,9 @@ class NormalizationService:
         self.universe = set(settings.sp100_tickers)
         # Build sorted list of company names (longest first to avoid partial matches)
         self._name_map = sorted(COMPANY_NAME_TO_TICKER.keys(), key=len, reverse=True)
+        self._ticker_aliases = {
+            ticker: aliases for ticker, aliases in TICKER_TO_COMPANY_ALIASES.items() if ticker in self.universe
+        }
         self._llm_client = None
         if OpenAI is not None and settings.llm_base_url and settings.llm_api_key:
             base = settings.llm_base_url.rstrip("/")
@@ -91,7 +94,27 @@ class NormalizationService:
                 base = base + "/v1"
             self._llm_client = OpenAI(base_url=base, api_key=settings.llm_api_key)
 
-    def _extract_tickers(self, text: str, metadata_json: dict) -> list[str]:
+    def _text_mentions_ticker(self, text: str, ticker: str) -> bool:
+        lowered = (text or "").lower()
+        tokens = text.replace("$", " ").replace(",", " ").replace(".", ". ").split()
+        for token in tokens:
+            if token.strip().upper() == ticker:
+                return True
+
+        for alias in self._ticker_aliases.get(ticker, ()):
+            pattern = r"(?<![a-z])" + re.escape(alias) + r"(?![a-z])"
+            if re.search(pattern, lowered):
+                return True
+        return False
+
+    @staticmethod
+    def _is_structured_ticker_source(source: str, metadata_json: dict) -> bool:
+        lowered_source = (source or "").lower().strip()
+        if lowered_source in {"sec", "earnings_release"}:
+            return True
+        return bool((metadata_json or {}).get("structured_ticker"))
+
+    def _extract_tickers(self, text: str, metadata_json: dict, source: str = "") -> list[str]:
         found = []
         seen = set()
 
@@ -117,10 +140,18 @@ class NormalizationService:
                     seen.add(ticker)
 
         # 3. Metadata hint (e.g. SEC filings carry explicit ticker)
-        hint = (metadata_json or {}).get("ticker")
+        hint = str((metadata_json or {}).get("ticker") or "").upper().strip()
         if hint and hint in self.universe and hint not in seen:
-            found.append(hint)
-            seen.add(hint)
+            if self._is_structured_ticker_source(source, metadata_json) or self._text_mentions_ticker(text, hint):
+                found.append(hint)
+                seen.add(hint)
+            else:
+                logger.info(
+                    "Dropped unverified metadata ticker hint source=%s hint=%s title_text=%r",
+                    source,
+                    hint,
+                    (text or "")[:160],
+                )
 
         return found
 
@@ -198,18 +229,22 @@ class NormalizationService:
         grouped: dict[tuple[object, ...], NormalizedCluster] = {}
         for item in rows:
             text = f"{item.title} {item.body}"
-            tickers = self._extract_tickers(text, item.metadata_json)
+            tickers = self._extract_tickers(text, item.metadata_json, source=item.source)
             if self._is_routine_filing_item(item, text):
                 event_type = "sec_filing"
             else:
-                # Skip slow LLM classifier for ticker-tagged items (Finnhub company-news);
-                # the main analysis LLM reads full text to determine direction anyway.
-                has_ticker_meta = bool((item.metadata_json or {}).get("ticker"))
-                if has_ticker_meta:
-                    event_type = self._keyword_classify(text)
-                    # keep "unknown" without calling LLM — main analysis LLM handles direction
+                hinted_event_type = str((item.metadata_json or {}).get("event_type_hint") or "").strip().lower()
+                if hinted_event_type in _VALID_EVENT_TYPES:
+                    event_type = resolve_event_type_for_text(hinted_event_type, text)
                 else:
-                    event_type = self._infer_event_type(text)
+                    # Skip slow LLM classifier for ticker-tagged items (Finnhub company-news);
+                    # the main analysis LLM reads full text to determine direction anyway.
+                    has_ticker_meta = bool((item.metadata_json or {}).get("ticker"))
+                    if has_ticker_meta:
+                        event_type = self._keyword_classify(text)
+                        # keep "unknown" without calling LLM — main analysis LLM handles direction
+                    else:
+                        event_type = self._infer_event_type(text)
             primary_ticker = tickers[0] if tickers else "UNKNOWN"
             if merge_window_min > 0:
                 bucket = minute_bucket(item.published_at, width_min=merge_window_min).isoformat()
