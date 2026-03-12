@@ -31,13 +31,45 @@ def test_earnings_calendar_context_uses_last_and_next_reports(session, settings)
     )
     session.flush()
 
-    ctx = svc._earnings_calendar_context(session, "AAPL", event_ts)
+    ctx = svc._earnings_calendar_context(session, "AAPL", event_ts, include_upcoming=True)
     assert ctx is not None
     assert ctx["last_report_date"] == "2025-10-01"
     assert ctx["days_since_last_report"] == 14
     assert ctx["next_report_date"] == "2025-10-28"
     assert ctx["days_to_next_report"] == 13
     assert ctx["last_surprise_pct"] == 25.0
+
+
+def test_earnings_calendar_context_historical_excludes_future_schedule(session, settings):
+    svc = AnalysisService(settings)
+    event_ts = datetime(2025, 10, 15, 14, 30, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            EarningsCalendar(
+                symbol="AAPL",
+                report_date=datetime(2025, 10, 1, tzinfo=timezone.utc),
+                report_hour="amc",
+                quarter=3,
+                fiscal_year=2025,
+                eps_actual=1.25,
+                eps_estimate=1.00,
+            ),
+            EarningsCalendar(
+                symbol="AAPL",
+                report_date=datetime(2025, 10, 28, tzinfo=timezone.utc),
+                report_hour="amc",
+                quarter=4,
+                fiscal_year=2025,
+            ),
+        ]
+    )
+    session.flush()
+
+    ctx = svc._earnings_calendar_context(session, "AAPL", event_ts)
+    assert ctx is not None
+    assert ctx["last_report_date"] == "2025-10-01"
+    assert "next_report_date" not in ctx
+    assert "days_to_next_report" not in ctx
 
 
 def test_evidence_rows_filter_future_evidence(session, settings):

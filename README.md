@@ -174,6 +174,10 @@ python scripts/backfill_sec_bodies.py --limit 500
 - `earnings_review` 已接入：
   - `AnalysisService._event_market_features()`：LLM prompt 可直接看到 `earnings_review`
   - `AnalysisService.assess_tradeability()`：财报类事件会把 `earnings_review` 纳入 tradeability 打分；`POOR` 会直接触发 `earnings_high_bar_risk`
+- 历史回测前视修复：
+  - 历史事件默认只给 LLM 看“过去已发生的财报”
+  - `earnings_context` 在回测/历史事件中不再暴露 `next_report_date`
+  - 只有接近实时的事件才允许带 upcoming earnings schedule
 - 新增脚本 `scripts/check_earnings_tradeability.py`
   - 会先刷新目标 ticker 的财报数据，再输出：
     - `earnings_context`

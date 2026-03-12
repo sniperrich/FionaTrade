@@ -540,6 +540,7 @@ class AnalysisService:
         session: Session | None,
         ticker: str,
         event_ts: datetime,
+        include_upcoming: bool = False,
     ) -> dict | None:
         asof = ensure_utc(event_ts).replace(hour=0, minute=0, second=0, microsecond=0)
         latest_past = None
@@ -552,12 +553,13 @@ class AnalysisService:
                 .order_by(EarningsCalendar.report_date.desc())
                 .limit(1)
             ).scalar_one_or_none()
-            next_upcoming = session.execute(
-                select(EarningsCalendar)
-                .where(EarningsCalendar.symbol == ticker, EarningsCalendar.report_date > asof)
-                .order_by(EarningsCalendar.report_date.asc())
-                .limit(1)
-            ).scalar_one_or_none()
+            if include_upcoming:
+                next_upcoming = session.execute(
+                    select(EarningsCalendar)
+                    .where(EarningsCalendar.symbol == ticker, EarningsCalendar.report_date > asof)
+                    .order_by(EarningsCalendar.report_date.asc())
+                    .limit(1)
+                ).scalar_one_or_none()
 
         trailing = self._finnhub_earnings_context(ticker, event_ts=event_ts)
         last_report = latest_past.report_date if latest_past else None
@@ -816,7 +818,13 @@ class AnalysisService:
             verdict = "MARGINAL"
             rationale = "this ticker has a high-bar earnings profile; simple beats are often not enough"
 
-        context = self._earnings_calendar_context(session, ticker, asof) or {}
+        allow_upcoming_schedule = asof >= utc_now() - timedelta(days=2)
+        context = self._earnings_calendar_context(
+            session,
+            ticker,
+            asof,
+            include_upcoming=allow_upcoming_schedule,
+        ) or {}
         if context.get("days_to_next_report") is not None and context["days_to_next_report"] <= 3:
             verdict = "MARGINAL" if verdict == "GOOD" else verdict
             rationale = "next earnings report is very close; event trades face elevated gap risk"
@@ -1069,7 +1077,13 @@ class AnalysisService:
         )
 
         current_price = float(ticker_now.close) if ticker_now else None
-        earnings_ctx = self._earnings_calendar_context(session, ticker, event_ts)
+        allow_upcoming_schedule = event_ts >= utc_now() - timedelta(days=2)
+        earnings_ctx = self._earnings_calendar_context(
+            session,
+            ticker,
+            event_ts,
+            include_upcoming=allow_upcoming_schedule,
+        )
         earnings_review = self.build_earnings_review(session, ticker, event_ts)
         is_recent_event = event_ts >= utc_now() - timedelta(days=2)
         tech_signal = self._finnhub_tech_signal(ticker) if is_recent_event else None
