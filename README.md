@@ -164,10 +164,15 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 支持 LLM 一致性测试（同窗重复 3 次）：`python scripts/run_llm_consistency_check.py --runs 3`。
 - 回测并发 LLM workers 可通过参数 `llm_workers`（默认 8）调整。
 - 回测支持 `min_severity` 参数（默认 0 不过滤；70 = 只交易强信号事件 regulatory/accident/supply_chain/litigation 类）。
+- 回测支持 `event_profile` 参数：
+  - `earnings_only`：只保留“财报发布/指引更新”类事件，自动排除 `what to expect / ahead of earnings / webcast / conference call` 等预告和点评文。
 
 ## 近期变更
 
 ### 2026-03-11
+- 回测新增 `event_profile="earnings_only"`：
+  - 用于“only 财报、不掺其他新闻”的回测口径。
+  - 过滤逻辑在查询层执行，metrics 会输出 `event_profile` 和 `profile_filtered`。
 - 新增 `earnings_review` 系统：
   - 会结合 `earnings_calendar`、历史 earnings/guidance 事件时间戳和本地 `bars_1m`，计算过去数次财报后的 `2h` 反应、`beat_and_drop_rate`、`miss_and_pop_rate`、`high_bar_score`。
   - 目标是识别“beat 也跌”的高预期股票，而不是只看 headline 里的 `beat/miss`。

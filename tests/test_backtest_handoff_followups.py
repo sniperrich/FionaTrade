@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.backtest_engine.service import BacktestEngineService
+from app.core.utils import ensure_utc
 from app.db.models import Bar1m, Event, EventEvidence, RawItem
 from app.schemas.types import TradeSignal
 
@@ -1015,3 +1016,105 @@ def test_backtest_conviction_position_sizing_lifts_strong_event_size(session, se
     assert boosted_run.metrics["conviction_position_sizing"] is True
     assert float(boosted_row.trade_log[0]["qty"]) > float(base_row.trade_log[0]["qty"])
     assert float(boosted_row.trade_log[0]["effective_position_pct_suggestion"]) >= settings.backtest_conviction_position_floor
+
+
+def test_backtest_event_profile_earnings_only_filters_non_earnings(session, settings):
+    event_time = datetime(2026, 1, 22, 14, 30, tzinfo=timezone.utc)
+    earnings_event = Event(
+        event_type="unknown",
+        entities=["AAPL"],
+        tickers=["AAPL"],
+        severity=70,
+        event_time=event_time,
+        confidence=80,
+        validation_status="VALID",
+        summary="AAPL reports quarterly earnings and raises revenue guidance",
+    )
+    non_earnings_event = Event(
+        event_type="merger_acquisition",
+        entities=["MSFT"],
+        tickers=["MSFT"],
+        severity=70,
+        event_time=event_time + timedelta(minutes=5),
+        confidence=80,
+        validation_status="VALID",
+        summary="MSFT acquires startup in strategic buyout deal",
+    )
+    session.add_all([earnings_event, non_earnings_event])
+    session.flush()
+    session.add_all(
+        [
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=1),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=event_time + timedelta(minutes=61),
+                open=101.0,
+                high=102.0,
+                low=100.0,
+                close=101.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="MSFT",
+                ts=event_time + timedelta(minutes=6),
+                open=200.0,
+                high=201.0,
+                low=199.0,
+                close=200.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="MSFT",
+                ts=event_time + timedelta(minutes=66),
+                open=201.0,
+                high=202.0,
+                low=200.0,
+                close=201.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = BacktestEngineService(settings)
+    svc.analysis.event_to_signal = lambda event, **_kwargs: TradeSignal(  # noqa: SLF001
+        action="BUY",
+        ticker=event.tickers[0],
+        confidence=event.confidence,
+        horizon_min=60,
+        reason="profile test",
+        expires_at=ensure_utc(event.event_time) + timedelta(minutes=60),
+        fallback_used=False,
+    )
+
+    result = svc.run(
+        session,
+        params={
+            "start_date": "2026-01-22",
+            "end_date": "2026-01-23",
+            "min_confidence": 30,
+            "use_llm": True,
+            "use_signal_validation": False,
+            "hard_stops": False,
+            "risk_sizing": False,
+            "slippage_bps": 0.0,
+            "use_tradeability_filter": False,
+            "event_profile": "earnings_only",
+        },
+    )
+    assert result.metrics["event_profile"] == "earnings_only"
+    assert result.metrics["profile_filtered"] == 1
+    assert result.metrics["events_considered"] == 1
+    assert result.metrics["trades"] == 1

@@ -60,6 +60,24 @@ class BacktestEngineService:
         "explosion",
         "fire",
     )
+    _EARNINGS_KEYWORD_RE = re.compile(
+        r"\b(earnings|guidance|estimate(?:s)?|eps|revenue|sales|results?|quarter(?:ly)?|outlook|forecast)\b",
+        re.IGNORECASE,
+    )
+    _EARNINGS_RELEASE_RE = re.compile(
+        r"\b(reports?|reported|posts?|posted|results?|raises? (?:guidance|outlook|forecast)"
+        r"|cuts? (?:guidance|outlook|forecast)|sales|revenue|eps|profit|income"
+        r"|beats? (?:estimates|expectations)|missed? estimates|below expectations)\b",
+        re.IGNORECASE,
+    )
+    _EARNINGS_EXCLUDE_RE = re.compile(
+        r"\b(what to expect|ahead of earnings|to report|conference call|webcast|estimated value"
+        r"|honest take|in the context of|due for a rally|has me excited|buy rating"
+        r"|bullish consolidation|how to boost|takes center stage|earnings season"
+        r"|release .* earnings|announces .* earnings|hold .* earnings|host .* earnings"
+        r"|analyst questions|poised to beat|surprise streak|earnings release)\b",
+        re.IGNORECASE,
+    )
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -162,6 +180,40 @@ class BacktestEngineService:
         if side == "SHORT":
             return price * (1 - slip) if leg == "entry" else price * (1 + slip)
         return price
+
+    @staticmethod
+    def _as_list(value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return [str(value).strip()]
+
+    def _matches_event_profile(self, event: Event, profile: str | None) -> bool:
+        profile_key = (profile or "").strip().lower()
+        if not profile_key:
+            return True
+
+        summary = event.summary or ""
+        lowered = summary.lower()
+        effective_event_type = resolve_event_type_for_text(event.event_type or "", summary)
+
+        if profile_key == "earnings_only":
+            if self._EARNINGS_EXCLUDE_RE.search(summary):
+                return False
+            if effective_event_type == "earnings_miss":
+                return True
+            if effective_event_type == "guidance_cut" and self._EARNINGS_KEYWORD_RE.search(summary):
+                return True
+            if not self._EARNINGS_KEYWORD_RE.search(summary):
+                return False
+            return bool(self._EARNINGS_RELEASE_RE.search(summary)) and not any(
+                token in lowered for token in ("next earnings report", "earnings conference", "earnings call")
+            )
+
+        return True
 
     def _position_size(
         self,
@@ -561,6 +613,7 @@ class BacktestEngineService:
 
         start_date = params.get("start_date")
         end_date = params.get("end_date")
+        event_profile = str(params.get("event_profile") or "").strip().lower()
 
         run = BacktestRun(params=params, status="RUNNING")
         session.add(run)
@@ -581,6 +634,11 @@ class BacktestEngineService:
             stmt = stmt.where(Event.event_time < end_dt)
 
         events = session.execute(stmt.order_by(Event.event_time.asc())).scalars().all()
+        profile_filtered = 0
+        if event_profile:
+            filtered_events = [event for event in events if self._matches_event_profile(event, event_profile)]
+            profile_filtered = max(0, len(events) - len(filtered_events))
+            events = filtered_events
         events_before_dedup = len(events)
         same_day_dedup_dropped = 0
         earnings_window_dedup_dropped = 0
@@ -609,6 +667,8 @@ class BacktestEngineService:
             {
                 "run_id": run.id,
                 "events": len(events),
+                "event_profile": event_profile,
+                "profile_filtered": profile_filtered,
                 "use_llm": use_llm,
                 "min_confidence": min_conf,
                 "horizon_min": horizon_min,
@@ -1129,6 +1189,8 @@ class BacktestEngineService:
 
         metrics = self._compute_metrics(self.settings.initial_nav, equity_curve, pnl_list)
         metrics["events_considered"] = len(events)
+        metrics["event_profile"] = event_profile
+        metrics["profile_filtered"] = profile_filtered
         metrics["event_type_attribution"] = event_type_attr
         metrics["source_attribution"] = source_attr
         metrics["use_llm"] = use_llm
