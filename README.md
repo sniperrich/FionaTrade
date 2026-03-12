@@ -221,6 +221,7 @@ python scripts/backfill_sec_bodies.py --limit 500
   - `SecClient` 现在会对 `8-K` 额外检查 `Item 2.02 / Exhibit 99.1`
   - 命中后不再落成普通 `sec_filing`，而是写入独立事件类型 `sec_earnings_release`
   - 会调用 `gemini-3-flash` 生成 `<=1000` 字摘要，要求保留具体数字；摘要写入 `summary_override`
+  - 已修复 SEC `/ix?doc=` 包装页误抓问题，现在会回落到真实 `99.1` HTML 文档再做摘要
   - 新增检查脚本：`python scripts/check_sec_earnings_release.py --ticker AAPL`
 - Ticker 映射修复：
   - `NormalizationService` 现在只把 `metadata_json["ticker"]` 当弱提示

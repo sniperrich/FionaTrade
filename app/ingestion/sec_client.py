@@ -5,7 +5,7 @@ import logging
 import re
 from time import sleep
 from typing import Iterable
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import feedparser
 import httpx
@@ -159,6 +159,16 @@ class SecClient:
         return utc_now()
 
     @staticmethod
+    def _normalize_sec_doc_url(url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.path == "/ix" and parsed.query:
+            qs = parse_qs(parsed.query)
+            doc = qs.get("doc")
+            if doc and doc[0]:
+                return urljoin("https://www.sec.gov", doc[0])
+        return url
+
+    @staticmethod
     def _filing_index_url(cik: str, accession: str) -> str:
         accession_plain = accession.replace("-", "")
         archive_cik = cik.lstrip("0") or "0"
@@ -167,14 +177,18 @@ class SecClient:
     def _extract_exhibit_991_url(self, index_html: str, index_url: str) -> str | None:
         if not index_html:
             return None
-        for row in _EXHIBIT_991_ROW_RE.findall(index_html):
-            match = _HREF_RE.search(row)
-            if match:
-                return urljoin(index_url, match.group(1))
+        rows = re.findall(r"<tr[^>]*>.*?</tr>", index_html, flags=re.IGNORECASE | re.DOTALL)
+        for row in rows:
+            lowered = row.lower()
+            if "99.1" not in lowered and "ex-99.1" not in lowered:
+                continue
+            hrefs = _HREF_RE.findall(row)
+            for href in reversed(hrefs):
+                return self._normalize_sec_doc_url(urljoin(index_url, href))
         if "99.1" in index_html.lower():
             match = _HREF_RE.search(index_html)
             if match:
-                return urljoin(index_url, match.group(1))
+                return self._normalize_sec_doc_url(urljoin(index_url, match.group(1)))
         return None
 
     @staticmethod

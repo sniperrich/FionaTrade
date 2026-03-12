@@ -47,6 +47,7 @@ def test_sec_client_promotes_item_202_to_independent_event(session, settings):
     assert item.metadata["sec_item_202"] is True
     assert item.metadata["summary_override"].startswith("苹果提交8-K财报摘要")
     assert item.title.startswith("AAPL reports EPS $2.40")
+    assert item.metadata["exhibit_99_1_url"].endswith("ex991.htm")
     assert "LLM_SUMMARY_ZH" in item.body
 
 
@@ -68,3 +69,9 @@ def test_sec_client_leaves_non_earnings_8k_as_generic_item(session, settings):
     item = items[0]
     assert item.title == "AAPL filed 8-K"
     assert "event_type_hint" not in item.metadata
+
+
+def test_normalize_sec_doc_url_strips_ix_wrapper(settings):
+    client = SecClient(settings.model_copy(update={"enable_sec": True}))
+    wrapped = "https://www.sec.gov/ix?doc=/Archives/edgar/data/320193/000032019326000005/aapl-20260129.htm"
+    assert client._normalize_sec_doc_url(wrapped) == "https://www.sec.gov/Archives/edgar/data/320193/000032019326000005/aapl-20260129.htm"
