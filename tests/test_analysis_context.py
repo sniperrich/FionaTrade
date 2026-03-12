@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.analysis.service import AnalysisService
-from app.db.models import EarningsCalendar, Event, EventEvidence, RawItem
+from app.db.models import Bar1m, EarningsCalendar, Event, EventEvidence, RawItem
 
 
 def test_earnings_calendar_context_uses_last_and_next_reports(session, settings):
@@ -107,3 +107,74 @@ def test_evidence_rows_filter_future_evidence(session, settings):
     rows = svc._evidence_rows(session, event)
     assert len(rows) == 1
     assert rows[0]["url"] == raw_now.url
+
+
+def test_build_earnings_review_flags_high_bar_ticker(session, settings):
+    svc = AnalysisService(settings)
+    asof = datetime(2025, 10, 15, 14, 30, tzinfo=timezone.utc)
+    report_dates = [
+        datetime(2025, 7, 31, tzinfo=timezone.utc),
+        datetime(2025, 8, 28, tzinfo=timezone.utc),
+        datetime(2025, 9, 25, tzinfo=timezone.utc),
+    ]
+    for idx, report_date in enumerate(report_dates):
+        session.add(
+            EarningsCalendar(
+                symbol="AAPL",
+                report_date=report_date,
+                report_hour="amc",
+                quarter=idx + 1,
+                fiscal_year=2025,
+                eps_actual=1.20,
+                eps_estimate=1.00,
+            )
+        )
+        trade_day = report_date + timedelta(days=1)
+        open_ts = trade_day.replace(hour=13, minute=30)
+        exit_ts = trade_day.replace(hour=15, minute=30)
+        session.add_all(
+            [
+                Bar1m(
+                    ticker="AAPL",
+                    ts=open_ts,
+                    open=100.0,
+                    high=100.5,
+                    low=99.5,
+                    close=100.0,
+                    volume=1000,
+                    source="test",
+                ),
+                Bar1m(
+                    ticker="AAPL",
+                    ts=exit_ts,
+                    open=98.0,
+                    high=98.5,
+                    low=97.0,
+                    close=97.5,
+                    volume=1000,
+                    source="test",
+                ),
+            ]
+        )
+    session.flush()
+
+    review = svc.build_earnings_review(session, "AAPL", asof)
+    assert review is not None
+    assert review["sample_size"] == 3
+    assert review["beat_and_drop_rate"] == 1.0
+    assert review["tradeability"] == "POOR"
+    assert review["high_bar_score"] >= 70
+
+    event = Event(
+        event_type="earnings_miss",
+        tickers=["AAPL"],
+        entities=["AAPL"],
+        severity=70,
+        confidence=70,
+        validation_status="VALID",
+        summary="AAPL quarterly earnings update and management commentary",
+        event_time=asof,
+    )
+    tradeability = svc.assess_tradeability(event, session=session)
+    assert tradeability["tradeable"] is False
+    assert tradeability["reason"] == "earnings_high_bar_risk"

@@ -5,6 +5,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import and_, select
@@ -23,11 +24,14 @@ _RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
 class AnalysisService:
+    _NY_TZ = ZoneInfo("America/New_York")
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self._llm_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._quality_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._tradeability_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._earnings_review_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         # Finnhub supplemental data cache: key → (data, expire_ts)
         self._fh_cache: dict[str, tuple[Any, float]] = {}
 
@@ -230,6 +234,16 @@ class AnalysisService:
         r"|shutdown|accident|fraud|material weakness|restatement|dividend|deal)\b",
         re.IGNORECASE,
     )
+    _EARNINGS_POSITIVE_RE = re.compile(
+        r"\b(beats? (?:estimates|expectations)|guides? above|raises? (?:guidance|forecast|outlook)"
+        r"|higher sales|better than expected|strong demand|revenue (?:rose|up)|profit (?:rose|up))\b",
+        re.IGNORECASE,
+    )
+    _EARNINGS_NEGATIVE_RE = re.compile(
+        r"\b(missed? estimates|below expectations|cuts? (?:guidance|forecast|outlook)|soft demand"
+        r"|weaker than expected|warned on outlook)\b",
+        re.IGNORECASE,
+    )
     _WEAK_OPINION_SOURCES = {
         "seekingalpha",
         "motley fool",
@@ -404,6 +418,21 @@ class AnalysisService:
         if opinion_hits:
             score -= 35
 
+        earnings_review = None
+        summary_lower = (event.summary or "").lower()
+        if session is not None and (
+            effective_event_type in {"earnings_miss", "guidance_cut"}
+            or "earnings" in summary_lower
+            or "guidance" in summary_lower
+            or "estimates" in summary_lower
+        ):
+            earnings_review = self.build_earnings_review(session, ticker, ensure_utc(event.event_time))
+            if earnings_review:
+                if earnings_review.get("tradeability") == "POOR":
+                    score -= 25
+                elif earnings_review.get("tradeability") == "MARGINAL":
+                    score -= 10
+
         score = max(0, min(score, 100))
         reason = "tradeable"
         tradeable = True
@@ -420,6 +449,9 @@ class AnalysisService:
         elif effective_event_type == "unknown" and hard_event_hits == 0 and len(unique_sources) < 2:
             tradeable = False
             reason = "unknown_without_hard_catalyst"
+        elif earnings_review and earnings_review.get("tradeability") == "POOR":
+            tradeable = False
+            reason = "earnings_high_bar_risk"
         elif score < self.settings.event_tradeability_min_score:
             tradeable = False
             reason = "tradeability_score_too_low"
@@ -435,6 +467,7 @@ class AnalysisService:
             "unique_sources": len(unique_sources),
             "strong_sources": strong_sources,
             "weak_source_only": weak_source_only,
+            "earnings_review": earnings_review,
         }
         self._tradeability_cache[cache_key] = dict(result)
         return result
@@ -566,6 +599,244 @@ class AnalysisService:
             result["next_report_hour"] = next_upcoming.report_hour
 
         return result or None
+
+    @staticmethod
+    def _is_regular_session_bar(ts: datetime) -> bool:
+        ts = ensure_utc(ts)
+        local = ts.astimezone(AnalysisService._NY_TZ)
+        local_clock = local.timetz().replace(tzinfo=None)
+        return local.weekday() < 5 and (local_clock.hour, local_clock.minute) >= (9, 30) and (local_clock.hour, local_clock.minute) < (16, 0)
+
+    def _regular_bar_at_or_after(self, session: Session, ticker: str, ts: datetime) -> Bar1m | None:
+        bars = (
+            session.execute(
+                select(Bar1m)
+                .where(and_(Bar1m.ticker == ticker, Bar1m.ts >= ensure_utc(ts), Bar1m.ts < ensure_utc(ts) + timedelta(days=5)))
+                .order_by(Bar1m.ts.asc())
+            )
+            .scalars()
+            .all()
+        )
+        for bar in bars:
+            if self._is_regular_session_bar(bar.ts):
+                return bar
+        return None
+
+    def _earnings_release_anchor(self, report_date: datetime, report_hour: str | None) -> datetime:
+        base = ensure_utc(report_date).replace(hour=0, minute=0, second=0, microsecond=0)
+        hour = (report_hour or "").strip().lower()
+        if hour in {"amc", "after market close"} or "after market" in hour:
+            return base + timedelta(hours=21)
+        if hour in {"bmo", "before market open"} or "before market" in hour:
+            return base + timedelta(hours=13)
+        return base
+
+    def _reaction_2h_after_anchor(self, session: Session, ticker: str, anchor: datetime) -> float | None:
+        entry_bar = self._regular_bar_at_or_after(session, ticker, anchor)
+        exit_bar = (
+            self._regular_bar_at_or_after(session, ticker, ensure_utc(entry_bar.ts) + timedelta(minutes=120))
+            if entry_bar
+            else None
+        )
+        if not entry_bar or not exit_bar or abs(float(entry_bar.open)) < 1e-9:
+            return None
+        return ((float(exit_bar.close) - float(entry_bar.open)) / float(entry_bar.open)) * 100.0
+
+    def _label_earnings_signal(self, event_type: str | None, text: str, surprise_pct: float | None = None) -> str:
+        lowered = (text or "").lower()
+        if surprise_pct is not None:
+            if surprise_pct >= 2.0:
+                return "beat"
+            if surprise_pct <= -2.0:
+                return "miss"
+        if event_type in {"earnings_miss", "guidance_cut"} or self._EARNINGS_NEGATIVE_RE.search(lowered):
+            return "miss"
+        if self._EARNINGS_POSITIVE_RE.search(lowered):
+            return "beat"
+        return "inline"
+
+    def build_earnings_review(
+        self,
+        session: Session | None,
+        ticker: str,
+        event_ts: datetime,
+        history_limit: int = 8,
+    ) -> dict[str, Any] | None:
+        if session is None:
+            return None
+
+        ticker = str(ticker or "").upper().strip()
+        if not ticker:
+            return None
+
+        asof = ensure_utc(event_ts)
+        cache_key = ("earnings_review", ticker, asof.date().isoformat(), history_limit)
+        cached = self._earnings_review_cache.get(cache_key)
+        if cached:
+            return dict(cached)
+
+        rows = (
+            session.execute(
+                select(EarningsCalendar)
+                .where(EarningsCalendar.symbol == ticker, EarningsCalendar.report_date <= asof)
+                .order_by(EarningsCalendar.report_date.desc())
+                .limit(history_limit)
+            )
+            .scalars()
+            .all()
+        )
+
+        review_rows: list[dict[str, Any]] = []
+        seen_dates: set[str] = set()
+        beat_count = 0
+        miss_count = 0
+        beat_and_drop = 0
+        miss_and_pop = 0
+        beat_returns: list[float] = []
+        miss_returns: list[float] = []
+        all_returns: list[float] = []
+
+        for row in rows:
+            surprise_pct = None
+            if row.eps_actual is not None and row.eps_estimate not in (None, 0):
+                surprise_pct = ((row.eps_actual - row.eps_estimate) / abs(row.eps_estimate)) * 100.0
+
+            anchor = self._earnings_release_anchor(row.report_date, row.report_hour)
+            reaction_2h_pct = self._reaction_2h_after_anchor(session, ticker, anchor)
+            if reaction_2h_pct is not None:
+                all_returns.append(reaction_2h_pct)
+
+            label = self._label_earnings_signal("earnings_miss", "", surprise_pct=surprise_pct)
+            if label == "beat":
+                beat_count += 1
+                if reaction_2h_pct is not None:
+                    beat_returns.append(reaction_2h_pct)
+                    if reaction_2h_pct < 0:
+                        beat_and_drop += 1
+            elif label == "miss":
+                miss_count += 1
+                if reaction_2h_pct is not None:
+                    miss_returns.append(reaction_2h_pct)
+                    if reaction_2h_pct > 0:
+                        miss_and_pop += 1
+
+            report_date_key = ensure_utc(row.report_date).date().isoformat()
+            seen_dates.add(report_date_key)
+
+            review_rows.append(
+                {
+                    "report_date": report_date_key,
+                    "report_hour": row.report_hour,
+                    "surprise_pct": round(surprise_pct, 2) if surprise_pct is not None else None,
+                    "label": label,
+                    "reaction_2h_pct": round(reaction_2h_pct, 2) if reaction_2h_pct is not None else None,
+                    "source": "earnings_calendar",
+                }
+            )
+
+        if len(review_rows) < history_limit:
+            recent_events = (
+                session.execute(
+                    select(Event).where(Event.event_time <= asof).order_by(Event.event_time.desc()).limit(300)
+                )
+                .scalars()
+                .all()
+            )
+            for event in recent_events:
+                if len(review_rows) >= history_limit:
+                    break
+                if ticker not in [str(t).upper() for t in (event.tickers or [])]:
+                    continue
+                summary = event.summary or ""
+                lowered = summary.lower()
+                if event.event_type not in {"earnings_miss", "guidance_cut"} and "earnings" not in lowered and "guidance" not in lowered:
+                    continue
+                report_date_key = ensure_utc(event.event_time).date().isoformat()
+                if report_date_key in seen_dates:
+                    continue
+
+                reaction_2h_pct = self._reaction_2h_after_anchor(session, ticker, ensure_utc(event.event_time))
+                if reaction_2h_pct is not None:
+                    all_returns.append(reaction_2h_pct)
+                label = self._label_earnings_signal(event.event_type, summary)
+                if label == "beat":
+                    beat_count += 1
+                    if reaction_2h_pct is not None:
+                        beat_returns.append(reaction_2h_pct)
+                        if reaction_2h_pct < 0:
+                            beat_and_drop += 1
+                elif label == "miss":
+                    miss_count += 1
+                    if reaction_2h_pct is not None:
+                        miss_returns.append(reaction_2h_pct)
+                        if reaction_2h_pct > 0:
+                            miss_and_pop += 1
+
+                review_rows.append(
+                    {
+                        "report_date": report_date_key,
+                        "report_hour": None,
+                        "surprise_pct": None,
+                        "label": label,
+                        "reaction_2h_pct": round(reaction_2h_pct, 2) if reaction_2h_pct is not None else None,
+                        "source": "event_fallback",
+                    }
+                )
+                seen_dates.add(report_date_key)
+
+        if not review_rows:
+            return None
+
+        beat_and_drop_rate = (beat_and_drop / beat_count) if beat_count else None
+        miss_and_pop_rate = (miss_and_pop / miss_count) if miss_count else None
+        avg_beat_reaction = (sum(beat_returns) / len(beat_returns)) if beat_returns else None
+        avg_miss_reaction = (sum(miss_returns) / len(miss_returns)) if miss_returns else None
+        avg_all_reaction = (sum(all_returns) / len(all_returns)) if all_returns else None
+
+        high_bar_score = 0.0
+        if beat_and_drop_rate is not None:
+            high_bar_score += beat_and_drop_rate * 70.0
+        if avg_beat_reaction is not None and avg_beat_reaction < 0:
+            high_bar_score += min(20.0, abs(avg_beat_reaction) * 4.0)
+        if miss_and_pop_rate is not None:
+            high_bar_score += miss_and_pop_rate * 10.0
+        if len(review_rows) < 3:
+            high_bar_score = min(high_bar_score, 55.0)
+        high_bar_score = round(max(0.0, min(high_bar_score, 100.0)), 1)
+
+        verdict = "GOOD"
+        rationale = "earnings profile looks normal"
+        if beat_count + miss_count == 0 and len(review_rows) >= 2:
+            verdict = "MARGINAL"
+            rationale = "earnings reaction history exists, but beat/miss labeling is still ambiguous; expectation gap is unresolved"
+        elif high_bar_score >= 80:
+            verdict = "POOR"
+            rationale = "historically this ticker often sells off even after positive earnings surprises"
+        elif high_bar_score >= 60:
+            verdict = "MARGINAL"
+            rationale = "this ticker has a high-bar earnings profile; simple beats are often not enough"
+
+        context = self._earnings_calendar_context(session, ticker, asof) or {}
+        if context.get("days_to_next_report") is not None and context["days_to_next_report"] <= 3:
+            verdict = "MARGINAL" if verdict == "GOOD" else verdict
+            rationale = "next earnings report is very close; event trades face elevated gap risk"
+
+        result = {
+            "ticker": ticker,
+            "as_of_utc": asof.isoformat(),
+            "sample_size": len(review_rows),
+            "history": review_rows,
+            "beat_and_drop_rate": round(beat_and_drop_rate, 3) if beat_and_drop_rate is not None else None,
+            "miss_and_pop_rate": round(miss_and_pop_rate, 3) if miss_and_pop_rate is not None else None,
+            "avg_2h_reaction_on_beats_pct": round(avg_beat_reaction, 2) if avg_beat_reaction is not None else None,
+            "avg_2h_reaction_on_misses_pct": round(avg_miss_reaction, 2) if avg_miss_reaction is not None else None,
+            "avg_2h_reaction_all_pct": round(avg_all_reaction, 2) if avg_all_reaction is not None else None,
+            "high_bar_score": high_bar_score,
+            "tradeability": verdict,
+            "reason": rationale,
+        }
+        self._earnings_review_cache[cache_key] = dict(result)
+        return result
 
     def _finnhub_daily_candles(
         self,
@@ -799,6 +1070,7 @@ class AnalysisService:
 
         current_price = float(ticker_now.close) if ticker_now else None
         earnings_ctx = self._earnings_calendar_context(session, ticker, event_ts)
+        earnings_review = self.build_earnings_review(session, ticker, event_ts)
         is_recent_event = event_ts >= utc_now() - timedelta(days=2)
         tech_signal = self._finnhub_tech_signal(ticker) if is_recent_event else None
         sr_levels = self._finnhub_support_resistance(ticker, current_price) if is_recent_event else None
@@ -835,6 +1107,8 @@ class AnalysisService:
         }
         if earnings_ctx:
             features["earnings_context"] = earnings_ctx
+        if earnings_review:
+            features["earnings_review"] = earnings_review
         if tech_signal:
             features["tech_signal"] = tech_signal
         if sr_levels:
@@ -903,6 +1177,7 @@ class AnalysisService:
                 "  - tech_signal: 'buy' supports UP, 'sell' supports DOWN",
                 "  - relative_strength_vs_spy_pct: if ticker is already outperforming SPY today, UP news has more momentum",
                 "  - earnings_context: use only the earnings data already available as of event_time; positive surprise_pct supports UP, negative supports DOWN; upcoming earnings within a few days raises gap risk and can justify smaller size",
+                "  - earnings_review: this is the ticker's historical earnings reaction profile. If high_bar_score is high or beat_and_drop_rate is elevated, do NOT assume a simple beat is bullish. Prefer HOLD or smaller size unless the current report is clearly exceptional and price confirms.",
                 "  - support_resistance: price within 1% of resistance reduces upside; within 1% of support reduces downside",
                 "  - analyst_consensus: BULLISH (consensus_score>0.2) is a mild UP tailwind; BEARISH is a mild DOWN tailwind — but NEVER override a strong news signal",
                 "  - macro_market_context: this is a last-month market narrative, including index/sector returns and regime. Use it as a DIRECTIONAL TILT only when the company-specific news is ambiguous. NEVER override a clear, ticker-specific hard catalyst based on macro alone.",

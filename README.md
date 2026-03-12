@@ -160,6 +160,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 支持历史 routine filing 事件重标注：`python scripts/relabel_routine_filings.py --start-date 2026-01-01 --end-date 2026-02-01`。
 - 支持 SP100 财报日历自动回填：`python scripts/backfill_earnings_calendar.py --from 2025-10-01 --to 2025-12-31`。
 - 支持按当前 normalization/validation 逻辑重建历史事件：`python scripts/rebuild_events_from_raw.py --start-date 2025-10-01 --end-date 2025-11-01`。
+- 支持独立检查“财报数据是否拿到 + 当前是否可交易”：`python scripts/check_earnings_tradeability.py --ticker AAPL --event-time 2026-01-28T14:30:00+00:00 --event-type earnings_miss --event-summary "AAPL quarterly earnings beat estimates but stock falls on softer guidance"`。
 - 支持 LLM 一致性测试（同窗重复 3 次）：`python scripts/run_llm_consistency_check.py --runs 3`。
 - 回测并发 LLM workers 可通过参数 `llm_workers`（默认 8）调整。
 - 回测支持 `min_severity` 参数（默认 0 不过滤；70 = 只交易强信号事件 regulatory/accident/supply_chain/litigation 类）。
@@ -167,6 +168,23 @@ python scripts/backfill_sec_bodies.py --limit 500
 ## 近期变更
 
 ### 2026-03-11
+- 新增 `earnings_review` 系统：
+  - 会结合 `earnings_calendar`、历史 earnings/guidance 事件时间戳和本地 `bars_1m`，计算过去数次财报后的 `2h` 反应、`beat_and_drop_rate`、`miss_and_pop_rate`、`high_bar_score`。
+  - 目标是识别“beat 也跌”的高预期股票，而不是只看 headline 里的 `beat/miss`。
+- `earnings_review` 已接入：
+  - `AnalysisService._event_market_features()`：LLM prompt 可直接看到 `earnings_review`
+  - `AnalysisService.assess_tradeability()`：财报类事件会把 `earnings_review` 纳入 tradeability 打分；`POOR` 会直接触发 `earnings_high_bar_risk`
+- 新增脚本 `scripts/check_earnings_tradeability.py`
+  - 会先刷新目标 ticker 的财报数据，再输出：
+    - `earnings_context`
+    - `earnings_review`
+    - `tradeability`
+    - `can_trade_now`
+  - 当前 AAPL 冒烟结果：
+    - `earnings_context` 可正常获取
+    - `earnings_review` 为 `MARGINAL`
+    - `can_trade_now=false`
+  - 含义：现在系统已经能识别“财报数据拿到了，但 expectation gap 还没解清，不该直接交易”这种状态
 - 默认交易语义切到“逐条消息事件化”：
   - `NormalizationService` 默认 `NORMALIZATION_MERGE_WINDOW_MIN=0`，每条 `RawItem` 单独生成事件，不再提前把多条消息揉成一个交易对象。
   - 若手动开启聚合窗口，`event_time` 会取聚合中最后一条证据时间，避免 merged event 用更早时间交易形成前视污染。
