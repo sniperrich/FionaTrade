@@ -165,7 +165,7 @@ python scripts/backfill_sec_bodies.py --limit 500
 - 支持独立检查“财报数据是否拿到 + 当前是否可交易”：`python scripts/check_earnings_tradeability.py --ticker AAPL --event-time 2026-01-28T14:30:00+00:00 --event-type earnings_miss --event-summary "AAPL quarterly earnings beat estimates but stock falls on softer guidance"`。
 - 支持独立检查“结构化财报发布源是否落库 + 是否可交易”：`python scripts/check_earnings_release_source.py --ticker AAPL --from 2025-10-01 --to 2025-12-31`。
 - 支持单票 `SEC -> event -> LLM signal` 最小闭环验证：`python scripts/run_single_ticker_sec_loop.py --ticker AAPL --allow-existing`。该脚本只拉单只票、默认检查最近 `20` 份 SEC form，并在命中首个 `sec_earnings_release` 后即停止，适合快速确认 SEC+LLM 是否真实跑通，而不需要整批 SP100。
-- `SEC` 财报摘要现已直接走 OpenAI-compatible HTTP 网关，不再依赖本地额外安装 `openai` Python 包；只要 `.env` 里的 `LLM_BASE_URL / LLM_API_KEY / SEC_SUMMARY_MODEL` 配好，就会真实调用 `gemini-3-flash` 生成纯文本数字摘要，不再强制模型返回 JSON。
+- `SEC` 财报摘要现已直接走 OpenAI-compatible HTTP 网关，不再依赖本地额外安装 `openai` Python 包；只要 `.env` 里的 `LLM_BASE_URL / LLM_API_KEY / SEC_SUMMARY_MODEL` 配好，就会真实调用 `gemini-3-flash` 生成纯英文数字摘要，不再强制模型返回 JSON。
 - 支持 LLM 一致性测试（同窗重复 3 次）：`python scripts/run_llm_consistency_check.py --runs 3`。
 - 回测并发 LLM workers 可通过参数 `llm_workers`（默认 8）调整。
 - 回测支持 `min_severity` 参数（默认 0 不过滤；70 = 只交易强信号事件 regulatory/accident/supply_chain/litigation 类）。

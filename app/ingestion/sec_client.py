@@ -252,7 +252,7 @@ class SecClient:
 
         prompt = (
             "You summarize SEC 8-K earnings releases (Item 2.02 / Exhibit 99.1). "
-            f"Return plain Chinese text only, no JSON, no markdown, no bullets, within {int(self.settings.sec_summary_max_chars)} Chinese characters. "
+            f"Return plain English text only, no JSON, no markdown, no bullets, within {int(self.settings.sec_summary_max_chars)} characters. "
             "Keep exact numbers and units from the filing. "
             "Do not invent analyst estimates or market reaction if absent. "
             "If available, mention EPS actual, revenue actual, guidance, margin, capex, backlog, and management outlook."
@@ -298,12 +298,12 @@ class SecClient:
         exhibit_text: str,
     ) -> RawNewsItem:
         published = self._parse_published_at(acceptance_datetime, filing_date)
-        headline_en, summary_zh = self._summarize_sec_earnings(ticker, filing_text, exhibit_text)
+        headline_en, summary_en = self._summarize_sec_earnings(ticker, filing_text, exhibit_text)
         item_hash = make_hash("sec", f"{accession}:sec_earnings_release", ticker)
         source_text = exhibit_text or self._extract_item_202_section(filing_text) or filing_text
         source_text = source_text[:20000]
         body = (
-            f"LLM_SUMMARY_ZH:\n{summary_zh}\n\n"
+            f"LLM_SUMMARY_EN:\n{summary_en}\n\n"
             f"SEC_HEADLINE_EN:\n{headline_en}\n\n"
             f"SEC_SOURCE_TEXT:\n{source_text}"
         )
@@ -326,7 +326,7 @@ class SecClient:
                 "event_type_hint": "sec_earnings_release",
                 "sec_item_202": True,
                 "exhibit_99_1_url": exhibit_url,
-                "summary_override": summary_zh,
+                "summary_override": summary_en,
                 "headline_en": headline_en,
                 "summary_model": self.settings.sec_summary_model,
             },

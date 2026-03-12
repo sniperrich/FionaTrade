@@ -34,7 +34,7 @@ def test_sec_client_promotes_item_202_to_independent_event(session, settings):
     )
     client._summarize_sec_earnings = lambda ticker, filing_text, exhibit_text: (  # noqa: SLF001
         f"{ticker} reports EPS $2.40 on revenue $124.3B; services record, gross margin guide 46.5%",
-        "苹果提交8-K财报摘要：每股收益2.40美元，营收1243亿美元，服务收入创新高，管理层指引毛利率约46.5%。",
+        "Apple 8-K earnings summary: EPS $2.40, revenue $124.3B, services revenue reached a record, and management guided gross margin to about 46.5%.",
     )
 
     items, check = client.fetch(session)
@@ -45,10 +45,10 @@ def test_sec_client_promotes_item_202_to_independent_event(session, settings):
     item = items[0]
     assert item.metadata["event_type_hint"] == "sec_earnings_release"
     assert item.metadata["sec_item_202"] is True
-    assert item.metadata["summary_override"].startswith("苹果提交8-K财报摘要")
+    assert item.metadata["summary_override"].startswith("Apple 8-K earnings summary")
     assert item.title.startswith("AAPL reports EPS $2.40")
     assert item.metadata["exhibit_99_1_url"].endswith("ex991.htm")
-    assert "LLM_SUMMARY_ZH" in item.body
+    assert "LLM_SUMMARY_EN" in item.body
 
 
 def test_sec_client_leaves_non_earnings_8k_as_generic_item(session, settings):
@@ -91,7 +91,7 @@ def test_sec_client_fetch_can_target_single_ticker_and_stop_after_first_earnings
     )
     client._summarize_sec_earnings = lambda ticker, filing_text, exhibit_text: (  # noqa: SLF001
         f"{ticker} reports quarterly results",
-        f"{ticker} 财报摘要",
+        f"{ticker} earnings summary",
     )
 
     items, check = client.fetch(
@@ -129,7 +129,7 @@ def test_sec_client_summary_uses_http_gateway(monkeypatch, settings):
                 "choices": [
                     {
                         "message": {
-                            "content": "苹果第一财季营收1438亿美元、稀释EPS 2.84美元。"
+                            "content": "First-quarter revenue was $143.8 billion and diluted EPS was $2.84."
                         }
                     }
                 ]
@@ -160,7 +160,7 @@ def test_sec_client_summary_uses_http_gateway(monkeypatch, settings):
     )
 
     assert headline == "AAPL SEC earnings release filed under 8-K Item 2.02"
-    assert summary == "苹果第一财季营收1438亿美元、稀释EPS 2.84美元。"
+    assert summary == "First-quarter revenue was $143.8 billion and diluted EPS was $2.84."
     assert called["url"] == "https://api.example.com/v1/chat/completions"
     assert called["headers"]["Authorization"] == "Bearer test-key"
     assert called["json"]["model"] == "gemini-3-flash"

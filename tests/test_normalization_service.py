@@ -221,8 +221,8 @@ def test_sec_earnings_release_uses_independent_event_type_and_summary_override(s
             url="https://www.sec.gov/Archives/example/ex991.htm",
             title="AAPL Q1 revenue $124.3B and EPS $2.40; product revenue mixed but services set a record",
             body=(
-                "LLM_SUMMARY_ZH:\n苹果提交8-K财报摘要：截至本季度营收1243亿美元，每股收益2.40美元，"
-                "服务业务创纪录，但管理层强调部分硬件线需求偏弱。\n\nSEC_SOURCE_TEXT:\nItem 2.02 ..."
+                "LLM_SUMMARY_EN:\nApple 8-K earnings summary: quarterly revenue was $124.3 billion, EPS was $2.40, "
+                "services revenue hit a record, but management noted softer demand in parts of the hardware portfolio.\n\nSEC_SOURCE_TEXT:\nItem 2.02 ..."
             ),
             published_at=now,
             ingested_at=now,
@@ -231,7 +231,7 @@ def test_sec_earnings_release_uses_independent_event_type_and_summary_override(s
                 "ticker": "AAPL",
                 "form": "8-K",
                 "event_type_hint": "sec_earnings_release",
-                "summary_override": "苹果提交8-K财报摘要：截至本季度营收1243亿美元，每股收益2.40美元，服务业务创纪录，但管理层强调部分硬件线需求偏弱。",
+                "summary_override": "Apple 8-K earnings summary: quarterly revenue was $124.3 billion, EPS was $2.40, services revenue hit a record, but management noted softer demand in parts of the hardware portfolio.",
             },
             processed=False,
         )
@@ -243,4 +243,4 @@ def test_sec_earnings_release_uses_independent_event_type_and_summary_override(s
     assert len(clusters) == 1
     assert clusters[0].canonical.event_type == "sec_earnings_release"
     assert clusters[0].canonical.tickers == ["AAPL"]
-    assert "1243亿美元" in clusters[0].canonical.summary
+    assert "$124.3 billion" in clusters[0].canonical.summary
