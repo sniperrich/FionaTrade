@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
 from app.db.database import Base
@@ -25,7 +26,14 @@ def settings() -> Settings:
 
 @pytest.fixture()
 def session():
-    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    # StaticPool ensures all threads share the same in-memory connection,
+    # which is required for AgentGraph's ThreadPoolExecutor to see test data.
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
     Base.metadata.create_all(bind=engine)
     db = TestingSessionLocal()

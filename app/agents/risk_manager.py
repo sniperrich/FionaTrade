@@ -76,7 +76,7 @@ class RiskManagerAgent(BaseAgent):
             position_pct = 0.0
             if position:
                 position_pct = abs(float(position.qty) * float(position.avg_price or 0)) / max(
-                    self.settings.paper_initial_capital, 1
+                    self.settings.initial_nav, 1
                 )
                 if position_pct >= _MAX_POSITION_PCT:
                     rule_checks.append(
@@ -98,7 +98,7 @@ class RiskManagerAgent(BaseAgent):
                 float(f.notional) * (-1 if f.side in ("BUY", "COVER") else 1)
                 for f in today_fills
             )
-            capital = self.settings.paper_initial_capital
+            capital = self.settings.initial_nav
             if intraday_pnl < -(_MAX_DAILY_LOSS_PCT * capital):
                 rule_checks.append(
                     f"Daily loss limit reached for {ticker} (P&L: ${intraday_pnl:,.0f})"
@@ -137,7 +137,7 @@ class RiskManagerAgent(BaseAgent):
             portfolio_context = (
                 f"Current {ticker} position: {position_pct:.1%} of portfolio\n"
                 f"Available capital: ${capital:,.0f}\n"
-                f"Initial capital: ${self.settings.paper_initial_capital:,.0f}"
+                f"Initial capital: ${self.settings.initial_nav:,.0f}"
             )
 
             user_prompt = _USER_PROMPT_TEMPLATE.format(

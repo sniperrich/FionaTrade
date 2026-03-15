@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+# DEPRECATED: This monolithic service is preserved for backtest compatibility only.
+# For live trading, FionaTrade v0.2.0+ uses the multi-agent graph in app/agent_graph/.
+# To use the legacy analysis path, set AGENT_MODE_ENABLED=false in your .env.
+# Do NOT add new features here — extend app/agents/ instead.
+
 import json
 import re
 import time
