@@ -46,9 +46,10 @@ class TestAgentGraphFullRun:
             return _LLM_RISK
         return _LLM_PM  # portfolio manager
 
-    def test_full_run_produces_valid_state(self, settings, session):
+    def test_full_run_produces_valid_state(self, settings, session_factory):
+        session, factory = session_factory
         _add_bars(session, "AAPL")
-        graph = AgentGraph(settings)
+        graph = AgentGraph(settings, session_factory=factory)
 
         # Patch LLM on all agents that use it
         for agent in [graph.macro, graph.news, graph.fundamentals, graph.risk, graph.portfolio]:
@@ -62,9 +63,10 @@ class TestAgentGraphFullRun:
         assert 0.0 <= state["final_position_pct"] <= 0.20
         assert "error" not in state or state.get("error") is None
 
-    def test_full_run_persists_agent_run(self, settings, session):
+    def test_full_run_persists_agent_run(self, settings, session_factory):
+        session, factory = session_factory
         _add_bars(session, "MSFT")
-        graph = AgentGraph(settings)
+        graph = AgentGraph(settings, session_factory=factory)
         for agent in [graph.macro, graph.news, graph.fundamentals, graph.risk, graph.portfolio]:
             agent._call_llm = self._mock_llm
 
@@ -77,9 +79,10 @@ class TestAgentGraphFullRun:
         assert run.execution_ms is not None
         assert run.execution_ms > 0
 
-    def test_parallel_agents_all_produce_results(self, settings, session):
+    def test_parallel_agents_all_produce_results(self, settings, session_factory):
+        session, factory = session_factory
         _add_bars(session, "GOOGL")
-        graph = AgentGraph(settings)
+        graph = AgentGraph(settings, session_factory=factory)
         for agent in [graph.macro, graph.news, graph.fundamentals, graph.risk, graph.portfolio]:
             agent._call_llm = self._mock_llm
 
@@ -94,10 +97,11 @@ class TestAgentGraphFullRun:
 
 
 class TestAgentGraphErrorHandling:
-    def test_llm_failure_produces_hold(self, settings, session):
+    def test_llm_failure_produces_hold(self, settings, session_factory):
         """When all LLM agents fail, graph should gracefully return HOLD."""
+        session, factory = session_factory
         _add_bars(session, "TSLA")
-        graph = AgentGraph(settings)
+        graph = AgentGraph(settings, session_factory=factory)
         for agent in [graph.macro, graph.news, graph.fundamentals, graph.risk, graph.portfolio]:
             agent._call_llm = lambda *a, **kw: None  # simulate LLM unavailable
 
@@ -108,9 +112,10 @@ class TestAgentGraphErrorHandling:
         # Should not raise or leave state empty
         assert "final_position_pct" in state
 
-    def test_no_bars_still_completes(self, settings, session):
+    def test_no_bars_still_completes(self, settings, session_factory):
         """Graph must complete even with no bar data for technicals."""
-        graph = AgentGraph(settings)
+        session, factory = session_factory
+        graph = AgentGraph(settings, session_factory=factory)
         for agent in [graph.macro, graph.news, graph.fundamentals, graph.risk, graph.portfolio]:
             agent._call_llm = lambda *a, **kw: None
 
@@ -118,12 +123,13 @@ class TestAgentGraphErrorHandling:
         assert "final_action" in state
         assert "error" not in state or state.get("error") is None
 
-    def test_run_multiple_tickers(self, settings, session):
+    def test_run_multiple_tickers(self, settings, session_factory):
         """Graph must handle multiple ticker runs sequentially without state leak."""
+        session, factory = session_factory
         for ticker in ["AAPL", "MSFT", "GOOGL"]:
             _add_bars(session, ticker)
 
-        graph = AgentGraph(settings)
+        graph = AgentGraph(settings, session_factory=factory)
         for agent in [graph.macro, graph.news, graph.fundamentals, graph.risk, graph.portfolio]:
             agent._call_llm = lambda *a, **kw: None
 
@@ -133,9 +139,10 @@ class TestAgentGraphErrorHandling:
 
 
 class TestAgentGraphAgentSignalsAggregation:
-    def test_agent_signals_dict_populated(self, settings, session):
+    def test_agent_signals_dict_populated(self, settings, session_factory):
+        session, factory = session_factory
         _add_bars(session, "AMZN")
-        graph = AgentGraph(settings)
+        graph = AgentGraph(settings, session_factory=factory)
         for agent in [graph.macro, graph.news, graph.fundamentals, graph.risk, graph.portfolio]:
             agent._call_llm = lambda *a, **kw: None
 

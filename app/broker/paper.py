@@ -31,7 +31,7 @@ class PaperBroker(AbstractBroker):
     ) -> OrderResult:
         from app.db.models import Signal
         from sqlalchemy import select
-        import datetime
+        from datetime import datetime as dt, timedelta, timezone
 
         ticker = ticker.upper()
         # Paper engine executes pending Signal rows; we create a synthetic one here
@@ -42,8 +42,8 @@ class PaperBroker(AbstractBroker):
                 confidence=80,
                 horizon_min=self._settings.default_horizon_min,
                 reason="agent_graph_direct_order",
-                expires_at=datetime.datetime.utcnow()
-                + datetime.timedelta(minutes=self._settings.default_horizon_min),
+                expires_at=dt.now(timezone.utc)
+                + timedelta(minutes=self._settings.default_horizon_min),
             )
             self._session.add(sig)
             self._session.flush()
@@ -105,11 +105,11 @@ class PaperBroker(AbstractBroker):
 
     def get_portfolio_value(self) -> float:
         portfolio = self._engine.portfolio(self._session)
-        return float(portfolio.get("total_value", self._settings.paper_initial_capital))
+        return float(portfolio.get("total_value", self._settings.initial_nav))
 
     def get_cash(self) -> float:
         portfolio = self._engine.portfolio(self._session)
-        return float(portfolio.get("cash", self._settings.paper_initial_capital))
+        return float(portfolio.get("cash", self._settings.initial_nav))
 
     def cancel_all_orders(self, ticker: str | None = None) -> int:
         # Paper engine doesn't have open orders; signals expire naturally

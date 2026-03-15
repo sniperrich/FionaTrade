@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Callable
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent_graph.state import AgentState
 from app.agents.fundamentals import FundamentalsAgent
@@ -30,8 +30,9 @@ class AgentGraph:
         3. [serial]    PortfolioManager  (reads all 5 above)
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, session_factory: sessionmaker | None = None) -> None:
         self.settings = settings
+        self._session_factory = session_factory
         self.macro = MacroAnalystAgent(settings)
         self.news = NewsSentimentAgent(settings)
         self.fundamentals = FundamentalsAgent(settings)
@@ -42,9 +43,20 @@ class AgentGraph:
     # ── Graph nodes ────────────────────────────────────────────────────────
 
     def _run_parallel_agents(self, session: Session, state: AgentState) -> AgentState:
-        """Run Macro, News, Fundamentals, Technicals concurrently."""
+        """Run Macro, News, Fundamentals, Technicals concurrently.
+        
+        Each thread gets its own DB session to avoid SQLAlchemy
+        'concurrent operations' errors with shared sessions.
+        """
         ticker = state["ticker"]
         context = state.get("context", {})
+
+        # Use injected session_factory or fall back to production SessionLocal
+        if self._session_factory is not None:
+            make_session = self._session_factory
+        else:
+            from app.db.database import SessionLocal
+            make_session = SessionLocal
 
         parallel_agents = [
             (self.macro, "macro_analyst_result"),
@@ -53,15 +65,23 @@ class AgentGraph:
             (self.technicals, "technicals_result"),
         ]
 
+        def _run_agent_with_own_session(agent, result_key):
+            """Run a single agent in its own DB session."""
+            thread_session = make_session()
+            try:
+                return result_key, agent.analyze(thread_session, ticker, context)
+            finally:
+                thread_session.close()
+
         with ThreadPoolExecutor(max_workers=4) as pool:
             future_to_key = {
-                pool.submit(agent.analyze, session, ticker, context): result_key
+                pool.submit(_run_agent_with_own_session, agent, result_key): result_key
                 for agent, result_key in parallel_agents
             }
             for future in as_completed(future_to_key):
                 result_key = future_to_key[future]
                 try:
-                    result = future.result(timeout=60)
+                    _, result = future.result(timeout=60)
                     state[result_key] = result.to_dict()
                 except Exception as exc:
                     logger.warning("[graph] %s failed: %s", result_key, exc)

@@ -35,6 +35,17 @@ def get_bars(
         .limit(lookback_bars + 100)
     ).scalars().all()
 
+    # Fallback: if no bars in recent window, fetch the most recent N bars available.
+    # This handles cases where bar data is stale (e.g. weekends, ingestion gaps).
+    if not rows and end_time is None:
+        rows = session.execute(
+            select(Bar1m)
+            .where(Bar1m.ticker == ticker.upper())
+            .order_by(Bar1m.ts.desc())
+            .limit(lookback_bars + 100)
+        ).scalars().all()
+        rows = list(reversed(rows))
+
     if not rows:
         return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
 

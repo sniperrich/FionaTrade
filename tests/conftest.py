@@ -43,3 +43,23 @@ def session():
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture()
+def session_factory():
+    """Yields (session, session_factory) for tests needing per-thread sessions (AgentGraph)."""
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
+    Base.metadata.create_all(bind=engine)
+    db = factory()
+    try:
+        yield db, factory
+        db.commit()
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)

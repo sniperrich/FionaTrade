@@ -22,7 +22,11 @@ def get_recent_events(
     """
     since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
 
-    stmt = select(Event).where(Event.event_time >= since)
+    # Try event_time first (actual event occurrence); fall back to created_at
+    # to catch events whose event_time is older but were recently ingested.
+    stmt = select(Event).where(
+        (Event.event_time >= since) | (Event.created_at >= since)
+    )
     if ticker:
         # SQLAlchemy JSON contains check - use a Python-level filter after fetch
         pass
@@ -121,8 +125,11 @@ def get_ticker_news_summary(
     return results
 
 
-def build_news_context_text(session: Session, ticker: str, lookback_hours: int = 48) -> str:
-    """Build a compact text block of recent news/events for LLM prompts."""
+def build_news_context_text(session: Session, ticker: str, lookback_hours: int = 168) -> str:
+    """Build a compact text block of recent news/events for LLM prompts.
+    
+    Default 168h (7 days) lookback to catch weekly ingestion cycles.
+    """
     events = get_recent_events(session, ticker=ticker, lookback_hours=lookback_hours, limit=10)
     news = get_ticker_news_summary(session, ticker=ticker, lookback_hours=lookback_hours, limit=8)
 

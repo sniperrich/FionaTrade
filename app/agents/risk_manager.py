@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -87,10 +87,11 @@ class RiskManagerAgent(BaseAgent):
                     rule_checks.append(f"Current position size: {position_pct:.1%}")
 
             # Check intraday P&L via today's fills
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
             today_fills = session.execute(
                 select(PaperFill).where(
                     PaperFill.ticker == ticker,
-                    PaperFill.filled_at >= date.today(),
+                    PaperFill.filled_at >= today_start,
                 )
             ).scalars().all()
             # Approximate P&L from fill notional (sells reduce, buys increase cost basis)
