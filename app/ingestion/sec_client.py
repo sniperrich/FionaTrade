@@ -37,6 +37,10 @@ _ITEM_202_SECTION_RE = re.compile(
     r"(item\s*2\.02\b.*?)(?=item\s*\d+\.\d+\b|signature(?:s)?\b)",
     re.IGNORECASE | re.DOTALL,
 )
+_MDA_HEADING_RE = re.compile(
+    r"(?:ITEM\s+2[.\s]|MANAGEMENT[\u2019']?S\s+DISCUSSION)",
+    re.IGNORECASE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -396,6 +400,71 @@ class SecClient:
         if not out:
             return [], "ATOM fallback entries parsed but none matched supported forms"
         return out, None
+
+    def fetch_quarterly_annual_filings(self, ticker: str, cik: str, limit: int = 5) -> list[dict]:
+        """Return recent 10-Q and 10-K filings for *ticker* from the SEC EDGAR submissions API.
+
+        Each entry is a dict with keys: form_type, filed_date, accession_number, document_url.
+        """
+        cik_padded = str(cik).zfill(10)
+        url = SEC_SUBMISSIONS_URL.format(cik=cik_padded)
+        with httpx.Client(timeout=15.0, headers=self.headers) as client:
+            data, _status, err = self._request_json_with_retry(client, url)
+
+        if data is None:
+            logger.warning("fetch_quarterly_annual_filings: request failed for %s CIK %s: %s", ticker, cik, err)
+            return []
+
+        recent = data.get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        filing_dates = recent.get("filingDate", [])
+        accessions = recent.get("accessionNumber", [])
+        docs = recent.get("primaryDocument", [])
+
+        results: list[dict] = []
+        cik_archive = cik_padded.lstrip("0") or "0"
+        for form, filed_date, accession, doc in zip(forms, filing_dates, accessions, docs):
+            if form not in ("10-Q", "10-K"):
+                continue
+            accession_plain = accession.replace("-", "")
+            doc_name = doc or f"{accession}-index.html"
+            document_url = (
+                f"https://www.sec.gov/Archives/edgar/data/{cik_archive}/{accession_plain}/{doc_name}"
+            )
+            results.append(
+                {
+                    "form_type": form,
+                    "filed_date": filed_date,
+                    "accession_number": accession,
+                    "document_url": document_url,
+                }
+            )
+            if len(results) >= limit:
+                break
+
+        logger.debug("fetch_quarterly_annual_filings: %d %s filings found for %s", len(results), "10-Q/10-K", ticker)
+        return results
+
+    def extract_mda_section(self, filing_url: str) -> str:
+        """Fetch a 10-Q/10-K filing and extract the MD&A section.
+
+        Looks for an "ITEM 2" or "MANAGEMENT'S DISCUSSION" heading and returns the
+        following 3000 characters of cleaned text.  Falls back to the first 2000
+        characters of the document when the heading cannot be located.
+        """
+        with httpx.Client(timeout=20.0, headers={**self.headers, "Accept": "text/html,application/xhtml+xml"}) as client:
+            html = self._fetch_html(client, filing_url)
+
+        if not html:
+            return ""
+
+        text = self._html_to_text(html, max_chars=40000)
+        match = _MDA_HEADING_RE.search(text)
+        if match:
+            section = text[match.start() : match.start() + 3000].strip()
+            return re.sub(r"\s+", " ", section)
+
+        return re.sub(r"\s+", " ", text[:2000]).strip()
 
     def fetch(
         self,

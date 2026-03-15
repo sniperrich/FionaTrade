@@ -324,3 +324,138 @@ def get_backtest(
         "created_at": row.created_at,
         "finished_at": row.finished_at,
     }
+
+
+# ── Agent endpoints ────────────────────────────────────────────────────────────
+
+@router.post("/agent/run")
+def run_agent_graph(
+    payload: dict[str, Any] = Body(default={}),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Trigger the multi-agent graph for one or more tickers.
+
+    Body (all optional):
+        tickers: list[str]   — override configured tickers for this run
+    """
+    from app.agent_graph.graph import AgentGraph
+
+    tickers: list[str] = payload.get("tickers") or list(
+        settings.agent_tickers_override
+        or getattr(settings, "sp100_tickers", [])
+        or []
+    )
+    if not tickers:
+        raise HTTPException(status_code=400, detail="No tickers configured or provided")
+
+    graph = AgentGraph(settings)
+    runs = []
+    for ticker in tickers:
+        state = graph.run(session, ticker)
+        runs.append({
+            "ticker": ticker,
+            "action": state.get("final_action", "HOLD"),
+            "position_pct": state.get("final_position_pct", 0.0),
+            "reasoning": state.get("final_reasoning", ""),
+            "error": state.get("error"),
+        })
+
+    session.commit()
+    return {"agent_mode": True, "runs": runs}
+
+
+@router.get("/agent/runs")
+def list_agent_runs(
+    ticker: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=200),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Return recent AgentRun records."""
+    from app.db.models import AgentRun
+    from sqlalchemy import select, desc
+
+    stmt = select(AgentRun).order_by(desc(AgentRun.created_at)).limit(limit)
+    if ticker:
+        stmt = stmt.where(AgentRun.ticker == ticker.upper())
+
+    rows = session.execute(stmt).scalars().all()
+    return {
+        "runs": [
+            {
+                "id": r.id,
+                "ticker": r.ticker,
+                "final_action": r.final_action,
+                "final_position_pct": r.final_position_pct,
+                "final_reasoning": r.final_reasoning,
+                "execution_time_ms": r.execution_ms,
+                "created_at": r.created_at,
+                "macro_result": r.macro_output,
+                "news_result": r.news_output,
+                "fundamentals_result": r.fundamentals_output,
+                "technicals_result": r.technicals_output,
+                "risk_result": r.risk_output,
+                "portfolio_result": r.portfolio_output,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/agent/runs/{run_id}")
+def get_agent_run(
+    run_id: int,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Return a single AgentRun by ID."""
+    from app.db.models import AgentRun
+    from sqlalchemy import select
+
+    row = session.execute(select(AgentRun).where(AgentRun.id == run_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="agent run not found")
+    return {
+        "id": row.id,
+        "ticker": row.ticker,
+        "final_action": row.final_action,
+        "final_position_pct": row.final_position_pct,
+        "final_reasoning": row.final_reasoning,
+        "execution_time_ms": row.execution_ms,
+        "created_at": row.created_at,
+        "macro_result": row.macro_output,
+        "news_result": row.news_output,
+        "fundamentals_result": row.fundamentals_output,
+        "technicals_result": row.technicals_output,
+        "risk_result": row.risk_output,
+        "portfolio_result": row.portfolio_output,
+    }
+
+
+@router.post("/agent/macro/refresh")
+def refresh_macro_indicators(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Manually trigger FRED macro indicator refresh."""
+    from app.ingestion.service import IngestionService
+    svc = IngestionService(settings)
+    result = svc.refresh_macro_indicators(session)
+    session.commit()
+    return result
+
+
+@router.post("/agent/fundamentals/refresh")
+def refresh_fundamentals(
+    payload: dict[str, Any] = Body(default={}),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Manually trigger fundamentals + analyst ratings refresh."""
+    from app.ingestion.service import IngestionService
+    tickers = payload.get("tickers") or None
+    svc = IngestionService(settings)
+    result = svc.refresh_fundamentals_batch(session, tickers)
+    session.commit()
+    return result

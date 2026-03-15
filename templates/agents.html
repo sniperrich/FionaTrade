@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Agent Runs {% if selected_ticker %}— {{ selected_ticker }}{% endif %}</h2>
+
+{% if not agent_mode_enabled %}
+<div style="background:#fff3cd;border:1px solid #ffc107;padding:10px 16px;border-radius:4px;margin-bottom:16px">
+  ⚠️ <strong>Agent mode is disabled.</strong>
+  Set <code>AGENT_MODE_ENABLED=true</code> in your <code>.env</code> to enable autonomous decision-making.
+</div>
+{% endif %}
+
+<form method="get" style="margin-bottom:16px">
+  <label>Filter by ticker:
+    <input type="text" name="ticker" value="{{ selected_ticker or '' }}" placeholder="e.g. AAPL" style="width:120px">
+  </label>
+  <button type="submit">Filter</button>
+  {% if selected_ticker %}<a href="/agents">Clear</a>{% endif %}
+</form>
+
+{% if runs %}
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Ticker</th>
+      <th>Action</th>
+      <th>Position %</th>
+      <th>Macro</th>
+      <th>News</th>
+      <th>Fundamentals</th>
+      <th>Technicals</th>
+      <th>Risk</th>
+      <th>Time (ms)</th>
+      <th>Status</th>
+      <th>Created</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in runs %}
+  <tr>
+    <td><a href="#run-{{ r.id }}" onclick="toggleDetail('{{ r.id }}')">{{ r.id }}</a></td>
+    <td><strong>{{ r.ticker }}</strong></td>
+    <td>
+      {% if r.final_action == 'BUY' %}
+        <span style="color:#157347;font-weight:bold">BUY</span>
+      {% elif r.final_action == 'SHORT' %}
+        <span style="color:#b02a37;font-weight:bold">SHORT</span>
+      {% else %}
+        <span style="color:#6c757d">HOLD</span>
+      {% endif %}
+    </td>
+    <td>{{ "%.1f%%"|format((r.final_position_pct or 0) * 100) }}</td>
+    <td>{{ r.macro_output.get('signal','—') if r.macro_output else '—' }} ({{ r.macro_output.get('confidence','?') if r.macro_output else '?' }})</td>
+    <td>{{ r.news_output.get('signal','—') if r.news_output else '—' }} ({{ r.news_output.get('confidence','?') if r.news_output else '?' }})</td>
+    <td>{{ r.fundamentals_output.get('signal','—') if r.fundamentals_output else '—' }} ({{ r.fundamentals_output.get('confidence','?') if r.fundamentals_output else '?' }})</td>
+    <td>{{ r.technicals_output.get('signal','—') if r.technicals_output else '—' }} ({{ r.technicals_output.get('confidence','?') if r.technicals_output else '?' }})</td>
+    <td>{{ r.risk_output.get('metadata',{}).get('risk_level','—') if r.risk_output else '—' }}</td>
+    <td>{{ r.execution_ms or '—' }}</td>
+    <td>
+      {% if r.status == 'FAILED' %}
+        <span style="color:#b02a37">FAILED</span>
+      {% else %}
+        <span style="color:#157347">OK</span>
+      {% endif %}
+    </td>
+    <td>{{ r.created_at.strftime('%m-%d %H:%M') if r.created_at else '—' }}</td>
+  </tr>
+  <tr id="run-{{ r.id }}" style="display:none">
+    <td colspan="12" style="background:#f8f9fa;padding:12px">
+      <strong>Final reasoning:</strong> {{ r.final_reasoning or '—' }}<br><br>
+      {% if r.macro_output and r.macro_output.get('reasoning') %}
+        <strong>Macro:</strong> {{ r.macro_output.reasoning }}<br>
+      {% endif %}
+      {% if r.news_output and r.news_output.get('reasoning') %}
+        <strong>News:</strong> {{ r.news_output.reasoning }}<br>
+      {% endif %}
+      {% if r.fundamentals_output and r.fundamentals_output.get('reasoning') %}
+        <strong>Fundamentals:</strong> {{ r.fundamentals_output.reasoning }}<br>
+      {% endif %}
+      {% if r.technicals_output and r.technicals_output.get('reasoning') %}
+        <strong>Technicals:</strong> {{ r.technicals_output.reasoning }}<br>
+      {% endif %}
+      {% if r.risk_output and r.risk_output.get('reasoning') %}
+        <strong>Risk:</strong> {{ r.risk_output.reasoning }}<br>
+      {% endif %}
+      {% if r.error_message %}
+        <span style="color:#b02a37"><strong>Error:</strong> {{ r.error_message }}</span>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No agent runs found{% if selected_ticker %} for {{ selected_ticker }}{% endif %}.
+  {% if agent_mode_enabled %}
+    Trigger a run via <code>POST /api/agent/run</code> or wait for the next scheduled cycle.
+  {% endif %}
+</p>
+{% endif %}
+
+<script>
+function toggleDetail(id) {
+  var row = document.getElementById('run-' + id);
+  if (row) row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+}
+</script>
+{% endblock %}

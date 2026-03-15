@@ -10,7 +10,8 @@ from app.core.config import Settings
 from app.core.utils import ensure_utc, normalize_title, utc_now
 from app.db.models import RawItem, SourceStatus
 from app.ingestion.earnings_release_client import EarningsReleaseClient
-from app.ingestion.finnhub_client import FinnhubNewsClient
+from app.ingestion.finnhub_client import FinnhubNewsClient, FinnhubClient
+from app.ingestion.fred_client import FREDClient
 from app.ingestion.rss_client import RssClient
 from app.ingestion.sec_client import SecClient
 from app.ingestion.types import SourceCheck
@@ -32,6 +33,8 @@ class IngestionService:
         self.rss = RssClient(settings)
         self.finnhub = FinnhubNewsClient(settings)
         self.earnings_release = EarningsReleaseClient(settings)
+        self.fred = FREDClient(settings)
+        self.fundamentals = FinnhubClient(settings)
 
     def _recent_titles(self, session: Session) -> set[str]:
         cutoff = utc_now() - timedelta(hours=6)
@@ -136,3 +139,39 @@ class IngestionService:
     def run(self, session: Session) -> IngestionResult:
         fetched_items, checks = self._collect(session)
         return self.persist_items(session, fetched_items, checks)
+
+    def refresh_macro_indicators(self, session: Session) -> dict:
+        """Fetch latest FRED macro indicators and upsert into MacroIndicator table."""
+        from app.core.logging import get_app_logger
+        logger = get_app_logger()
+        try:
+            result = self.fred.upsert_indicators(session)
+            if result.get("skipped"):
+                logger.info("[ingestion] FRED refresh skipped: no API key configured")
+            else:
+                logger.info(
+                    "[ingestion] FRED refresh: fetched=%d upserted=%d series=%s",
+                    result.get("fetched", 0),
+                    result.get("upserted", 0),
+                    result.get("series", []),
+                )
+            return result
+        except Exception as exc:
+            logger.warning("[ingestion] FRED refresh failed: %s", exc)
+            return {"error": str(exc)}
+
+    def refresh_fundamentals_batch(self, session: Session, tickers: list[str] | None = None) -> dict:
+        """Refresh fundamentals snapshots and analyst ratings for a list of tickers."""
+        from app.core.logging import get_app_logger
+        logger = get_app_logger()
+        if tickers is None:
+            tickers = list(self.settings.agent_tickers_override or self.settings.sp100_tickers or [])
+        if not tickers:
+            return {"tickers_updated": 0, "tickers_failed": 0, "skipped": True}
+        try:
+            result = self.fundamentals.refresh_fundamentals_batch(session, tickers)
+            logger.info("[ingestion] Fundamentals batch: %s", result)
+            return result
+        except Exception as exc:
+            logger.warning("[ingestion] Fundamentals batch failed: %s", exc)
+            return {"error": str(exc)}

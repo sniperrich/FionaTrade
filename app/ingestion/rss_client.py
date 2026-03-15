@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import urlparse
 
 import feedparser
@@ -13,6 +14,32 @@ from app.ingestion.types import SourceCheck
 from app.schemas.types import RawNewsItem
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Ticker relevance: pre-compiled lookup structures built from company_names.py
+# ---------------------------------------------------------------------------
+try:
+    from app.core.company_names import TICKER_TO_COMPANY_ALIASES as _TICKER_ALIASES
+
+    _ALIAS_TO_TICKER: dict[str, str] = {
+        name: ticker for ticker, names in _TICKER_ALIASES.items() for name in names
+    }
+    # Company-name pattern: longest alias first to avoid partial shadowing
+    _all_aliases = sorted(_ALIAS_TO_TICKER.keys(), key=len, reverse=True)
+    _COMPANY_ALIAS_RE: re.Pattern[str] | None = re.compile(
+        r"(" + "|".join(re.escape(n) for n in _all_aliases) + r")",
+        re.IGNORECASE,
+    )
+    # Ticker-symbol pattern: whole-word match only to avoid false positives
+    _SP100_TICKER_RE: re.Pattern[str] | None = re.compile(
+        r"\b(" + "|".join(re.escape(t) for t in sorted(_TICKER_ALIASES, key=len, reverse=True)) + r")\b",
+        re.IGNORECASE,
+    )
+except Exception:  # pragma: no cover – graceful degradation if module unavailable
+    _TICKER_ALIASES = {}  # type: ignore[assignment]
+    _ALIAS_TO_TICKER = {}
+    _COMPANY_ALIAS_RE = None
+    _SP100_TICKER_RE = None
 
 
 class RssClient:
@@ -43,6 +70,46 @@ class RssClient:
         source_key = f"rss:{host}"
         display_name = f"RSS {source_name.upper()} ({host})"
         return source_key, source_name, display_name
+
+    def _ticker_relevance(self, title: str, body: str) -> tuple[list[str], int]:
+        """Return (matched_tickers, source_tier) based on ticker/company name presence.
+
+        Tier 1 – ticker or company name found in the article title.
+        Tier 2 – found only in the first 200 characters of the body.
+        Tier 3 – no SP100 match (general market news).
+        """
+        if _SP100_TICKER_RE is None and _COMPANY_ALIAS_RE is None:
+            return [], 3
+
+        title_text = title or ""
+        body_snippet = (body or "")[:200]
+
+        # ticker → best (lowest) tier seen so far
+        matched: dict[str, int] = {}
+
+        if _SP100_TICKER_RE is not None:
+            for m in _SP100_TICKER_RE.finditer(title_text):
+                t = m.group(1).upper()
+                matched[t] = min(matched.get(t, 3), 1)
+            for m in _SP100_TICKER_RE.finditer(body_snippet):
+                t = m.group(1).upper()
+                if t not in matched:
+                    matched[t] = 2
+
+        if _COMPANY_ALIAS_RE is not None:
+            for m in _COMPANY_ALIAS_RE.finditer(title_text):
+                t = _ALIAS_TO_TICKER.get(m.group(1).lower())
+                if t:
+                    matched[t] = min(matched.get(t, 3), 1)
+            for m in _COMPANY_ALIAS_RE.finditer(body_snippet):
+                t = _ALIAS_TO_TICKER.get(m.group(1).lower())
+                if t and t not in matched:
+                    matched[t] = 2
+
+        if not matched:
+            return [], 3
+
+        return list(matched.keys()), min(matched.values())
 
     def fetch(self) -> tuple[list[RawNewsItem], list[SourceCheck]]:
         if not self.settings.enable_rss:
@@ -106,6 +173,10 @@ class RssClient:
                     published = utc_now()
 
                 item_hash = make_hash(source_name, url, title)
+                matched_tickers, relevance_tier = self._ticker_relevance(title, body)
+                item_metadata: dict = {"feed": feed_url, "source_quality_tier": tier}
+                if matched_tickers:
+                    item_metadata["matched_tickers"] = matched_tickers
                 items.append(
                     RawNewsItem(
                         source=source_name,
@@ -115,8 +186,8 @@ class RssClient:
                         published_at=published,
                         ingested_at=utc_now(),
                         hash=item_hash,
-                        source_tier=tier,
-                        metadata={"feed": feed_url},
+                        source_tier=relevance_tier,
+                        metadata=item_metadata,
                     )
                 )
                 feed_items += 1

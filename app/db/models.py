@@ -232,3 +232,133 @@ class SourceStatus(Base):
 Index("ix_raw_items_source_published_at", RawItem.source, RawItem.published_at)
 Index("ix_events_event_time_confidence", Event.event_time, Event.confidence)
 Index("ix_source_status_source_name_status", SourceStatus.source_name, SourceStatus.status)
+
+
+# ── New tables for V2 multi-agent system ─────────────────────────────────────
+
+
+class MacroIndicator(Base):
+    """FRED macroeconomic time-series observations."""
+
+    __tablename__ = "macro_indicators"
+    __table_args__ = (
+        UniqueConstraint("series_id", "observation_date", name="uq_macro_series_date"),
+        Index("ix_macro_indicators_series_date", "series_id", "observation_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    series_id: Mapped[str] = mapped_column(String(32), index=True)
+    indicator_name: Mapped[str] = mapped_column(String(128))
+    observation_date: Mapped[datetime] = mapped_column(DateTime, index=True)
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit: Mapped[str] = mapped_column(String(64), default="")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class FundamentalsSnapshot(Base):
+    """Per-ticker fundamental financial metrics (quarterly/annual snapshots)."""
+
+    __tablename__ = "fundamentals_snapshots"
+    __table_args__ = (
+        UniqueConstraint("ticker", "period", "period_type", name="uq_fundamentals_ticker_period"),
+        Index("ix_fundamentals_ticker_period", "ticker", "period"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    period: Mapped[str] = mapped_column(String(16))       # e.g. "2024Q4", "2024"
+    period_type: Mapped[str] = mapped_column(String(8))   # "quarterly" or "annual"
+
+    # Income statement
+    revenue: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_income: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps_actual: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eps_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_actual: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Key ratios (from Finnhub /stock/metric)
+    pe_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pb_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ps_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roa: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gross_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+    operating_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+    debt_to_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
+    beta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    week_52_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    week_52_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source: Mapped[str] = mapped_column(String(32), default="finnhub")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class AnalystRating(Base):
+    """Analyst consensus ratings and price targets per ticker."""
+
+    __tablename__ = "analyst_ratings"
+    __table_args__ = (
+        UniqueConstraint("ticker", "period", name="uq_analyst_rating_ticker_period"),
+        Index("ix_analyst_ratings_ticker_period", "ticker", "period"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    period: Mapped[str] = mapped_column(String(16))  # e.g. "2024-12"
+
+    # Analyst consensus counts (from Finnhub /stock/recommendation)
+    strong_buy: Mapped[int] = mapped_column(Integer, default=0)
+    buy: Mapped[int] = mapped_column(Integer, default=0)
+    hold: Mapped[int] = mapped_column(Integer, default=0)
+    sell: Mapped[int] = mapped_column(Integer, default=0)
+    strong_sell: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Price target (from Finnhub /stock/price-target)
+    target_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_mean: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_median: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_price_at_fetch: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    source: Mapped[str] = mapped_column(String(32), default="finnhub")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class AgentRun(Base):
+    """Records each Agent Graph execution with per-agent reasoning traces."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (Index("ix_agent_runs_ticker_created_at", "ticker", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    trigger: Mapped[str] = mapped_column(String(32), default="scheduled")  # "scheduled" | "manual" | "event"
+    trigger_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    # Per-agent outputs stored as JSON blobs
+    macro_output: Mapped[dict] = mapped_column(JSON, default=dict)
+    news_output: Mapped[dict] = mapped_column(JSON, default=dict)
+    fundamentals_output: Mapped[dict] = mapped_column(JSON, default=dict)
+    technicals_output: Mapped[dict] = mapped_column(JSON, default=dict)
+    risk_output: Mapped[dict] = mapped_column(JSON, default=dict)
+    portfolio_output: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # Final decision
+    final_action: Mapped[str | None] = mapped_column(String(16), nullable=True)  # BUY/SHORT/HOLD/NO_TRADE
+    final_confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    final_position_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_reasoning: Mapped[str] = mapped_column(Text, default="")
+
+    # Linked signal if one was generated
+    signal_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    status: Mapped[str] = mapped_column(String(16), default="COMPLETED", index=True)  # COMPLETED | FAILED | SKIPPED
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+

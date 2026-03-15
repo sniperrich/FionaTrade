@@ -1,7 +1,7 @@
 [project]
 name = "fionatrade"
-version = "0.1.0"
-description = "FionaTrade V1: event-driven paper trading research stack"
+version = "0.2.0"
+description = "FionaTrade V2: multi-agent autonomous trading research stack"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,7 +16,13 @@ dependencies = [
   "python-dateutil>=2.9.0.post0",
   "apscheduler>=3.10.4",
   "orjson>=3.10.6",
-  "yfinance>=0.2.40"
+  "yfinance>=0.2.40",
+  "langgraph>=0.2.0",
+  "langchain-openai>=0.2.0",
+  "langchain-core>=0.3.0",
+  "ta>=0.11.0",
+  "pandas>=2.2.0",
+  "alpaca-py>=0.26.0"
 ]
 
 [project.optional-dependencies]

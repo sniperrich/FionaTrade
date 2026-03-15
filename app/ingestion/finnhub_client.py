@@ -6,9 +6,12 @@ from time import sleep
 
 import httpx
 from dateutil import parser as dt_parser
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.utils import make_hash, utc_now
+from app.db.models import AnalystRating, EarningsCalendar, FundamentalsSnapshot
 from app.ingestion.types import SourceCheck
 from app.schemas.types import RawNewsItem
 
@@ -250,3 +253,249 @@ class FinnhubNewsClient:
             status="ONLINE",
             details={"items": len(filtered), "from": from_date, "to": to_date},
         )
+
+
+class FinnhubClient:
+    """Fundamentals and analyst-ratings client for Finnhub."""
+
+    BASE_URL = "https://finnhub.io/api/v1"
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def _throttle(self) -> None:
+        sleep(_RATE_SLEEP)
+
+    # ── Raw fetch helpers ─────────────────────────────────────────────────────
+
+    def get_basic_metrics(self, ticker: str) -> dict | None:
+        """GET /stock/metric?symbol={ticker}&metric=all → raw ``metric`` dict, or None on error."""
+        if not self.settings.finnhub_api_key:
+            logger.warning("get_basic_metrics: FINNHUB_API_KEY not configured")
+            return None
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.get(
+                    f"{self.BASE_URL}/stock/metric",
+                    params={"symbol": ticker, "metric": "all", "token": self.settings.finnhub_api_key},
+                )
+                if resp.status_code == 429:
+                    logger.warning("Finnhub rate limit on /stock/metric ticker=%s", ticker)
+                    return None
+                if resp.status_code != 200:
+                    logger.warning("Finnhub /stock/metric ticker=%s status=%s", ticker, resp.status_code)
+                    return None
+                payload = resp.json()
+                return payload.get("metric") if isinstance(payload, dict) else None
+        except Exception as exc:
+            logger.warning("Finnhub get_basic_metrics ticker=%s error: %s", ticker, exc)
+            return None
+
+    def get_analyst_recommendations(self, ticker: str) -> list[dict]:
+        """GET /stock/recommendation?symbol={ticker} → list of recommendation dicts, or [] on error."""
+        if not self.settings.finnhub_api_key:
+            logger.warning("get_analyst_recommendations: FINNHUB_API_KEY not configured")
+            return []
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.get(
+                    f"{self.BASE_URL}/stock/recommendation",
+                    params={"symbol": ticker, "token": self.settings.finnhub_api_key},
+                )
+                if resp.status_code == 429:
+                    logger.warning("Finnhub rate limit on /stock/recommendation ticker=%s", ticker)
+                    return []
+                if resp.status_code != 200:
+                    logger.warning("Finnhub /stock/recommendation ticker=%s status=%s", ticker, resp.status_code)
+                    return []
+                data = resp.json()
+                return data if isinstance(data, list) else []
+        except Exception as exc:
+            logger.warning("Finnhub get_analyst_recommendations ticker=%s error: %s", ticker, exc)
+            return []
+
+    def get_price_target(self, ticker: str) -> dict | None:
+        """GET /stock/price-target?symbol={ticker} → price-target dict, or None on error."""
+        if not self.settings.finnhub_api_key:
+            logger.warning("get_price_target: FINNHUB_API_KEY not configured")
+            return None
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.get(
+                    f"{self.BASE_URL}/stock/price-target",
+                    params={"symbol": ticker, "token": self.settings.finnhub_api_key},
+                )
+                if resp.status_code == 429:
+                    logger.warning("Finnhub rate limit on /stock/price-target ticker=%s", ticker)
+                    return None
+                if resp.status_code != 200:
+                    logger.warning("Finnhub /stock/price-target ticker=%s status=%s", ticker, resp.status_code)
+                    return None
+                data = resp.json()
+                return data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.warning("Finnhub get_price_target ticker=%s error: %s", ticker, exc)
+            return None
+
+    # ── DB upsert helpers ─────────────────────────────────────────────────────
+
+    def upsert_fundamentals_snapshot(self, session: Session, ticker: str) -> bool:
+        """Fetch /stock/metric and upsert a FundamentalsSnapshot for the current quarter.
+
+        Also pulls eps/revenue actuals from the most recent EarningsCalendar row.
+        Returns True on success, False on failure.
+        """
+        metrics = self.get_basic_metrics(ticker)
+        if not metrics:
+            logger.warning("upsert_fundamentals_snapshot: no metrics for ticker=%s", ticker)
+            return False
+
+        now = utc_now()
+        q = (now.month - 1) // 3 + 1
+        period = f"{now.year}Q{q}"
+
+        ec_stmt = (
+            select(EarningsCalendar)
+            .where(EarningsCalendar.symbol == ticker)
+            .order_by(EarningsCalendar.report_date.desc())
+            .limit(1)
+        )
+        ec: EarningsCalendar | None = session.execute(ec_stmt).scalar_one_or_none()
+
+        try:
+            snap_stmt = select(FundamentalsSnapshot).where(
+                FundamentalsSnapshot.ticker == ticker,
+                FundamentalsSnapshot.period == period,
+                FundamentalsSnapshot.period_type == "quarterly",
+            )
+            snap = session.execute(snap_stmt).scalar_one_or_none()
+
+            fields: dict = {
+                "pe_ratio": metrics.get("peNormalizedAnnual"),
+                "pb_ratio": metrics.get("pbAnnual"),
+                "ps_ratio": metrics.get("psAnnual"),
+                "roe": metrics.get("roeAnnual"),
+                "roa": metrics.get("roaAnnual"),
+                "gross_margin": metrics.get("grossMarginAnnual"),
+                "operating_margin": metrics.get("operatingMarginAnnual"),
+                "debt_to_equity": metrics.get("totalDebt/totalEquityAnnual"),
+                "current_ratio": metrics.get("currentRatioAnnual"),
+                "market_cap": metrics.get("marketCapitalization"),
+                "beta": metrics.get("beta"),
+                "week_52_high": metrics.get("52WeekHigh"),
+                "week_52_low": metrics.get("52WeekLow"),
+                "eps_actual": ec.eps_actual if ec else None,
+                "eps_estimate": ec.eps_estimate if ec else None,
+                "revenue_actual": ec.revenue_actual if ec else None,
+                "revenue_estimate": ec.revenue_estimate if ec else None,
+                "source": "finnhub",
+                "fetched_at": now,
+                "updated_at": now,
+            }
+
+            if snap:
+                for k, v in fields.items():
+                    setattr(snap, k, v)
+            else:
+                snap = FundamentalsSnapshot(
+                    ticker=ticker,
+                    period=period,
+                    period_type="quarterly",
+                    **fields,
+                )
+                session.add(snap)
+
+            session.commit()
+            logger.debug("upsert_fundamentals_snapshot ticker=%s period=%s", ticker, period)
+            return True
+        except Exception as exc:
+            logger.warning("upsert_fundamentals_snapshot ticker=%s error: %s", ticker, exc)
+            session.rollback()
+            return False
+
+    def upsert_analyst_ratings(self, session: Session, ticker: str) -> bool:
+        """Fetch /stock/recommendation and /stock/price-target, upsert into AnalystRating.
+
+        Uses the most recent recommendation period. Returns True on success, False on failure.
+        """
+        recommendations = self.get_analyst_recommendations(ticker)
+        self._throttle()
+        price_target = self.get_price_target(ticker)
+
+        if not recommendations:
+            logger.warning("upsert_analyst_ratings: no recommendations for ticker=%s", ticker)
+            return False
+
+        rec = recommendations[0]
+        period = rec.get("period", "")
+        if not period:
+            logger.warning("upsert_analyst_ratings: missing period in recommendations for ticker=%s", ticker)
+            return False
+
+        now = utc_now()
+        try:
+            stmt = select(AnalystRating).where(
+                AnalystRating.ticker == ticker,
+                AnalystRating.period == period,
+            )
+            rating = session.execute(stmt).scalar_one_or_none()
+
+            fields: dict = {
+                "strong_buy": rec.get("strongBuy", 0),
+                "buy": rec.get("buy", 0),
+                "hold": rec.get("hold", 0),
+                "sell": rec.get("sell", 0),
+                "strong_sell": rec.get("strongSell", 0),
+                "target_high": price_target.get("targetHigh") if price_target else None,
+                "target_low": price_target.get("targetLow") if price_target else None,
+                "target_mean": price_target.get("targetMean") if price_target else None,
+                "target_median": price_target.get("targetMedian") if price_target else None,
+                "last_price_at_fetch": None,
+                "source": "finnhub",
+                "fetched_at": now,
+                "updated_at": now,
+            }
+
+            if rating:
+                for k, v in fields.items():
+                    setattr(rating, k, v)
+            else:
+                rating = AnalystRating(
+                    ticker=ticker,
+                    period=period,
+                    **fields,
+                )
+                session.add(rating)
+
+            session.commit()
+            logger.debug("upsert_analyst_ratings ticker=%s period=%s", ticker, period)
+            return True
+        except Exception as exc:
+            logger.warning("upsert_analyst_ratings ticker=%s error: %s", ticker, exc)
+            session.rollback()
+            return False
+
+    # ── Batch refresh ─────────────────────────────────────────────────────────
+
+    def refresh_fundamentals_batch(self, session: Session, tickers: list[str]) -> dict:
+        """Upsert fundamentals and analyst ratings for each ticker.
+
+        Throttles at least 0.4 s between every API call.
+        Returns ``{"tickers_updated": N, "tickers_failed": N}``.
+        """
+        updated = 0
+        failed = 0
+        for ticker in tickers:
+            ok_fund = self.upsert_fundamentals_snapshot(session, ticker)
+            self._throttle()
+            ok_analyst = self.upsert_analyst_ratings(session, ticker)
+            self._throttle()
+            if ok_fund and ok_analyst:
+                updated += 1
+            else:
+                failed += 1
+            logger.debug(
+                "refresh_fundamentals_batch ticker=%s fundamentals=%s analyst=%s",
+                ticker, ok_fund, ok_analyst,
+            )
+        return {"tickers_updated": updated, "tickers_failed": failed}

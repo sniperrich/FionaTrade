@@ -115,10 +115,47 @@ class Settings(BaseSettings):
             "https://feeds.bloomberg.com/markets/news.rss",
             "https://www.cnbc.com/id/100003114/device/rss/rss.html",
             "https://www.marketwatch.com/rss/topstories",
+            "https://feeds.reuters.com/reuters/businessNews",
+            "https://feeds.reuters.com/reuters/topNews",
+            "https://apnews.com/hub/financial-markets?format=rss",
+            "https://seekingalpha.com/market_currents.xml",
         ]
     )
 
     sp100_tickers: list[str] = Field(default_factory=lambda: SP100_TICKERS.copy())
+
+    # ── Agent System ──────────────────────────────────────────────────────────
+    agent_mode_enabled: bool = True
+    # Optionally override which tickers the agent graph runs on (empty = all SP100)
+    agent_tickers_override: list[str] = Field(default_factory=list)
+    # How many minutes of Bar1m history to load for technical analysis
+    agent_technicals_lookback_bars: int = 390  # ~1 trading day of 1m bars
+
+    # ── FRED Macroeconomic Data ───────────────────────────────────────────────
+    fred_api_key: str = ""
+    # FRED series to fetch; defaults cover the most market-relevant indicators
+    fred_series: list[str] = Field(
+        default_factory=lambda: [
+            "CPIAUCSL",   # CPI (inflation)
+            "GDP",        # Gross Domestic Product
+            "UNRATE",     # Unemployment rate
+            "FEDFUNDS",   # Federal Funds Rate
+            "DGS10",      # 10-Year Treasury Yield
+            "UMCSENT",    # University of Michigan Consumer Sentiment
+            "T10Y2Y",     # 10Y-2Y yield spread (recession indicator)
+            "VIXCLS",     # VIX (market fear index via FRED)
+        ]
+    )
+    fred_refresh_interval_hours: int = 24
+
+    # ── Fundamentals & Analyst Data ───────────────────────────────────────────
+    fundamentals_refresh_interval_days: int = 7
+    analyst_ratings_refresh_interval_days: int = 1
+
+    # ── Broker (Alpaca) ───────────────────────────────────────────────────────
+    alpaca_api_key: str = ""
+    alpaca_api_secret: str = ""
+    alpaca_base_url: str = "https://paper-api.alpaca.markets"  # paper trading endpoint
 
 
 @lru_cache(maxsize=1)

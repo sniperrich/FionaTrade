@@ -164,3 +164,30 @@ def settings_page(request: Request, settings: Settings = Depends(get_app_setting
             "settings": settings,
         },
     )
+
+
+@router.get("/agents", response_class=HTMLResponse)
+def agents_page(
+    request: Request,
+    ticker: str | None = None,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+):
+    from app.db.models import AgentRun
+    from sqlalchemy import select, desc
+
+    stmt = select(AgentRun).order_by(desc(AgentRun.created_at)).limit(50)
+    if ticker:
+        stmt = stmt.where(AgentRun.ticker == ticker.upper())
+    runs = session.execute(stmt).scalars().all()
+
+    return templates.TemplateResponse(
+        "agents.html",
+        {
+            "request": request,
+            "title": "Agent Runs",
+            "runs": runs,
+            "selected_ticker": ticker,
+            "agent_mode_enabled": settings.agent_mode_enabled,
+        },
+    )
