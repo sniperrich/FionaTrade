@@ -18,10 +18,10 @@ _MIN_CONSENSUS_COUNT = 2       # at least 2 agents must agree for high-risk acti
 _SCORE_SCALE = 100             # full signal scale
 
 _SYSTEM_PROMPT = """\
-You are a risk manager for a US equities trading fund.
-Your job is to assess the risk of executing a proposed trade given the current portfolio
-and market conditions. You review signals from other analysis agents.
-Respond ONLY with valid JSON, no markdown fences, in the exact format specified.
+Task: Risk management assessment for equity trading.
+Assess the risk of executing a proposed trade given the current portfolio
+and market conditions. Review signals from other analysis agents.
+Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
 _USER_PROMPT_TEMPLATE = """\

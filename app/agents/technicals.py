@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.agents.base import AgentSignal, BaseAgent
 from app.core.config import Settings
 from app.core.logging import get_app_logger
-from app.tools.market_data import get_technical_summary
+from app.tools.market_data import get_technical_summary, get_multi_day_performance
 
 logger = get_app_logger()
 
@@ -100,6 +100,21 @@ class TechnicalsAgent(BaseAgent):
                 elif score < 0:
                     score -= 10
                     signals_fired.append(f"High volume selling pressure ({vol_ratio:.1f}x avg)")
+
+            # ── Relative strength vs SPY ─────────────────────────────────────
+            if ticker.upper() != "SPY":
+                spy_perf = get_multi_day_performance(session, "SPY", days=5)
+                ticker_perf = get_multi_day_performance(session, ticker, days=5)
+                if "error" not in spy_perf and "error" not in ticker_perf:
+                    spy_ret = spy_perf.get("period_return_pct", 0)
+                    tk_ret = ticker_perf.get("period_return_pct", 0)
+                    relative = tk_ret - spy_ret
+                    if relative > 3.0:
+                        score += 10
+                        signals_fired.append(f"Outperforming SPY by {relative:+.1f}pp (5d)")
+                    elif relative < -3.0:
+                        score -= 10
+                        signals_fired.append(f"Underperforming SPY by {relative:+.1f}pp (5d)")
 
             # ── Map score to signal and confidence ────────────────────────────
             abs_score = abs(score)

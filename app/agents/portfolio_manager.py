@@ -8,11 +8,11 @@ from app.core.logging import get_app_logger
 logger = get_app_logger()
 
 _SYSTEM_PROMPT = """\
-You are the portfolio manager for a US equities trading fund.
-Your role is to make the FINAL trade decision for a specific ticker, synthesizing analysis
+Task: Portfolio management — final trade decision.
+Make the FINAL trade decision for a specific ticker, synthesizing analysis
 from multiple specialist agents: macro, news sentiment, fundamentals, technicals, and risk.
-Your decision must be actionable, justified, and risk-appropriate.
-Respond ONLY with valid JSON, no markdown fences, in the exact format specified.
+The decision must be actionable, justified, and risk-appropriate.
+Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
 _USER_PROMPT_TEMPLATE = """\

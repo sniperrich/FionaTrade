@@ -184,7 +184,91 @@ def get_technical_summary(session: Session, ticker: str, lookback_bars: int = 39
     return indicators
 
 
-def build_technicals_context_text(session: Session, ticker: str, lookback_bars: int = 390) -> str:
+def get_multi_day_performance(session: Session, ticker: str, days: int = 5) -> dict:
+    """Compute multi-day price performance from daily OHLCV aggregated from 1m bars.
+    
+    Returns dict with daily_returns, period_return, avg_volume, etc.
+    """
+    # Fetch enough bars to cover N trading days (~390 bars/day × days)
+    bars_needed = 390 * (days + 1)
+    df = get_bars(session, ticker, lookback_bars=bars_needed)
+    if df.empty or len(df) < 20:
+        return {"ticker": ticker, "error": "insufficient_data"}
+
+    df["date"] = pd.to_datetime(df["ts"]).dt.date
+    daily = df.groupby("date").agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+    ).sort_index()
+
+    if len(daily) < 2:
+        return {"ticker": ticker, "error": "insufficient_daily_data"}
+
+    daily["return_pct"] = daily["close"].pct_change() * 100
+    recent_days = daily.tail(days + 1)
+
+    daily_returns = []
+    for date_val, row in recent_days.iterrows():
+        if pd.notna(row["return_pct"]):
+            daily_returns.append({
+                "date": str(date_val),
+                "close": round(float(row["close"]), 2),
+                "change_pct": round(float(row["return_pct"]), 2),
+                "volume": int(row["volume"]),
+            })
+
+    period_return = round(
+        (float(recent_days["close"].iloc[-1]) / float(recent_days["close"].iloc[0]) - 1) * 100, 2
+    ) if len(recent_days) >= 2 else 0.0
+
+    return {
+        "ticker": ticker,
+        "days": len(daily_returns),
+        "period_return_pct": period_return,
+        "current_price": round(float(daily["close"].iloc[-1]), 2),
+        "avg_daily_volume": int(daily["volume"].tail(days).mean()),
+        "daily_returns": daily_returns,
+        "high_of_period": round(float(recent_days["high"].max()), 2),
+        "low_of_period": round(float(recent_days["low"].min()), 2),
+    }
+
+
+def get_spy_market_context(session: Session) -> dict:
+    """Get SPY (S&P 500 ETF) recent performance as broad market context."""
+    return get_multi_day_performance(session, "SPY", days=5)
+
+
+def build_market_context_text(session: Session, ticker: str) -> str:
+    """Build enriched market context for agents: SPY index + ticker multi-day performance."""
+    lines: list[str] = []
+
+    # SPY / broad market
+    spy = get_spy_market_context(session)
+    if "error" not in spy:
+        lines.append("=== BROAD MARKET (SPY) ===")
+        lines.append(f"  Current: ${spy['current_price']}  |  {spy['days']}-day return: {spy['period_return_pct']:+.2f}%")
+        lines.append(f"  Range: ${spy['low_of_period']} – ${spy['high_of_period']}")
+        for d in spy.get("daily_returns", [])[-5:]:
+            lines.append(f"    {d['date']}: ${d['close']} ({d['change_pct']:+.2f}%)")
+    else:
+        lines.append("=== BROAD MARKET (SPY) ===\n  No SPY data available.")
+
+    # Target ticker multi-day
+    if ticker.upper() != "SPY":
+        perf = get_multi_day_performance(session, ticker, days=5)
+        if "error" not in perf:
+            lines.append(f"\n=== {ticker} MULTI-DAY PERFORMANCE ===")
+            lines.append(f"  Current: ${perf['current_price']}  |  {perf['days']}-day return: {perf['period_return_pct']:+.2f}%")
+            lines.append(f"  Range: ${perf['low_of_period']} – ${perf['high_of_period']}  |  Avg Vol: {perf['avg_daily_volume']:,}")
+            for d in perf.get("daily_returns", [])[-5:]:
+                lines.append(f"    {d['date']}: ${d['close']} ({d['change_pct']:+.2f}%)")
+        else:
+            lines.append(f"\n=== {ticker} MULTI-DAY PERFORMANCE ===\n  No multi-day data available.")
+
+    return "\n".join(lines)
     """Build a compact text block of technical indicators for LLM prompts."""
     data = get_technical_summary(session, ticker, lookback_bars)
 

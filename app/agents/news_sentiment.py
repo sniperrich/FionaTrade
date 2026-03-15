@@ -4,15 +4,16 @@ from sqlalchemy.orm import Session
 
 from app.agents.base import AgentSignal, BaseAgent
 from app.core.logging import get_app_logger
+from app.tools.market_data import build_market_context_text
 from app.tools.news import build_news_context_text
 
 logger = get_app_logger()
 
 _SYSTEM_PROMPT = """\
-You are a news sentiment analyst for a US equities trading fund.
-Your job is to assess recent news and events for a specific stock ticker and determine
+Task: News sentiment analysis for equity trading.
+Assess recent news and events for a specific stock ticker and determine
 their near-term directional impact on the stock price.
-Respond ONLY with valid JSON, no markdown fences, in the exact format specified.
+Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
 _USER_PROMPT_TEMPLATE = """\
@@ -46,8 +47,10 @@ class NewsSentimentAgent(BaseAgent):
 
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         try:
-            news_text = build_news_context_text(session, ticker, lookback_hours=48)
-            user_prompt = _USER_PROMPT_TEMPLATE.format(ticker=ticker, news_context=news_text)
+            news_text = build_news_context_text(session, ticker, lookback_hours=168)
+            market_ctx = build_market_context_text(session, ticker)
+            combined = f"{news_text}\n\n{market_ctx}"
+            user_prompt = _USER_PROMPT_TEMPLATE.format(ticker=ticker, news_context=combined)
 
             raw = self._call_llm(_SYSTEM_PROMPT, user_prompt, response_format="json")
             parsed = self._parse_json_response(raw)

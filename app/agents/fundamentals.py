@@ -5,14 +5,15 @@ from sqlalchemy.orm import Session
 from app.agents.base import AgentSignal, BaseAgent
 from app.core.logging import get_app_logger
 from app.tools.fundamentals import build_fundamentals_context_text
+from app.tools.market_data import build_market_context_text
 
 logger = get_app_logger()
 
 _SYSTEM_PROMPT = """\
-You are a fundamental analyst for a US equities trading fund.
-Your job is to assess the fundamental quality and valuation of a stock.
+Task: Fundamental analysis for equity trading.
+Assess the fundamental quality and valuation of a stock.
 Focus on whether the fundamentals support buying, shorting, or holding the stock.
-Respond ONLY with valid JSON, no markdown fences, in the exact format specified.
+Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
 _USER_PROMPT_TEMPLATE = """\
@@ -48,13 +49,15 @@ class FundamentalsAgent(BaseAgent):
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         try:
             fundamentals_text = build_fundamentals_context_text(session, ticker)
+            market_ctx = build_market_context_text(session, ticker)
 
             # If no fundamental data at all, return low-confidence NO_SIGNAL
             if "No fundamentals snapshot available" in fundamentals_text and "No recent" in fundamentals_text:
                 return AgentSignal.no_signal(self.name, "No fundamentals data available yet")
 
+            combined = f"{fundamentals_text}\n\n{market_ctx}"
             user_prompt = _USER_PROMPT_TEMPLATE.format(
-                ticker=ticker, fundamentals_context=fundamentals_text
+                ticker=ticker, fundamentals_context=combined
             )
             raw = self._call_llm(_SYSTEM_PROMPT, user_prompt, response_format="json")
             parsed = self._parse_json_response(raw)

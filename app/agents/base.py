@@ -85,12 +85,22 @@ class BaseAgent(ABC):
             return None
 
         model_name = model or self.settings.llm_model
-        payload: dict[str, Any] = {
-            "model": model_name,
-            "messages": [
+
+        # Some proxy-routed models (e.g. Kiro) reject system prompts that
+        # assign an identity. Merge system prompt into user prompt instead.
+        if self.settings.llm_merge_system_prompt:
+            messages = [
+                {"role": "user", "content": f"{system_prompt}\n\n---\n\n{user_prompt}"},
+            ]
+        else:
+            messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
-            ],
+            ]
+
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
             "temperature": 0.2,
             "max_tokens": 1500,
         }

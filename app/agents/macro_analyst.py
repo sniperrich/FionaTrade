@@ -6,14 +6,15 @@ from app.agents.base import AgentSignal, BaseAgent
 from app.core.config import Settings
 from app.core.logging import get_app_logger
 from app.tools.macro import build_macro_context_text
+from app.tools.market_data import build_market_context_text
 
 logger = get_app_logger()
 
 _SYSTEM_PROMPT = """\
-You are a macroeconomic analyst for a US equities trading fund.
-Your job is to assess the current macro environment and its likely near-term impact on equities.
+Task: Macroeconomic analysis for equities trading.
+Assess the current macro environment and its likely near-term impact on US equities.
 Focus on actionable, data-driven conclusions. Be concise and precise.
-Respond ONLY with valid JSON, no markdown fences, in the exact format specified.
+Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
 _USER_PROMPT_TEMPLATE = """\
@@ -47,13 +48,15 @@ class MacroAnalystAgent(BaseAgent):
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         try:
             macro_text = build_macro_context_text(session)
+            market_ctx = build_market_context_text(session, ticker)
 
             # Fallback if no FRED data available
             if "No recent" in macro_text and "N/A" in macro_text:
                 logger.debug("[macro_analyst] No FRED data available, returning NO_SIGNAL")
                 return AgentSignal.no_signal(self.name, "No FRED data available yet")
 
-            user_prompt = _USER_PROMPT_TEMPLATE.format(macro_context=macro_text)
+            combined_context = f"{macro_text}\n\n{market_ctx}"
+            user_prompt = _USER_PROMPT_TEMPLATE.format(macro_context=combined_context)
             raw = self._call_llm(_SYSTEM_PROMPT, user_prompt, response_format="json")
             parsed = self._parse_json_response(raw)
 

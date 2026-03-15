@@ -38,11 +38,13 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
     llm_classifier_model: str = "gemini-3-flash"
-    llm_timeout_seconds: float = 30.0
+    llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 3
     llm_retry_backoff_seconds: float = 1.5
     llm_retry_backoff_multiplier: float = 1.8
     llm_retry_max_delay_seconds: float = 12.0
+    # Merge system prompt into user message (for Kiro-routed models that reject role overrides)
+    llm_merge_system_prompt: bool = True
     sec_summary_model: str = "gemini-3-flash"
     sec_summary_max_chars: int = 1000
     event_tradeability_filter_enabled: bool = True
