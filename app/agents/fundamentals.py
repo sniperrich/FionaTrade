@@ -48,8 +48,9 @@ class FundamentalsAgent(BaseAgent):
 
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         try:
-            fundamentals_text = build_fundamentals_context_text(session, ticker)
-            market_ctx = build_market_context_text(session, ticker)
+            as_of = (context or {}).get("as_of")
+            fundamentals_text = build_fundamentals_context_text(session, ticker, as_of=as_of)
+            market_ctx = build_market_context_text(session, ticker, as_of=as_of)
 
             # If no fundamental data at all, return low-confidence NO_SIGNAL
             if "No fundamentals snapshot available" in fundamentals_text and "No recent" in fundamentals_text:

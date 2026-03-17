@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -125,11 +126,20 @@ class AgentGraph:
 
     # ── Public run method ──────────────────────────────────────────────────
 
-    def run(self, session: Session, ticker: str, context: dict | None = None) -> AgentState:
-        """Execute the full agent graph for a ticker. Returns final AgentState."""
+    def run(self, session: Session, ticker: str, context: dict | None = None, as_of: datetime | None = None) -> AgentState:
+        """Execute the full agent graph for a ticker. Returns final AgentState.
+
+        Args:
+            as_of: Simulation timestamp for backtesting. When set, all data
+                   queries are restricted to data available before this time,
+                   preventing look-ahead bias.
+        """
+        ctx = dict(context or {})
+        if as_of is not None:
+            ctx["as_of"] = as_of
         state: AgentState = {
             "ticker": ticker.upper(),
-            "context": context or {},
+            "context": ctx,
             "agent_signals": {},
         }
         start_time = time.perf_counter()

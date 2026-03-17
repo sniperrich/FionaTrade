@@ -22,7 +22,10 @@ def get_bars(
     Sorted ascending by ts.
     """
     end = end_time or datetime.now(timezone.utc)
-    start = end - timedelta(minutes=lookback_bars * 2)  # fetch extra to ensure we have enough
+    # Use calendar days (not minutes) to ensure we bridge weekends/holidays
+    est_trading_days = max(1, lookback_bars // 390)
+    buffer_days = max(3, est_trading_days * 2 + 2)
+    start = end - timedelta(days=buffer_days)
 
     rows = session.execute(
         select(Bar1m)
@@ -174,9 +177,11 @@ def compute_indicators(df: pd.DataFrame) -> dict:
     return result
 
 
-def get_technical_summary(session: Session, ticker: str, lookback_bars: int = 390) -> dict:
+def get_technical_summary(
+    session: Session, ticker: str, lookback_bars: int = 390, as_of: datetime | None = None,
+) -> dict:
     """Convenience: load bars and compute indicators in one call."""
-    df = get_bars(session, ticker, lookback_bars=lookback_bars)
+    df = get_bars(session, ticker, lookback_bars=lookback_bars, end_time=as_of)
     if df.empty:
         return {"ticker": ticker, "error": "no_data"}
     indicators = compute_indicators(df)
@@ -184,14 +189,16 @@ def get_technical_summary(session: Session, ticker: str, lookback_bars: int = 39
     return indicators
 
 
-def get_multi_day_performance(session: Session, ticker: str, days: int = 5) -> dict:
+def get_multi_day_performance(
+    session: Session, ticker: str, days: int = 5, as_of: datetime | None = None,
+) -> dict:
     """Compute multi-day price performance from daily OHLCV aggregated from 1m bars.
     
     Returns dict with daily_returns, period_return, avg_volume, etc.
     """
     # Fetch enough bars to cover N trading days (~390 bars/day × days)
     bars_needed = 390 * (days + 1)
-    df = get_bars(session, ticker, lookback_bars=bars_needed)
+    df = get_bars(session, ticker, lookback_bars=bars_needed, end_time=as_of)
     if df.empty or len(df) < 20:
         return {"ticker": ticker, "error": "insufficient_data"}
 
@@ -236,17 +243,19 @@ def get_multi_day_performance(session: Session, ticker: str, days: int = 5) -> d
     }
 
 
-def get_spy_market_context(session: Session) -> dict:
+def get_spy_market_context(session: Session, as_of: datetime | None = None) -> dict:
     """Get SPY (S&P 500 ETF) recent performance as broad market context."""
-    return get_multi_day_performance(session, "SPY", days=5)
+    return get_multi_day_performance(session, "SPY", days=5, as_of=as_of)
 
 
-def build_market_context_text(session: Session, ticker: str) -> str:
+def build_market_context_text(
+    session: Session, ticker: str, as_of: datetime | None = None,
+) -> str:
     """Build enriched market context for agents: SPY index + ticker multi-day performance."""
     lines: list[str] = []
 
     # SPY / broad market
-    spy = get_spy_market_context(session)
+    spy = get_spy_market_context(session, as_of=as_of)
     if "error" not in spy:
         lines.append("=== BROAD MARKET (SPY) ===")
         lines.append(f"  Current: ${spy['current_price']}  |  {spy['days']}-day return: {spy['period_return_pct']:+.2f}%")
@@ -258,7 +267,7 @@ def build_market_context_text(session: Session, ticker: str) -> str:
 
     # Target ticker multi-day
     if ticker.upper() != "SPY":
-        perf = get_multi_day_performance(session, ticker, days=5)
+        perf = get_multi_day_performance(session, ticker, days=5, as_of=as_of)
         if "error" not in perf:
             lines.append(f"\n=== {ticker} MULTI-DAY PERFORMANCE ===")
             lines.append(f"  Current: ${perf['current_price']}  |  {perf['days']}-day return: {perf['period_return_pct']:+.2f}%")

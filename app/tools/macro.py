@@ -30,18 +30,26 @@ _MACRO_KEYWORDS = [
 ]
 
 
-def get_latest_indicators(session: Session, series_ids: list[str] | None = None) -> dict[str, dict]:
+def get_latest_indicators(
+    session: Session, series_ids: list[str] | None = None, as_of: datetime | None = None,
+) -> dict[str, dict]:
     """Return the most recent observation for each requested FRED series.
 
     Returns a dict keyed by series_id:
       {"CPIAUCSL": {"value": 3.4, "date": "2024-12-01", "name": "CPI Inflation"}, ...}
+
+    Args:
+        as_of: If set, only return observations on or before this date.
     """
     target_ids = series_ids or list(_KEY_SERIES.keys())
 
+    stmt = select(MacroIndicator).where(
+        MacroIndicator.series_id.in_(target_ids)
+    )
+    if as_of:
+        stmt = stmt.where(MacroIndicator.observation_date <= as_of)
     rows = session.execute(
-        select(MacroIndicator)
-        .where(MacroIndicator.series_id.in_(target_ids))
-        .order_by(MacroIndicator.series_id, MacroIndicator.observation_date.desc())
+        stmt.order_by(MacroIndicator.series_id, MacroIndicator.observation_date.desc())
     ).scalars().all()
 
     # Keep only the latest per series
@@ -62,17 +70,19 @@ def get_latest_indicators(session: Session, series_ids: list[str] | None = None)
 
 
 def get_indicator_trend(
-    session: Session, series_id: str, lookback_days: int = 90
+    session: Session, series_id: str, lookback_days: int = 90, as_of: datetime | None = None,
 ) -> list[dict]:
     """Return recent observations for a single FRED series, oldest-first."""
-    since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    ref_time = as_of or datetime.now(timezone.utc)
+    since = ref_time - timedelta(days=lookback_days)
+    stmt = select(MacroIndicator).where(
+        MacroIndicator.series_id == series_id,
+        MacroIndicator.observation_date >= since,
+    )
+    if as_of:
+        stmt = stmt.where(MacroIndicator.observation_date <= ref_time)
     rows = session.execute(
-        select(MacroIndicator)
-        .where(
-            MacroIndicator.series_id == series_id,
-            MacroIndicator.observation_date >= since,
-        )
-        .order_by(MacroIndicator.observation_date.asc())
+        stmt.order_by(MacroIndicator.observation_date.asc())
     ).scalars().all()
 
     return [
@@ -82,15 +92,16 @@ def get_indicator_trend(
 
 
 def get_macro_news_summary(
-    session: Session, lookback_hours: int = 48, limit: int = 20
+    session: Session, lookback_hours: int = 48, limit: int = 20, as_of: datetime | None = None,
 ) -> list[dict]:
     """Return recent macro-relevant RawItems for use as LLM context."""
-    since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    ref_time = as_of or datetime.now(timezone.utc)
+    since = ref_time - timedelta(hours=lookback_hours)
+    stmt = select(RawItem).where(RawItem.published_at >= since)
+    if as_of:
+        stmt = stmt.where(RawItem.published_at <= ref_time)
     rows = session.execute(
-        select(RawItem)
-        .where(RawItem.published_at >= since)
-        .order_by(RawItem.published_at.desc())
-        .limit(200)
+        stmt.order_by(RawItem.published_at.desc()).limit(200)
     ).scalars().all()
 
     macro_items = []
@@ -109,10 +120,10 @@ def get_macro_news_summary(
     return macro_items
 
 
-def build_macro_context_text(session: Session) -> str:
+def build_macro_context_text(session: Session, as_of: datetime | None = None) -> str:
     """Build a compact text block describing current macro conditions for LLM prompts."""
-    indicators = get_latest_indicators(session)
-    news = get_macro_news_summary(session, lookback_hours=72, limit=10)
+    indicators = get_latest_indicators(session, as_of=as_of)
+    news = get_macro_news_summary(session, lookback_hours=72, limit=10, as_of=as_of)
 
     lines: list[str] = ["=== MACRO INDICATORS (FRED) ==="]
     for sid, data in indicators.items():

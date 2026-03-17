@@ -67,9 +67,12 @@ class BaseAgent(ABC):
 
     def _get_http_client(self) -> httpx.Client:
         if self._http_client is None:
+            # Use transport-level retries for SSL/connection errors
+            transport = httpx.HTTPTransport(retries=3)
             self._http_client = httpx.Client(
                 timeout=self.settings.llm_timeout_seconds,
                 headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
+                transport=transport,
             )
         return self._http_client
 

@@ -14,19 +14,31 @@ def get_recent_events(
     lookback_hours: int = 48,
     limit: int = 30,
     min_confidence: int = 0,
+    as_of: datetime | None = None,
 ) -> list[dict]:
     """Return recent events, optionally filtered by ticker.
 
     Each dict has: id, event_type, tickers, severity, confidence, event_time,
     validation_status, summary, evidence_count.
-    """
-    since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
 
-    # Try event_time first (actual event occurrence); fall back to created_at
-    # to catch events whose event_time is older but were recently ingested.
-    stmt = select(Event).where(
-        (Event.event_time >= since) | (Event.created_at >= since)
-    )
+    Args:
+        as_of: Reference time for temporal filtering (backtest mode).
+               When set, only events with event_time <= as_of are returned.
+    """
+    ref_time = as_of or datetime.now(timezone.utc)
+    since = ref_time - timedelta(hours=lookback_hours)
+
+    if as_of:
+        # Backtest mode: strict temporal filter — only events that occurred before as_of
+        stmt = select(Event).where(
+            Event.event_time >= since,
+            Event.event_time <= ref_time,
+        )
+    else:
+        # Live mode: also catch recently-ingested events via created_at
+        stmt = select(Event).where(
+            (Event.event_time >= since) | (Event.created_at >= since)
+        )
     if ticker:
         # SQLAlchemy JSON contains check - use a Python-level filter after fetch
         pass
@@ -95,17 +107,21 @@ def get_event_detail(session: Session, event_id: int) -> dict | None:
 
 
 def get_ticker_news_summary(
-    session: Session, ticker: str, lookback_hours: int = 72, limit: int = 15
+    session: Session, ticker: str, lookback_hours: int = 72, limit: int = 15,
+    as_of: datetime | None = None,
 ) -> list[dict]:
     """Return recent RawItems mentioning a ticker directly (from Finnhub or flagged)."""
-    since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    ref_time = as_of or datetime.now(timezone.utc)
+    since = ref_time - timedelta(hours=lookback_hours)
     ticker_lower = ticker.lower()
 
+    stmt = select(RawItem).where(
+        RawItem.published_at >= since, RawItem.source_tier <= 2
+    )
+    if as_of:
+        stmt = stmt.where(RawItem.published_at <= ref_time)
     rows = session.execute(
-        select(RawItem)
-        .where(RawItem.published_at >= since, RawItem.source_tier <= 2)
-        .order_by(RawItem.published_at.desc())
-        .limit(500)
+        stmt.order_by(RawItem.published_at.desc()).limit(500)
     ).scalars().all()
 
     results = []
@@ -125,13 +141,15 @@ def get_ticker_news_summary(
     return results
 
 
-def build_news_context_text(session: Session, ticker: str, lookback_hours: int = 168) -> str:
+def build_news_context_text(
+    session: Session, ticker: str, lookback_hours: int = 168, as_of: datetime | None = None,
+) -> str:
     """Build a compact text block of recent news/events for LLM prompts.
     
     Default 168h (7 days) lookback to catch weekly ingestion cycles.
     """
-    events = get_recent_events(session, ticker=ticker, lookback_hours=lookback_hours, limit=10)
-    news = get_ticker_news_summary(session, ticker=ticker, lookback_hours=lookback_hours, limit=8)
+    events = get_recent_events(session, ticker=ticker, lookback_hours=lookback_hours, limit=10, as_of=as_of)
+    news = get_ticker_news_summary(session, ticker=ticker, lookback_hours=lookback_hours, limit=8, as_of=as_of)
 
     lines: list[str] = [f"=== RECENT EVENTS FOR {ticker} ==="]
     if events:

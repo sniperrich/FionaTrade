@@ -8,27 +8,44 @@ from sqlalchemy.orm import Session
 from app.db.models import AnalystRating, EarningsCalendar, FundamentalsSnapshot
 
 
-def get_latest_snapshot(session: Session, ticker: str) -> FundamentalsSnapshot | None:
-    """Return the most recent fundamentals snapshot for a ticker."""
+def get_latest_snapshot(
+    session: Session, ticker: str, as_of: datetime | None = None,
+) -> FundamentalsSnapshot | None:
+    """Return the most recent fundamentals snapshot for a ticker.
+
+    Note: as_of filter uses fetched_at. Since snapshots reflect the last
+    reported fiscal period, this may be overly strict for backtests where
+    only one snapshot exists per ticker.
+    """
+    stmt = select(FundamentalsSnapshot).where(
+        FundamentalsSnapshot.ticker == ticker.upper()
+    )
+    if as_of:
+        stmt = stmt.where(FundamentalsSnapshot.fetched_at <= as_of)
     return session.execute(
-        select(FundamentalsSnapshot)
-        .where(FundamentalsSnapshot.ticker == ticker.upper())
-        .order_by(FundamentalsSnapshot.fetched_at.desc())
+        stmt.order_by(FundamentalsSnapshot.fetched_at.desc())
     ).scalars().first()
 
 
-def get_latest_analyst_rating(session: Session, ticker: str) -> AnalystRating | None:
+def get_latest_analyst_rating(
+    session: Session, ticker: str, as_of: datetime | None = None,
+) -> AnalystRating | None:
     """Return the most recent analyst rating for a ticker."""
+    stmt = select(AnalystRating).where(
+        AnalystRating.ticker == ticker.upper()
+    )
+    if as_of:
+        stmt = stmt.where(AnalystRating.fetched_at <= as_of)
     return session.execute(
-        select(AnalystRating)
-        .where(AnalystRating.ticker == ticker.upper())
-        .order_by(AnalystRating.fetched_at.desc())
+        stmt.order_by(AnalystRating.fetched_at.desc())
     ).scalars().first()
 
 
-def get_upcoming_earnings(session: Session, ticker: str, lookahead_days: int = 30) -> dict | None:
+def get_upcoming_earnings(
+    session: Session, ticker: str, lookahead_days: int = 30, as_of: datetime | None = None,
+) -> dict | None:
     """Return next scheduled earnings date for a ticker, if any."""
-    now = datetime.now(timezone.utc)
+    now = as_of or datetime.now(timezone.utc)
     row = session.execute(
         select(EarningsCalendar)
         .where(
@@ -57,9 +74,11 @@ def get_upcoming_earnings(session: Session, ticker: str, lookahead_days: int = 3
     }
 
 
-def get_last_earnings(session: Session, ticker: str, limit: int = 4) -> list[dict]:
+def get_last_earnings(
+    session: Session, ticker: str, limit: int = 4, as_of: datetime | None = None,
+) -> list[dict]:
     """Return the last N earnings results for a ticker."""
-    now = datetime.now(timezone.utc)
+    now = as_of or datetime.now(timezone.utc)
     rows = session.execute(
         select(EarningsCalendar)
         .where(
@@ -90,10 +109,15 @@ def get_last_earnings(session: Session, ticker: str, limit: int = 4) -> list[dic
     return results
 
 
-def build_fundamentals_context_text(session: Session, ticker: str) -> str:
+def build_fundamentals_context_text(
+    session: Session, ticker: str, as_of: datetime | None = None,
+) -> str:
     """Build a compact text block of fundamentals data for LLM prompts."""
     lines: list[str] = [f"=== FUNDAMENTALS FOR {ticker} ==="]
 
+    # Snapshots and analyst ratings represent the last reported quarter.
+    # Don't filter by as_of since the underlying data (PE, margins, etc.)
+    # was publicly available well before our fetch date.
     snap = get_latest_snapshot(session, ticker)
     if snap:
         lines.append(f"Period: {snap.period} ({snap.period_type})")
@@ -102,15 +126,17 @@ def build_fundamentals_context_text(session: Session, ticker: str) -> str:
         if snap.pb_ratio is not None:
             lines.append(f"  P/B: {snap.pb_ratio:.2f}")
         if snap.roe is not None:
-            lines.append(f"  ROE: {snap.roe:.1%}")
+            # Finnhub returns percentages as raw numbers (e.g. 15.5 = 15.5%)
+            lines.append(f"  ROE: {snap.roe:.1f}%")
         if snap.gross_margin is not None:
-            lines.append(f"  Gross Margin: {snap.gross_margin:.1%}")
+            lines.append(f"  Gross Margin: {snap.gross_margin:.1f}%")
         if snap.operating_margin is not None:
-            lines.append(f"  Operating Margin: {snap.operating_margin:.1%}")
+            lines.append(f"  Operating Margin: {snap.operating_margin:.1f}%")
         if snap.debt_to_equity is not None:
             lines.append(f"  Debt/Equity: {snap.debt_to_equity:.2f}")
         if snap.market_cap is not None:
-            lines.append(f"  Market Cap: ${snap.market_cap / 1e9:.1f}B")
+            # Finnhub returns market cap in millions
+            lines.append(f"  Market Cap: ${snap.market_cap / 1e3:.1f}B")
         if snap.beta is not None:
             lines.append(f"  Beta: {snap.beta:.2f}")
         if snap.week_52_high and snap.week_52_low:
@@ -119,7 +145,7 @@ def build_fundamentals_context_text(session: Session, ticker: str) -> str:
         lines.append("  No fundamentals snapshot available.")
 
     # Analyst ratings
-    rating = get_latest_analyst_rating(session, ticker)
+    rating = get_latest_analyst_rating(session, ticker)  # same reasoning as snapshot
     if rating:
         total = (rating.strong_buy + rating.buy + rating.hold + rating.sell + rating.strong_sell) or 1
         bullish = (rating.strong_buy + rating.buy) / total
@@ -137,7 +163,7 @@ def build_fundamentals_context_text(session: Session, ticker: str) -> str:
             lines.append(f"  Price Target: ${rating.target_mean:.2f}{upside} (range ${rating.target_low:.2f}–${rating.target_high:.2f})")
 
     # Earnings history
-    earnings = get_last_earnings(session, ticker, limit=4)
+    earnings = get_last_earnings(session, ticker, limit=4, as_of=as_of)
     if earnings:
         lines.append("\nRecent Earnings:")
         for e in earnings:
@@ -146,7 +172,7 @@ def build_fundamentals_context_text(session: Session, ticker: str) -> str:
                 f"  {e['report_date']}: EPS {e['eps_actual']}{surprise_str}"
             )
 
-    upcoming = get_upcoming_earnings(session, ticker)
+    upcoming = get_upcoming_earnings(session, ticker, as_of=as_of)
     if upcoming:
         lines.append(f"\nNext Earnings: {upcoming['report_date']} ({upcoming['days_until']} days, {upcoming['report_hour']})")
 

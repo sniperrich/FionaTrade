@@ -47,8 +47,9 @@ class NewsSentimentAgent(BaseAgent):
 
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         try:
-            news_text = build_news_context_text(session, ticker, lookback_hours=168)
-            market_ctx = build_market_context_text(session, ticker)
+            as_of = (context or {}).get("as_of")
+            news_text = build_news_context_text(session, ticker, lookback_hours=168, as_of=as_of)
+            market_ctx = build_market_context_text(session, ticker, as_of=as_of)
             combined = f"{news_text}\n\n{market_ctx}"
             user_prompt = _USER_PROMPT_TEMPLATE.format(ticker=ticker, news_context=combined)
 

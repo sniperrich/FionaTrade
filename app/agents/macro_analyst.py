@@ -47,8 +47,9 @@ class MacroAnalystAgent(BaseAgent):
 
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         try:
-            macro_text = build_macro_context_text(session)
-            market_ctx = build_market_context_text(session, ticker)
+            as_of = (context or {}).get("as_of")
+            macro_text = build_macro_context_text(session, as_of=as_of)
+            market_ctx = build_market_context_text(session, ticker, as_of=as_of)
 
             # Fallback if no FRED data available
             if "No recent" in macro_text and "N/A" in macro_text:

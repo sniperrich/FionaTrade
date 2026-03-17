@@ -31,8 +31,10 @@ class TechnicalsAgent(BaseAgent):
 
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         try:
+            as_of = (context or {}).get("as_of")
             data = get_technical_summary(
-                session, ticker, lookback_bars=self.settings.agent_technicals_lookback_bars
+                session, ticker, lookback_bars=self.settings.agent_technicals_lookback_bars,
+                as_of=as_of,
             )
 
             if "error" in data:
@@ -103,8 +105,8 @@ class TechnicalsAgent(BaseAgent):
 
             # ── Relative strength vs SPY ─────────────────────────────────────
             if ticker.upper() != "SPY":
-                spy_perf = get_multi_day_performance(session, "SPY", days=5)
-                ticker_perf = get_multi_day_performance(session, ticker, days=5)
+                spy_perf = get_multi_day_performance(session, "SPY", days=5, as_of=as_of)
+                ticker_perf = get_multi_day_performance(session, ticker, days=5, as_of=as_of)
                 if "error" not in spy_perf and "error" not in ticker_perf:
                     spy_ret = spy_perf.get("period_return_pct", 0)
                     tk_ret = ticker_perf.get("period_return_pct", 0)
