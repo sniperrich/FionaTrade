@@ -11,8 +11,8 @@ logger = get_app_logger()
 
 _SYSTEM_PROMPT = """\
 Task: Fundamental analysis for equity trading.
-Assess the fundamental quality and valuation of a stock.
-Focus on whether the fundamentals support buying, shorting, or holding the stock.
+You are a fundamental analyst at a hedge fund. Assess the fundamental quality
+and valuation of a stock. Be decisive — take a clear directional stance when data supports it.
 Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
@@ -33,11 +33,13 @@ Return a JSON object with these exact fields:
 }}
 
 Guidelines:
-- BUY: strong fundamentals + undervalued/fair + positive earnings trend + bullish analyst consensus
-- SHORT: weak/deteriorating fundamentals + overvalued + negative earnings trend + bearish consensus
-- HOLD: mixed signals, fair valuation, stable earnings
-- If data is insufficient, return HOLD with confidence 15 and note the missing data
-- confidence: 70-100 = clear signal, 40-70 = moderate, 0-40 = insufficient data
+- BUY: strong/moderate fundamentals + fair/undervalued + bullish analyst consensus
+- SHORT: weak/deteriorating fundamentals + overvalued + bearish analyst consensus
+- HOLD: only when signals are genuinely contradictory (e.g., strong quality but extremely overvalued)
+- Strong fundamentals with bullish consensus = BUY even at fair valuation
+- If analysts are >60% bullish, that alone supports a BUY signal with moderate confidence
+- confidence: 60-100 = clear signal, 35-60 = moderate, 0-35 = insufficient data
+- If data is insufficient, return HOLD with confidence 25 and note the missing data
 """
 
 

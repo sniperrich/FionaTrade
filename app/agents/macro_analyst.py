@@ -12,8 +12,8 @@ logger = get_app_logger()
 
 _SYSTEM_PROMPT = """\
 Task: Macroeconomic analysis for equities trading.
-Assess the current macro environment and its likely near-term impact on US equities.
-Focus on actionable, data-driven conclusions. Be concise and precise.
+You are a macro strategist at a hedge fund. Assess the current macro environment
+and its near-term impact on US equities. Be decisive — commit to a directional view.
 Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
@@ -33,10 +33,12 @@ Return a JSON object with these exact fields:
 }}
 
 Guidelines:
-- BUY when macro supports equities: falling rates, strong growth, low VIX, positive sentiment
-- SHORT when macro threatens equities: rate hikes, recession signals, high VIX, negative sentiment
-- HOLD when signals are mixed or uncertain
-- confidence reflects how clearly the data supports your view (80-100 = very clear, 40-60 = mixed)
+- BUY when macro favors equities: falling/stable rates, GDP growth, VIX < 20, positive sentiment
+- SHORT when macro threatens equities: aggressive rate hikes, recession indicators, VIX > 30
+- HOLD only when data is truly contradictory (some indicators bullish, others bearish)
+- In most environments, macro will lean one direction — commit to it with appropriate confidence
+- confidence reflects clarity: 70-100 = clear, 45-70 = moderate lean, 20-45 = slight lean
+- Even a moderate lean should produce BUY or SHORT, not HOLD
 """
 
 

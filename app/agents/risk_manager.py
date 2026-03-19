@@ -14,13 +14,14 @@ logger = get_app_logger()
 # Risk rule thresholds
 _MAX_POSITION_PCT = 0.20       # max 20% of portfolio in one ticker
 _MAX_DAILY_LOSS_PCT = 0.03     # halt trading if intraday loss > 3%
-_MIN_CONSENSUS_COUNT = 2       # at least 2 agents must agree for high-risk action
+_MIN_CONSENSUS_COUNT = 1       # at least 1 agent must give actionable signal
 _SCORE_SCALE = 100             # full signal scale
 
 _SYSTEM_PROMPT = """\
 Task: Risk management assessment for equity trading.
-Assess the risk of executing a proposed trade given the current portfolio
-and market conditions. Review signals from other analysis agents.
+You are a risk manager who enables trades when risk is acceptable, not one who blocks them.
+Assess the risk of executing a proposed trade given the current portfolio and market conditions.
+Your goal is to APPROVE trades with appropriate position sizing unless there is a clear, specific danger.
 Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
@@ -37,8 +38,8 @@ RULE-BASED PRE-CHECKS:
 {rule_checks}
 
 Based on the signals and risk context, determine:
-1. Whether the trade should proceed
-2. The maximum recommended position size as a % of portfolio (0-20%)
+1. Whether the trade should proceed (default to APPROVE unless specific danger exists)
+2. The recommended position size as a % of portfolio (5-15% for normal trades)
 3. Any risk mitigations required
 
 Return a JSON object with these exact fields:
@@ -51,6 +52,8 @@ Return a JSON object with these exact fields:
   "reasoning": "<2-3 sentence summary>"
 }}
 
+IMPORTANT: Approve trades when at least one agent provides a directional signal with >=40% confidence.
+Only reject if there are concrete dangers like extreme daily loss, max position reached, or extreme VIX.
 If approved=false, set max_position_pct to 0.
 """
 
@@ -152,7 +155,7 @@ class RiskManagerAgent(BaseAgent):
             parsed = self._parse_json_response(raw)
 
             if not parsed:
-                # LLM unavailable — apply conservative rule: approve with reduced size
+                # LLM unavailable — approve if any actionable signal exists
                 approved = len(actionable_signals) >= _MIN_CONSENSUS_COUNT
                 return AgentSignal(
                     agent_name=self.name,
@@ -161,7 +164,7 @@ class RiskManagerAgent(BaseAgent):
                     reasoning="LLM unavailable; rule-based fallback applied",
                     metadata={
                         "approved": approved,
-                        "max_position_pct": 0.05 if approved else 0.0,
+                        "max_position_pct": 0.10 if approved else 0.0,
                         "hard_block": False,
                     },
                 )

@@ -11,8 +11,9 @@ logger = get_app_logger()
 
 _SYSTEM_PROMPT = """\
 Task: News sentiment analysis for equity trading.
-Assess recent news and events for a specific stock ticker and determine
-their near-term directional impact on the stock price.
+You are an expert financial news analyst. Assess recent news and events for a
+specific stock ticker and determine their near-term directional impact.
+Be decisive — if news leans bullish or bearish, commit to a directional signal.
 Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
@@ -32,11 +33,12 @@ Return a JSON object with these exact fields:
 }}
 
 Guidelines:
-- BUY if recent news is meaningfully bullish: earnings beat, positive guidance, deal announcement
-- SHORT if recent news is meaningfully bearish: earnings miss, negative guidance, fraud/legal
-- HOLD if news is neutral, mixed, or too old to be actionable
-- confidence should reflect recency and strength of events (stale or weak news = low confidence)
-- If no meaningful news exists, return HOLD with confidence 20
+- BUY if recent news is bullish: earnings beat, positive guidance, deal announcement, upgrades, sector tailwinds
+- SHORT if recent news is bearish: earnings miss, negative guidance, fraud/legal, downgrades, sector headwinds
+- HOLD only if news is genuinely mixed with no clear lean, or if there is truly no relevant news at all
+- Even moderately positive/negative news should result in BUY/SHORT with moderate confidence (40-60)
+- confidence 60-100 = strong/clear signal, 30-60 = moderate signal, 0-30 = weak/absent
+- Do NOT default to HOLD just because news is a few days old — news from the past week is still actionable
 """
 
 
@@ -48,7 +50,7 @@ class NewsSentimentAgent(BaseAgent):
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         try:
             as_of = (context or {}).get("as_of")
-            news_text = build_news_context_text(session, ticker, lookback_hours=168, as_of=as_of)
+            news_text = build_news_context_text(session, ticker, lookback_hours=336, as_of=as_of)
             market_ctx = build_market_context_text(session, ticker, as_of=as_of)
             combined = f"{news_text}\n\n{market_ctx}"
             user_prompt = _USER_PROMPT_TEMPLATE.format(ticker=ticker, news_context=combined)

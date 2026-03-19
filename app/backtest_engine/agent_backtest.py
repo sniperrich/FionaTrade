@@ -7,6 +7,7 @@ look-ahead bias: all data queries are bounded by the simulation timestamp.
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta, timezone
@@ -26,6 +27,11 @@ logger = get_app_logger()
 _NY = ZoneInfo("America/New_York")
 _MARKET_CLOSE = dt_time(16, 0)
 _MARKET_OPEN = dt_time(9, 30)
+
+
+def _ts() -> str:
+    """Compact timestamp for progress output."""
+    return datetime.now().strftime("%H:%M:%S")
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -144,6 +150,14 @@ class AgentBacktestEngine:
             "[agent_backtest] %d trading days, %d decision days, %d tickers",
             len(trading_days), len(decision_days), len(tickers),
         )
+        print(f"\n{'='*60}")
+        print(f"[{_ts()}] 🚀 AGENT BACKTEST START")
+        print(f"  Tickers: {', '.join(tickers)}")
+        print(f"  Period: {start} → {end} ({len(trading_days)} trading days)")
+        print(f"  Decisions every {freq} days → {len(decision_days)} decision points")
+        print(f"  Capital: ${initial_capital:,.0f}")
+        print(f"{'='*60}")
+        sys.stdout.flush()
 
         portfolio = BTPortfolio(cash=initial_capital)
         equity_curve: list[dict] = []
@@ -161,23 +175,33 @@ class AgentBacktestEngine:
             if is_decision_day:
                 # Run agent graph for each ticker at market close
                 as_of = datetime.combine(day, _MARKET_CLOSE, tzinfo=_NY).astimezone(timezone.utc)
+                decision_idx = decision_days.index(day) + 1
+                print(f"\n[{_ts()}] 📊 Decision Day {decision_idx}/{len(decision_days)}: {day}")
+                sys.stdout.flush()
 
                 for ticker in tickers:
                     try:
-                        logger.info("[agent_backtest] Day %s: running agents for %s", day, ticker)
+                        t0 = time.time()
+                        print(f"  [{_ts()}] 🤖 Running agents for {ticker}...", end="", flush=True)
                         state = graph.run(session, ticker, as_of=as_of)
+                        elapsed = time.time() - t0
 
                         action = state.get("final_action", "HOLD")
                         pos_pct = float(state.get("final_position_pct", 0.0))
                         reasoning = state.get("final_reasoning", "")[:300]
 
+                        signals = {
+                            k: v.get("signal", "?") if isinstance(v, dict) else "?"
+                            for k, v in state.get("agent_signals", {}).items()
+                        }
+                        signal_str = " ".join(f"{k[:4]}={v}" for k, v in signals.items())
+                        print(f" → {action} {pos_pct:.0%} ({elapsed:.0f}s) [{signal_str}]")
+                        sys.stdout.flush()
+
                         all_decisions.append(BTDecision(
                             date=day, ticker=ticker, action=action,
                             position_pct=pos_pct, reasoning=reasoning,
-                            agent_signals={
-                                k: v.get("signal", "?") if isinstance(v, dict) else "?"
-                                for k, v in state.get("agent_signals", {}).items()
-                            },
+                            agent_signals=signals,
                         ))
 
                         # Execute trade at next day's open
@@ -189,10 +213,15 @@ class AgentBacktestEngine:
                                 equity = portfolio.equity(
                                     self._get_close_prices(session, tickers, day)
                                 )
+                                trades_before = len(all_trades)
                                 self._execute_decision(
                                     portfolio, ticker, action, target_pct,
                                     equity, open_price, next_day, all_trades,
                                 )
+                                if len(all_trades) > trades_before:
+                                    t = all_trades[-1]
+                                    print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f})")
+                                    sys.stdout.flush()
                         elif action == "HOLD":
                             pass  # Keep existing position
 
@@ -223,19 +252,30 @@ class AgentBacktestEngine:
             if dd > max_drawdown:
                 max_drawdown = dd
 
-            if day_idx % 5 == 0 or day == trading_days[-1]:
+            if day_idx % 5 == 0 or day == trading_days[-1] or is_decision_day:
+                pos_str = ", ".join(
+                    f"{t}:{p.side[0]}{p.shares:.0f}"
+                    for t, p in portfolio.positions.items()
+                ) or "none"
                 logger.info(
                     "[agent_backtest] %s: Equity=$%,.2f  Cash=$%,.2f  Positions=%d",
                     day, equity, portfolio.cash, len(portfolio.positions),
                 )
+                dd_pct = max_drawdown * 100
+                print(f"  [{_ts()}] 📈 {day}: Equity=${equity:,.0f} | Cash=${portfolio.cash:,.0f} | DD={dd_pct:.1f}% | Pos=[{pos_str}]")
+                sys.stdout.flush()
 
         # Close all positions at end
         final_day = trading_days[-1]
         close_prices = self._get_close_prices(session, tickers, final_day)
+        print(f"\n[{_ts()}] 🔒 Closing all positions at {final_day}...")
+        sys.stdout.flush()
         for ticker in list(portfolio.positions.keys()):
             price = close_prices.get(ticker, 0)
             if price > 0:
                 self._close_position(portfolio, ticker, price, final_day, all_trades, "backtest_end")
+                print(f"    📤 CLOSE {ticker} @ ${price:.2f}")
+                sys.stdout.flush()
 
         final_equity = portfolio.cash
         total_return = (final_equity / initial_capital - 1) * 100
@@ -244,6 +284,15 @@ class AgentBacktestEngine:
         trade_pnls = self._compute_trade_pnls(all_trades)
         winning = sum(1 for pnl in trade_pnls if pnl > 0)
         losing = sum(1 for pnl in trade_pnls if pnl < 0)
+
+        print(f"\n{'='*60}")
+        print(f"[{_ts()}] ✅ BACKTEST COMPLETE")
+        print(f"  Return: {total_return:+.2f}%  (${initial_capital:,.0f} → ${final_equity:,.0f})")
+        print(f"  Max Drawdown: {max_drawdown * 100:.2f}%")
+        print(f"  Trades: {len(all_trades)} ({winning}W / {losing}L)")
+        print(f"  Decisions: {len(all_decisions)}")
+        print(f"{'='*60}\n")
+        sys.stdout.flush()
 
         return AgentBacktestResult(
             start_date=start, end_date=end, tickers=tickers,
