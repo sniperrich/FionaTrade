@@ -43,12 +43,12 @@ Based on all inputs above, make the final decision.
 
 Return a JSON object with these exact fields:
 {{
-  "action": "<BUY|SHORT|HOLD>",
+  "action": "<BUY|SHORT|SELL|HOLD>",
   "position_pct": <float 0.0-0.20, percentage of portfolio to allocate>,
   "conviction": "<HIGH|MEDIUM|LOW>",
   "supporting_agents": ["<agent1>", "<agent2>"],
   "dissenting_agents": ["<agent1>"],
-  "entry_rationale": "<2-3 sentences explaining why to enter or stay out>",
+  "entry_rationale": "<2-3 sentences explaining why to enter, exit, or stay out>",
   "exit_criteria": "<1-2 sentences on when to exit this position>",
   "reasoning": "<comprehensive 3-4 sentence summary>"
 }}
@@ -56,11 +56,12 @@ Return a JSON object with these exact fields:
 IMPORTANT RULES:
 1. If risk_manager approved=false, you MUST set action=HOLD and position_pct=0.0
 2. position_pct must not exceed max_position_pct from risk manager
-3. If risk_manager approved=true, you should ACT (BUY or SHORT) unless all specialists say HOLD
-4. Weight news and fundamentals highest for direction; technicals for timing; macro for context
-5. conviction=HIGH requires at least 2 agents aligned; MEDIUM requires 1 strong signal; LOW for mixed
-6. When in doubt between HOLD and a directional trade, prefer the trade if risk is approved
-7. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
+3. If risk_manager approved=true, you should ACT (BUY, SHORT, or SELL) unless all specialists say HOLD
+4. Use SELL to close an existing long position when outlook has turned negative or neutral
+5. Weight news and fundamentals highest for direction; technicals for timing; macro for context
+6. conviction=HIGH requires at least 2 agents aligned; MEDIUM requires 1 strong signal; LOW for mixed
+7. When in doubt between HOLD and a directional trade, prefer the trade if risk is approved
+8. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
 """
 
 
@@ -131,13 +132,13 @@ class PortfolioManagerAgent(BaseAgent):
 
             # Safety checks: enforce risk manager constraints
             action = parsed.get("action", "HOLD").upper()
-            if action not in ("BUY", "SHORT", "HOLD"):
+            if action not in ("BUY", "SHORT", "SELL", "HOLD"):
                 action = "HOLD"
             if not risk_approved:
                 action = "HOLD"
 
             position_pct = min(float(parsed.get("position_pct", 0.0)), max_pct)
-            if action == "HOLD":
+            if action in ("HOLD", "SELL"):
                 position_pct = 0.0
 
             return AgentSignal(

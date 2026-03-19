@@ -10,11 +10,16 @@ from app.db.models import Bar1m
 
 
 def _add_bars(session, ticker: str, prices: list[float], volumes: list[float] | None = None) -> None:
-    """Helper: insert Bar1m rows for a ticker with recent timestamps."""
+    """Helper: insert Bar1m rows for a ticker with timestamps during US regular trading hours."""
     if volumes is None:
         volumes = [1_000_000] * len(prices)
-    # Use recent timestamps so they fall within the lookback window
-    base = datetime.datetime.utcnow() - datetime.timedelta(minutes=len(prices) + 30)
+    # Use a recent weekday at 10:00 AM ET (15:00 UTC) to ensure bars fall within RTH
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Start from a few days ago at 15:00 UTC (10:00 AM ET) — safely within regular hours
+    base = now.replace(hour=15, minute=0, second=0, microsecond=0) - datetime.timedelta(days=2)
+    # If that's a weekend, go back to Friday
+    while base.weekday() >= 5:
+        base -= datetime.timedelta(days=1)
     for i, (close, vol) in enumerate(zip(prices, volumes)):
         ts = base + datetime.timedelta(minutes=i)
         bar = Bar1m(

@@ -43,6 +43,7 @@ class BTPosition:
     avg_entry: float
     side: str  # LONG or SHORT
     entry_date: date
+    stop_loss_pct: float = 0.03
 
 
 @dataclass
@@ -125,6 +126,8 @@ class AgentBacktestEngine:
             initial_capital: float (default: 100000)
             decision_frequency: int trading days between decisions (default: 3)
             max_position_pct: float max per-ticker position (default: 0.15)
+            slippage_pct: float slippage per trade (default: 0.0005 = 0.05%)
+            stop_loss_pct: float default stop-loss (default: 0.03 = 3%)
         """
         p = params or {}
         tickers = p.get("tickers", ["AAPL", "NVDA", "JPM", "XOM", "AMZN"])
@@ -133,6 +136,8 @@ class AgentBacktestEngine:
         initial_capital = float(p.get("initial_capital", 100_000))
         freq = int(p.get("decision_frequency", 3))
         max_pos_pct = float(p.get("max_position_pct", 0.15))
+        slippage_pct = float(p.get("slippage_pct", 0.0005))
+        stop_loss_pct = float(p.get("stop_loss_pct", 0.03))
 
         # Build list of trading days from bar data
         trading_days = self._get_trading_days(session, start, end, tickers[0])
@@ -209,6 +214,7 @@ class AgentBacktestEngine:
                         if next_day and action in ("BUY", "SHORT"):
                             open_price = self._get_price(session, ticker, next_day, "open")
                             if open_price and open_price > 0:
+                                exec_price = open_price * (1 + slippage_pct) if action == "BUY" else open_price * (1 - slippage_pct)
                                 target_pct = min(pos_pct, max_pos_pct)
                                 equity = portfolio.equity(
                                     self._get_close_prices(session, tickers, day)
@@ -216,12 +222,22 @@ class AgentBacktestEngine:
                                 trades_before = len(all_trades)
                                 self._execute_decision(
                                     portfolio, ticker, action, target_pct,
-                                    equity, open_price, next_day, all_trades,
+                                    equity, exec_price, next_day, all_trades,
+                                    stop_loss_pct=stop_loss_pct,
                                 )
                                 if len(all_trades) > trades_before:
                                     t = all_trades[-1]
                                     print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f})")
                                     sys.stdout.flush()
+                        elif action == "SELL" and ticker in portfolio.positions:
+                            # Explicit close position at next day's open
+                            open_price = self._get_price(session, ticker, next_day, "open") if next_day else None
+                            if open_price and open_price > 0:
+                                exec_price = open_price * (1 - slippage_pct)
+                                self._close_position(portfolio, ticker, exec_price, next_day, all_trades, "agent_sell")
+                                t = all_trades[-1]
+                                print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f})")
+                                sys.stdout.flush()
                         elif action == "HOLD":
                             pass  # Keep existing position
 
@@ -233,8 +249,28 @@ class AgentBacktestEngine:
                         logger.warning("[agent_backtest] %s", err)
                         errors.append(err)
 
-            # Mark-to-market at close
+            # ── Stop-loss check on every day ──
             close_prices = self._get_close_prices(session, tickers, day)
+            for ticker_sl in list(portfolio.positions.keys()):
+                pos = portfolio.positions.get(ticker_sl)
+                if not pos:
+                    continue
+                sl_pct = getattr(pos, "stop_loss_pct", stop_loss_pct)
+                price = close_prices.get(ticker_sl, 0)
+                if price <= 0:
+                    continue
+                if pos.side == "long" and price <= pos.avg_entry * (1 - sl_pct):
+                    exec_price = price * (1 - slippage_pct)
+                    print(f"  [{_ts()}] 🛑 STOP-LOSS {ticker_sl}: price ${price:.2f} < entry ${pos.avg_entry:.2f} - {sl_pct:.1%}")
+                    self._close_position(portfolio, ticker_sl, exec_price, day, all_trades, "stop_loss")
+                    sys.stdout.flush()
+                elif pos.side == "short" and price >= pos.avg_entry * (1 + sl_pct):
+                    exec_price = price * (1 + slippage_pct)
+                    print(f"  [{_ts()}] 🛑 STOP-LOSS {ticker_sl}: price ${price:.2f} > entry ${pos.avg_entry:.2f} + {sl_pct:.1%}")
+                    self._close_position(portfolio, ticker_sl, exec_price, day, all_trades, "stop_loss")
+                    sys.stdout.flush()
+
+            # Mark-to-market at close
             equity = portfolio.equity(close_prices)
             equity_curve.append({
                 "date": str(day),
@@ -284,12 +320,16 @@ class AgentBacktestEngine:
         trade_pnls = self._compute_trade_pnls(all_trades)
         winning = sum(1 for pnl in trade_pnls if pnl > 0)
         losing = sum(1 for pnl in trade_pnls if pnl < 0)
+        stop_loss_count = sum(1 for t in all_trades if t.reason == "stop_loss")
 
         print(f"\n{'='*60}")
         print(f"[{_ts()}] ✅ BACKTEST COMPLETE")
         print(f"  Return: {total_return:+.2f}%  (${initial_capital:,.0f} → ${final_equity:,.0f})")
         print(f"  Max Drawdown: {max_drawdown * 100:.2f}%")
         print(f"  Trades: {len(all_trades)} ({winning}W / {losing}L)")
+        if stop_loss_count:
+            print(f"  Stop-losses triggered: {stop_loss_count}")
+        print(f"  Slippage: {slippage_pct:.2%} per trade")
         print(f"  Decisions: {len(all_decisions)}")
         print(f"{'='*60}\n")
         sys.stdout.flush()
@@ -338,26 +378,33 @@ class AgentBacktestEngine:
     def _get_price(
         self, session: Session, ticker: str, day: date, which: str = "open",
     ) -> float | None:
-        """Get open or close price for a ticker on a specific day."""
+        """Get open or close price during regular trading hours for a ticker on a specific day.
+
+        Uses 14:30-21:00 UTC filter to match 9:30-16:00 ET regular session.
+        """
+        # Regular trading hours in UTC: 14:30-21:00
+        rth_start = datetime.combine(day, dt_time(14, 30), tzinfo=timezone.utc)
+        rth_end = datetime.combine(day, dt_time(21, 0), tzinfo=timezone.utc)
+
         if which == "open":
-            # First bar of the day
             bar = session.execute(
                 select(Bar1m)
                 .where(
                     Bar1m.ticker == ticker.upper(),
-                    func.date(Bar1m.ts) == day,
+                    Bar1m.ts >= rth_start,
+                    Bar1m.ts < rth_end,
                 )
                 .order_by(Bar1m.ts.asc())
                 .limit(1)
             ).scalars().first()
             return float(bar.open) if bar else None
         else:
-            # Last bar of the day
             bar = session.execute(
                 select(Bar1m)
                 .where(
                     Bar1m.ticker == ticker.upper(),
-                    func.date(Bar1m.ts) == day,
+                    Bar1m.ts >= rth_start,
+                    Bar1m.ts < rth_end,
                 )
                 .order_by(Bar1m.ts.desc())
                 .limit(1)
@@ -384,6 +431,7 @@ class AgentBacktestEngine:
         price: float,
         exec_date: date,
         trades: list[BTTrade],
+        stop_loss_pct: float = 0.03,
     ) -> None:
         """Execute a BUY or SHORT decision, adjusting position to target."""
         target_notional = equity * target_pct
@@ -414,6 +462,7 @@ class AgentBacktestEngine:
                         portfolio.positions[ticker] = BTPosition(
                             ticker=ticker, shares=shares_to_buy,
                             avg_entry=price, side="LONG", entry_date=exec_date,
+                            stop_loss_pct=stop_loss_pct,
                         )
                     trades.append(BTTrade(
                         date=exec_date, ticker=ticker, side="BUY",
@@ -437,6 +486,7 @@ class AgentBacktestEngine:
                     portfolio.positions[ticker] = BTPosition(
                         ticker=ticker, shares=shares_to_short,
                         avg_entry=price, side="SHORT", entry_date=exec_date,
+                        stop_loss_pct=stop_loss_pct,
                     )
                 trades.append(BTTrade(
                     date=exec_date, ticker=ticker, side="SHORT",

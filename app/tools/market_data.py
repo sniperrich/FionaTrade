@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import ta
@@ -9,21 +10,29 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Bar1m
 
+_NY = ZoneInfo("America/New_York")
+
 
 def get_bars(
     session: Session,
     ticker: str,
     lookback_bars: int = 390,
     end_time: datetime | None = None,
+    regular_hours_only: bool = True,
 ) -> pd.DataFrame:
     """Load 1-minute bars from DB into a pandas DataFrame.
 
+    Args:
+        regular_hours_only: If True, filter to regular trading hours
+            (9:30-16:00 ET) to exclude pre/after-market noise.
     Returns DataFrame with columns: ts, open, high, low, close, volume.
     Sorted ascending by ts.
     """
     end = end_time or datetime.now(timezone.utc)
     # Use calendar days (not minutes) to ensure we bridge weekends/holidays
-    est_trading_days = max(1, lookback_bars // 390)
+    # Fetch extra bars to compensate for RTH filtering (~62% of bars are RTH)
+    fetch_bars = int(lookback_bars * 1.8) if regular_hours_only else lookback_bars
+    est_trading_days = max(1, fetch_bars // 390)
     buffer_days = max(3, est_trading_days * 2 + 2)
     start = end - timedelta(days=buffer_days)
 
@@ -35,38 +44,54 @@ def get_bars(
             Bar1m.ts <= end,
         )
         .order_by(Bar1m.ts.asc())
-        .limit(lookback_bars + 100)
+        .limit(fetch_bars + 200)
     ).scalars().all()
 
     # Fallback: if no bars in recent window, fetch the most recent N bars available.
-    # This handles cases where bar data is stale (e.g. weekends, ingestion gaps).
     if not rows and end_time is None:
         rows = session.execute(
             select(Bar1m)
             .where(Bar1m.ticker == ticker.upper())
             .order_by(Bar1m.ts.desc())
-            .limit(lookback_bars + 100)
+            .limit(fetch_bars + 200)
         ).scalars().all()
         rows = list(reversed(rows))
 
     if not rows:
         return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
 
-    df = pd.DataFrame(
-        [
-            {
-                "ts": r.ts,
-                "open": r.open,
-                "high": r.high,
-                "low": r.low,
-                "close": r.close,
-                "volume": r.volume,
-            }
-            for r in rows
+    data = [
+        {
+            "ts": r.ts,
+            "open": r.open,
+            "high": r.high,
+            "low": r.low,
+            "close": r.close,
+            "volume": r.volume,
+        }
+        for r in rows
+    ]
+
+    if regular_hours_only:
+        # Filter to 9:30-16:00 ET (regular trading hours)
+        data = [
+            d for d in data
+            if _is_regular_hours(d["ts"])
         ]
-    )
+
+    df = pd.DataFrame(data) if data else pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
     df = df.tail(lookback_bars).reset_index(drop=True)
     return df
+
+
+def _is_regular_hours(ts: datetime) -> bool:
+    """Check if a bar timestamp falls within regular US market hours (9:30-16:00 ET)."""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    et = ts.astimezone(_NY)
+    t = et.time()
+    from datetime import time as dt_time
+    return dt_time(9, 30) <= t < dt_time(16, 0)
 
 
 def compute_indicators(df: pd.DataFrame) -> dict:
@@ -276,32 +301,5 @@ def build_market_context_text(
                 lines.append(f"    {d['date']}: ${d['close']} ({d['change_pct']:+.2f}%)")
         else:
             lines.append(f"\n=== {ticker} MULTI-DAY PERFORMANCE ===\n  No multi-day data available.")
-
-    return "\n".join(lines)
-    """Build a compact text block of technical indicators for LLM prompts."""
-    data = get_technical_summary(session, ticker, lookback_bars)
-
-    if "error" in data:
-        return f"=== TECHNICALS FOR {ticker} ===\n  Error: {data['error']}"
-
-    lines = [f"=== TECHNICALS FOR {ticker} ({data.get('bar_count', '?')} bars) ==="]
-    lines.append(f"  Current Price: ${data.get('current_price', 'N/A')}")
-    lines.append(f"  Session Change: {data.get('price_change_pct', 0):+.2f}%")
-
-    if "rsi" in data:
-        lines.append(f"  RSI(14): {data['rsi']} [{data.get('rsi_signal', '')}]")
-    if "macd_histogram" in data:
-        lines.append(
-            f"  MACD Histogram: {data['macd_histogram']:+.4f} [{data.get('macd_signal', '')}]"
-        )
-    if "bb_pct" in data:
-        lines.append(f"  BB %B: {data['bb_pct']:.3f} [{data.get('bb_signal', '')}]")
-    if "ema_trend" in data:
-        lines.append(
-            f"  EMA20/50 Trend: {data.get('ema_trend', 'N/A')} "
-            f"(price vs EMA20: {data.get('price_vs_ema20_pct', 0):+.2f}%)"
-        )
-    if "volume_ratio" in data:
-        lines.append(f"  Volume vs 20-bar avg: {data['volume_ratio']:.2f}x")
 
     return "\n".join(lines)
