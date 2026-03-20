@@ -20,13 +20,10 @@ _TICKER_MAX_CONSECUTIVE_LOSSES = 2  # block ticker after N consecutive losses
 
 _SYSTEM_PROMPT = """\
 Task: Risk management assessment for equity trading.
-You are a STRICT risk manager who protects capital. You approve trades only when
-the risk/reward is clearly favorable. You actively BLOCK trades when:
-- Portfolio is over-concentrated in one direction
-- The ticker has been losing money recently
-- Agent consensus is weak (mixed signals)
-- Daily losses are accumulating
-
+You are a risk manager who sizes positions appropriately. When rule-based checks pass
+and multiple agents agree on a direction, you APPROVE with proper sizing. You only
+REJECT when there are concrete portfolio-level dangers (excessive concentration,
+large drawdown, or very conflicting signals).
 Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
@@ -39,13 +36,11 @@ AGENT SIGNALS:
 PORTFOLIO CONTEXT:
 {portfolio_context}
 
-RULE-BASED PRE-CHECKS:
+RULE-BASED PRE-CHECKS (already passed):
 {rule_checks}
 
-Based on the signals and risk context, determine:
-1. Whether the trade should proceed — be STRICT, not permissive
-2. The recommended position size as a % of portfolio
-3. Any risk mitigations required
+The rule-based system has already validated consensus, concentration, and loss limits.
+Your job is to determine appropriate POSITION SIZING, not whether to trade.
 
 Return a JSON object with these exact fields:
 {{
@@ -58,10 +53,9 @@ Return a JSON object with these exact fields:
 }}
 
 IMPORTANT:
-- REJECT if fewer than 2 agents agree on direction
-- REJECT if the ticker has lost money on consecutive recent trades
-- REJECT if portfolio already has {max_same_dir} positions in the same direction
-- If approved, set max_position_pct between 0.03-0.12 (conservative sizing)
+- Default to approved=true since rule checks already passed
+- Set position size: 5-8% for 2 agents agreeing, 8-12% for 3+ agents agreeing
+- Only set approved=false if you see a SPECIFIC danger not caught by rule checks
 - If approved=false, set max_position_pct to 0
 """
 
@@ -195,7 +189,26 @@ class RiskManagerAgent(BaseAgent):
                     },
                 )
 
-            # ── LLM risk review ────────────────────────────────────────────
+            # ── Strong consensus auto-approve (skip LLM for speed) ──
+            if dominant_count >= 3:
+                auto_pct = 0.10 if dominant_count >= 3 else 0.06
+                return AgentSignal(
+                    agent_name=self.name,
+                    signal="BUY",
+                    confidence=80,
+                    reasoning=f"Auto-approved: {dominant_count} agents agree on {dominant_direction}. "
+                              f"Checks: {'; '.join(rule_checks)}",
+                    metadata={
+                        "approved": True,
+                        "risk_level": "LOW",
+                        "max_position_pct": auto_pct,
+                        "stop_loss_pct": 0.05,
+                        "concerns": [],
+                        "hard_block": False,
+                    },
+                )
+
+            # ── LLM risk review (for borderline 2-agent consensus) ──
             signals_summary = "\n".join(
                 f"- {name}: signal={sig.get('signal', 'N/A')} "
                 f"confidence={sig.get('confidence', 0)} "
@@ -217,7 +230,6 @@ class RiskManagerAgent(BaseAgent):
                 signals_summary=signals_summary,
                 portfolio_context=portfolio_context,
                 rule_checks="\n".join(f"- {c}" for c in rule_checks),
-                max_same_dir=_MAX_SAME_DIRECTION,
             )
 
             raw = self._call_llm(_SYSTEM_PROMPT, user_prompt, response_format="json")

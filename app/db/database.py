@@ -17,6 +17,8 @@ if settings.database_url.startswith("sqlite"):
         "check_same_thread": False,
         "timeout": settings.sqlite_busy_timeout_seconds,
     }
+    engine_kwargs["pool_size"] = 10
+    engine_kwargs["max_overflow"] = 20
 engine = create_engine(settings.database_url, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 

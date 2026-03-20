@@ -260,9 +260,9 @@ class AgentBacktestEngine:
                         "reasoning": reasoning, "signals": signals, "state": state,
                     }
 
-                # Run all tickers in parallel
+                # Run all tickers in parallel (limit concurrency to avoid DB pool exhaustion)
                 ticker_results = []
-                with ThreadPoolExecutor(max_workers=min(len(tickers), 5)) as pool:
+                with ThreadPoolExecutor(max_workers=min(len(tickers), 3)) as pool:
                     futures = {pool.submit(_run_ticker_agents, t): t for t in tickers}
                     for future in as_completed(futures):
                         tk = futures[future]

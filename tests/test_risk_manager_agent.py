@@ -177,9 +177,11 @@ class TestRiskManagerLLMApproval:
 
     def test_llm_rejects_trade(self, settings, session):
         agent = _make_agent(settings)
+        # Use exactly 2-agent consensus so it goes to LLM (not auto-approved)
+        two_signals = _build_signals(macro="BUY", news="BUY", fund="HOLD", tech="HOLD")
         llm_resp = '{"approved":false,"max_position_pct":0.0,"stop_loss_pct":0.05,"risk_level":"HIGH","concerns":["high VIX"],"reasoning":"Too risky"}'
         with patch.object(agent, "_call_llm", return_value=llm_resp):
-            result = agent.analyze(session, "TSLA", {"agent_signals": _build_signals()})
+            result = agent.analyze(session, "TSLA", {"agent_signals": two_signals})
         assert result.metadata.get("approved") is False
         assert result.signal == "HOLD"
 
