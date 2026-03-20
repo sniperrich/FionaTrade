@@ -138,7 +138,7 @@ class AgentBacktestEngine:
             decision_frequency: int trading days between decisions (default: 3)
             max_position_pct: float max per-ticker position (default: 0.15)
             slippage_pct: float slippage per trade (default: 0.0005 = 0.05%)
-            stop_loss_pct: float default stop-loss (default: 0.05 = 5%)
+            stop_loss_pct: float default stop-loss (default: 0.07 = 7%)
         """
         p = params or {}
         tickers = p.get("tickers", ["AAPL", "NVDA", "JPM", "XOM", "AMZN"])
@@ -148,7 +148,7 @@ class AgentBacktestEngine:
         freq = int(p.get("decision_frequency", 3))
         max_pos_pct = float(p.get("max_position_pct", 0.15))
         slippage_pct = float(p.get("slippage_pct", 0.0005))
-        stop_loss_pct = float(p.get("stop_loss_pct", 0.05))
+        stop_loss_pct = float(p.get("stop_loss_pct", 0.07))
 
         # Build list of trading days from bar data
         trading_days = self._get_trading_days(session, start, end, tickers[0])
@@ -189,7 +189,7 @@ class AgentBacktestEngine:
         # Direction inertia: track when each ticker last changed direction
         # Key: ticker, Value: decision_day index when position was opened/reversed
         ticker_entry_decision_idx: dict[str, int] = {}
-        _INERTIA_CYCLES = 1  # must hold at least 1 decision cycle before reversing
+        _INERTIA_CYCLES = 2  # must hold at least 2 decision cycles before reversing
 
         peak_equity = initial_capital
         max_drawdown = 0.0
@@ -355,8 +355,8 @@ class AgentBacktestEngine:
                                     print(f"    ✅ HOLD WINNER: {ticker} {pos.side} unrealized P&L ${unrealized_pnl:+,.0f}")
                                     sys.stdout.flush()
                                 else:
-                                    # Losing — reduce 50%
-                                    reduce_shares = pos.shares * 0.5
+                                    # Losing — reduce 30% (less aggressive to avoid over-cutting)
+                                    reduce_shares = pos.shares * 0.3
                                     if reduce_shares * open_price > 500:
                                         if pos.side == "LONG":
                                             exec_price = open_price * (1 - slippage_pct)

@@ -14,7 +14,7 @@ logger = get_app_logger()
 # Risk rule thresholds
 _MAX_POSITION_PCT = 0.20       # max 20% of portfolio in one ticker
 _MAX_DAILY_LOSS_PCT = 0.03     # halt trading if intraday loss > 3%
-_MIN_CONSENSUS_COUNT = 1       # at least 1 agent must give directional signal
+_MIN_CONSENSUS_COUNT = 2       # at least 2 agents must agree on direction
 _MAX_SAME_DIRECTION = 3        # max tickers in same direction (long or short)
 _TICKER_MAX_CONSECUTIVE_LOSSES = 2  # block ticker after N consecutive losses
 
@@ -130,10 +130,9 @@ class RiskManagerAgent(BaseAgent):
             dominant_direction = "BUY" if buy_count >= short_count else "SHORT"
             dominant_count = max(buy_count, short_count)
 
-            total_directional = buy_count + short_count
-            if total_directional < _MIN_CONSENSUS_COUNT:
+            if dominant_count < _MIN_CONSENSUS_COUNT:
                 block_reasons.append(
-                    f"No directional signal: {buy_count} BUY, {short_count} SHORT (need {_MIN_CONSENSUS_COUNT}+)"
+                    f"Weak consensus: {buy_count} BUY, {short_count} SHORT (need {_MIN_CONSENSUS_COUNT}+ aligned)"
                 )
                 hard_block = True
             else:
@@ -190,20 +189,21 @@ class RiskManagerAgent(BaseAgent):
                     },
                 )
 
-            # ── Strong consensus auto-approve (skip LLM for speed) ──
-            if dominant_count >= 2:
-                auto_pct = 0.10 if dominant_count >= 3 else 0.07
+            # ── Tier 2: Borderline (exactly 2 aligned) → LLM review ──
+            # ── Tier 3: Strong consensus (3+ aligned) → auto-approve ──
+            if dominant_count >= 3:
+                auto_pct = 0.10
                 return AgentSignal(
                     agent_name=self.name,
                     signal=dominant_direction,
-                    confidence=80,
+                    confidence=85,
                     reasoning=f"Auto-approved: {dominant_count} agents agree on {dominant_direction}. "
                               f"Checks: {'; '.join(rule_checks)}",
                     metadata={
                         "approved": True,
                         "risk_level": "LOW",
                         "max_position_pct": auto_pct,
-                        "stop_loss_pct": 0.05,
+                        "stop_loss_pct": 0.07,
                         "concerns": [],
                         "hard_block": False,
                     },
@@ -240,12 +240,12 @@ class RiskManagerAgent(BaseAgent):
                 approved = dominant_count >= _MIN_CONSENSUS_COUNT
                 return AgentSignal(
                     agent_name=self.name,
-                    signal="HOLD" if not approved else "BUY",
+                    signal="HOLD" if not approved else dominant_direction,
                     confidence=40,
                     reasoning="LLM unavailable; rule-based fallback applied",
                     metadata={
                         "approved": approved,
-                        "max_position_pct": 0.08 if approved else 0.0,
+                        "max_position_pct": 0.07 if approved else 0.0,
                         "hard_block": False,
                     },
                 )
