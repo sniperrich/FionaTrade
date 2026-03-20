@@ -106,25 +106,32 @@ def get_ticker_news_summary(
     session: Session, ticker: str, lookback_hours: int = 72, limit: int = 15,
     as_of: datetime | None = None,
 ) -> list[dict]:
-    """Return recent RawItems mentioning a ticker directly (from Finnhub or flagged)."""
+    """Return recent RawItems mentioning a ticker directly.
+
+    Searches title, body, AND metadata_json (for SEC/Finnhub ticker tags).
+    Includes all source tiers but sorts by tier (higher quality first).
+    """
     ref_time = as_of or datetime.now(timezone.utc)
     since = ref_time - timedelta(hours=lookback_hours)
     ticker_upper = ticker.upper()
 
-    # Use SQL-level text search on title + body for the ticker symbol
     ticker_pattern = f"%{ticker_upper}%"
+    # Also search metadata_json for ticker field (SEC filings, Finnhub)
+    metadata_pattern = f'%"ticker": "{ticker_upper}"%'
+
     stmt = select(RawItem).where(
         RawItem.published_at >= since,
-        RawItem.source_tier <= 2,
         sa.or_(
             RawItem.title.ilike(ticker_pattern),
             RawItem.body.ilike(ticker_pattern),
+            RawItem.metadata_json.ilike(metadata_pattern),
         ),
     )
     if as_of:
         stmt = stmt.where(RawItem.published_at <= ref_time)
+    # Sort by source_tier first (better sources first), then recency
     rows = session.execute(
-        stmt.order_by(RawItem.published_at.desc()).limit(limit)
+        stmt.order_by(RawItem.source_tier.asc(), RawItem.published_at.desc()).limit(limit)
     ).scalars().all()
 
     results = []

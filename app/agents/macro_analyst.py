@@ -40,9 +40,9 @@ Guidelines:
 - SHORT: near-term headwinds — rising VIX, hawkish surprise, geopolitical shock, risk-off sentiment
 - HOLD: genuinely mixed short-term signals with no clear lean
 - A strong economy does NOT mean BUY if markets already priced it in or if sentiment is shifting
-- Rising rates, tariff threats, or geopolitical tension = SHORT even if economy is "fine"
-- VIX > 22 or rising = lean SHORT; VIX < 15 and falling = lean BUY
-- If recent price action is DOWN despite good fundamentals, that's bearish short-term (SHORT)
+- Rising rates, tariff threats, or geopolitical tension = lean SHORT, but only if confirmed by other indicators
+- VIX < 20 = NEUTRAL (normal market conditions, do NOT treat as bearish); VIX 20-25 = lean SHORT; VIX > 25 = strong SHORT; VIX < 12 = lean BUY
+- If recent price action is DOWN despite good fundamentals, consider HOLD rather than reflexively going SHORT
 - confidence: 60-100 = clear, 35-60 = moderate lean, 0-35 = weak lean
 """
 

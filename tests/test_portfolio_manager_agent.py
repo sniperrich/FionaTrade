@@ -95,9 +95,9 @@ class TestPortfolioManagerWeightedConfidence:
             "fundamentals": {"signal": "BUY", "confidence": 70},
             "macro_analyst": {"signal": "BUY", "confidence": 50},
         }
-        # 80*0.35 + 60*0.25 + 70*0.20 + 50*0.20 = 28+15+14+10 = 67.0
+        # 80*0.25 + 60*0.30 + 70*0.30 + 50*0.15 = 20+18+21+7.5 = 66.5
         conf = agent._compute_weighted_confidence(signals)
-        assert abs(conf - 67.0) < 0.1
+        assert abs(conf - 66.5) < 0.1
 
     def test_no_signals_returns_fifty(self, settings, session):
         agent = _make_agent(settings)

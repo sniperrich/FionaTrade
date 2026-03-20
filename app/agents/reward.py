@@ -294,14 +294,14 @@ def compute_dynamic_weights(
 ) -> dict[str, float]:
     """Compute dynamic agent weights based on recent performance.
 
-    Base weights: technicals=35%, news=25%, fundamentals=20%, macro=20%
+    Base weights: news=30%, fundamentals=30%, technicals=25%, macro=15%.
     Adjusted ±10% based on recent scores. Weights always sum to 1.0.
     """
     base_weights = {
-        "technicals": 0.35,
-        "news_sentiment": 0.25,
-        "fundamentals": 0.20,
-        "macro_analyst": 0.20,
+        "technicals": 0.25,
+        "news_sentiment": 0.30,
+        "fundamentals": 0.30,
+        "macro_analyst": 0.15,
     }
 
     adjustments = {}

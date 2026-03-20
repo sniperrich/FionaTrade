@@ -135,7 +135,7 @@ class AgentBacktestEngine:
             start_date: "YYYY-MM-DD" (default: "2026-02-02")
             end_date: "YYYY-MM-DD" (default: "2026-02-27")
             initial_capital: float (default: 100000)
-            decision_frequency: int trading days between decisions (default: 3)
+            decision_frequency: int trading days between decisions (default: 5)
             max_position_pct: float max per-ticker position (default: 0.15)
             slippage_pct: float slippage per trade (default: 0.0005 = 0.05%)
             stop_loss_pct: float default stop-loss (default: 0.05 = 5%)
@@ -145,7 +145,7 @@ class AgentBacktestEngine:
         start = date.fromisoformat(p.get("start_date", "2026-02-02"))
         end = date.fromisoformat(p.get("end_date", "2026-02-27"))
         initial_capital = float(p.get("initial_capital", 100_000))
-        freq = int(p.get("decision_frequency", 3))
+        freq = int(p.get("decision_frequency", 5))
         max_pos_pct = float(p.get("max_position_pct", 0.15))
         slippage_pct = float(p.get("slippage_pct", 0.0005))
         stop_loss_pct = float(p.get("stop_loss_pct", 0.05))
@@ -185,6 +185,11 @@ class AgentBacktestEngine:
         # Per-ticker consecutive loss tracking
         ticker_loss_streak: dict[str, int] = {t: 0 for t in tickers}
         ticker_last_side: dict[str, str | None] = {}
+
+        # Direction inertia: track when each ticker last changed direction
+        # Key: ticker, Value: decision_day index when position was opened/reversed
+        ticker_entry_decision_idx: dict[str, int] = {}
+        _INERTIA_CYCLES = 2  # must hold at least 2 decision cycles before reversing
 
         peak_equity = initial_capital
         max_drawdown = 0.0
@@ -289,6 +294,18 @@ class AgentBacktestEngine:
                     next_day = self._next_trading_day(trading_days, day)
                     trades_before = len(all_trades)
 
+                    # Direction inertia: block reversals within _INERTIA_CYCLES
+                    pos = portfolio.positions.get(ticker)
+                    if pos and action in ("BUY", "SHORT"):
+                        is_reversal = (pos.side == "LONG" and action == "SHORT") or (pos.side == "SHORT" and action == "BUY")
+                        if is_reversal:
+                            entry_idx = ticker_entry_decision_idx.get(ticker, 0)
+                            held_cycles = decision_idx - entry_idx
+                            if held_cycles < _INERTIA_CYCLES:
+                                print(f"    🔒 INERTIA: {ticker} held {held_cycles}/{_INERTIA_CYCLES} cycles, blocking {pos.side}→{action}")
+                                sys.stdout.flush()
+                                action = "HOLD"  # override to HOLD
+
                     if next_day and action in ("BUY", "SHORT"):
                         open_price = self._get_price(session, ticker, next_day, "open")
                         if open_price and open_price > 0:
@@ -307,6 +324,7 @@ class AgentBacktestEngine:
                                 print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f})")
                                 sys.stdout.flush()
                                 ticker_last_side[ticker] = action
+                                ticker_entry_decision_idx[ticker] = decision_idx
                     elif action == "SELL" and ticker in portfolio.positions:
                         open_price = self._get_price(session, ticker, next_day, "open") if next_day else None
                         if open_price and open_price > 0:
@@ -326,36 +344,48 @@ class AgentBacktestEngine:
                         if pos.shares > 0 and next_day:
                             open_price = self._get_price(session, ticker, next_day, "open")
                             if open_price and open_price > 0:
-                                reduce_shares = pos.shares * 0.5
-                                if reduce_shares * open_price > 500:
-                                    if pos.side == "LONG":
-                                        exec_price = open_price * (1 - slippage_pct)
-                                        proceeds = reduce_shares * exec_price
-                                        portfolio.cash += proceeds
-                                        pos.shares -= reduce_shares
-                                        if pos.shares < 0.01:
-                                            portfolio.positions.pop(ticker)
-                                        all_trades.append(BTTrade(
-                                            date=next_day, ticker=ticker, side="SELL",
-                                            shares=round(reduce_shares, 4), price=exec_price,
-                                            notional=round(proceeds, 2), reason="hold_reduce_50pct",
-                                        ))
-                                        print(f"    📉 REDUCE: SELL {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (HOLD→reduce)")
-                                        sys.stdout.flush()
-                                    elif pos.side == "SHORT":
-                                        exec_price = open_price * (1 + slippage_pct)
-                                        cost = reduce_shares * exec_price
-                                        portfolio.cash -= cost
-                                        pos.shares -= reduce_shares
-                                        if pos.shares < 0.01:
-                                            portfolio.positions.pop(ticker)
-                                        all_trades.append(BTTrade(
-                                            date=next_day, ticker=ticker, side="COVER",
-                                            shares=round(reduce_shares, 4), price=exec_price,
-                                            notional=round(cost, 2), reason="hold_reduce_50pct",
-                                        ))
-                                        print(f"    📉 REDUCE: COVER {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (HOLD→reduce)")
-                                        sys.stdout.flush()
+                                # Check if position is profitable
+                                if pos.side == "LONG":
+                                    unrealized_pnl = (open_price - pos.avg_entry) * pos.shares
+                                else:
+                                    unrealized_pnl = (pos.avg_entry - open_price) * pos.shares
+
+                                if unrealized_pnl > 0:
+                                    # Profitable — keep position, don't reduce
+                                    print(f"    ✅ HOLD WINNER: {ticker} {pos.side} unrealized P&L ${unrealized_pnl:+,.0f}")
+                                    sys.stdout.flush()
+                                else:
+                                    # Losing — reduce 50%
+                                    reduce_shares = pos.shares * 0.5
+                                    if reduce_shares * open_price > 500:
+                                        if pos.side == "LONG":
+                                            exec_price = open_price * (1 - slippage_pct)
+                                            proceeds = reduce_shares * exec_price
+                                            portfolio.cash += proceeds
+                                            pos.shares -= reduce_shares
+                                            if pos.shares < 0.01:
+                                                portfolio.positions.pop(ticker)
+                                            all_trades.append(BTTrade(
+                                                date=next_day, ticker=ticker, side="SELL",
+                                                shares=round(reduce_shares, 4), price=exec_price,
+                                                notional=round(proceeds, 2), reason="hold_reduce_loser",
+                                            ))
+                                            print(f"    📉 REDUCE LOSER: SELL {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (P&L ${unrealized_pnl:+,.0f})")
+                                            sys.stdout.flush()
+                                        elif pos.side == "SHORT":
+                                            exec_price = open_price * (1 + slippage_pct)
+                                            cost = reduce_shares * exec_price
+                                            portfolio.cash -= cost
+                                            pos.shares -= reduce_shares
+                                            if pos.shares < 0.01:
+                                                portfolio.positions.pop(ticker)
+                                            all_trades.append(BTTrade(
+                                                date=next_day, ticker=ticker, side="COVER",
+                                                shares=round(reduce_shares, 4), price=exec_price,
+                                                notional=round(cost, 2), reason="hold_reduce_loser",
+                                            ))
+                                            print(f"    📉 REDUCE LOSER: COVER {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (P&L ${unrealized_pnl:+,.0f})")
+                                            sys.stdout.flush()
                     elif action == "HOLD":
                         pass
 

@@ -196,10 +196,10 @@ class PortfolioManagerAgent(BaseAgent):
         weights = (
             getattr(self, "_current_weights", None)
             or {
-                "technicals": 0.35,
-                "news_sentiment": 0.25,
-                "fundamentals": 0.20,
-                "macro_analyst": 0.20,
+                "technicals": 0.25,
+                "news_sentiment": 0.30,
+                "fundamentals": 0.30,
+                "macro_analyst": 0.15,
             }
         )
         total, weight_sum = 0.0, 0.0

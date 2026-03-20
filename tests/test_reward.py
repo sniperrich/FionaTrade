@@ -189,7 +189,7 @@ class TestComputeDynamicWeights:
     def test_no_history_returns_base_weights(self, session):
         weights = compute_dynamic_weights(session)
         assert abs(sum(weights.values()) - 1.0) < 0.01
-        assert weights["technicals"] >= 0.30  # base is 0.35
+        assert weights["technicals"] >= 0.20  # base is 0.25
 
     def test_good_agent_gets_higher_weight(self, session):
         # Give technicals consistently good scores
