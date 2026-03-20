@@ -113,6 +113,7 @@ class AgentBacktestResult:
     total_trades: int
     winning_trades: int
     losing_trades: int
+    stop_losses: int
     equity_curve: list[dict]
     trades: list[BTTrade]
     decisions: list[BTDecision]
@@ -189,7 +190,7 @@ class AgentBacktestEngine:
         # Direction inertia: track when each ticker last changed direction
         # Key: ticker, Value: decision_day index when position was opened/reversed
         ticker_entry_decision_idx: dict[str, int] = {}
-        _INERTIA_CYCLES = 2  # must hold at least 2 decision cycles before reversing
+        _INERTIA_CYCLES = 3  # must hold at least 3 decision cycles before reversing
 
         peak_equity = initial_capital
         max_drawdown = 0.0
@@ -257,6 +258,22 @@ class AgentBacktestEngine:
                         k: v.get("signal", "?") if isinstance(v, dict) else "?"
                         for k, v in state.get("agent_signals", {}).items()
                     }
+
+                    # When portfolio_manager times out (NO_SIGNAL), fall back to
+                    # risk_manager's approved direction if it exists
+                    if action == "NO_SIGNAL":
+                        risk_sig = state.get("agent_signals", {}).get("risk_manager", {})
+                        if isinstance(risk_sig, dict) and risk_sig.get("metadata", {}).get("approved"):
+                            rm_dir = risk_sig.get("signal", "HOLD")
+                            rm_pct = risk_sig.get("metadata", {}).get("max_position_pct", 0.07)
+                            if rm_dir in ("BUY", "SHORT"):
+                                action = rm_dir
+                                pos_pct = rm_pct
+                                reasoning = f"[fallback from risk_manager] {risk_sig.get('reasoning','')}"
+                        else:
+                            action = "HOLD"
+                            pos_pct = 0.0
+
                     signal_str = " ".join(f"{k[:4]}={v}" for k, v in signals.items())
                     _safe_print(f" → {action} {pos_pct:.0%} ({elapsed:.0f}s) [{signal_str}]")
 
@@ -344,48 +361,13 @@ class AgentBacktestEngine:
                         if pos.shares > 0 and next_day:
                             open_price = self._get_price(session, ticker, next_day, "open")
                             if open_price and open_price > 0:
-                                # Check if position is profitable
                                 if pos.side == "LONG":
                                     unrealized_pnl = (open_price - pos.avg_entry) * pos.shares
                                 else:
                                     unrealized_pnl = (pos.avg_entry - open_price) * pos.shares
-
-                                if unrealized_pnl > 0:
-                                    # Profitable — keep position, don't reduce
-                                    print(f"    ✅ HOLD WINNER: {ticker} {pos.side} unrealized P&L ${unrealized_pnl:+,.0f}")
-                                    sys.stdout.flush()
-                                else:
-                                    # Losing — reduce 30% (less aggressive to avoid over-cutting)
-                                    reduce_shares = pos.shares * 0.3
-                                    if reduce_shares * open_price > 500:
-                                        if pos.side == "LONG":
-                                            exec_price = open_price * (1 - slippage_pct)
-                                            proceeds = reduce_shares * exec_price
-                                            portfolio.cash += proceeds
-                                            pos.shares -= reduce_shares
-                                            if pos.shares < 0.01:
-                                                portfolio.positions.pop(ticker)
-                                            all_trades.append(BTTrade(
-                                                date=next_day, ticker=ticker, side="SELL",
-                                                shares=round(reduce_shares, 4), price=exec_price,
-                                                notional=round(proceeds, 2), reason="hold_reduce_loser",
-                                            ))
-                                            print(f"    📉 REDUCE LOSER: SELL {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (P&L ${unrealized_pnl:+,.0f})")
-                                            sys.stdout.flush()
-                                        elif pos.side == "SHORT":
-                                            exec_price = open_price * (1 + slippage_pct)
-                                            cost = reduce_shares * exec_price
-                                            portfolio.cash -= cost
-                                            pos.shares -= reduce_shares
-                                            if pos.shares < 0.01:
-                                                portfolio.positions.pop(ticker)
-                                            all_trades.append(BTTrade(
-                                                date=next_day, ticker=ticker, side="COVER",
-                                                shares=round(reduce_shares, 4), price=exec_price,
-                                                notional=round(cost, 2), reason="hold_reduce_loser",
-                                            ))
-                                            print(f"    📉 REDUCE LOSER: COVER {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (P&L ${unrealized_pnl:+,.0f})")
-                                            sys.stdout.flush()
+                                status = "WINNER" if unrealized_pnl >= 0 else "LOSER"
+                                print(f"    {'✅' if unrealized_pnl >= 0 else '📌'} HOLD {status}: {ticker} {pos.side} unrealized P&L ${unrealized_pnl:+,.0f}")
+                                sys.stdout.flush()
                     elif action == "HOLD":
                         pass
 
@@ -489,6 +471,7 @@ class AgentBacktestEngine:
             max_drawdown_pct=round(max_drawdown * 100, 2),
             total_trades=len(all_trades),
             winning_trades=winning, losing_trades=losing,
+            stop_losses=stop_loss_count,
             equity_curve=equity_curve, trades=all_trades,
             decisions=all_decisions, errors=errors,
         )
