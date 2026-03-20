@@ -52,7 +52,7 @@ class RssClient:
             return "reuters"
         if "bloomberg" in host:
             return "bloomberg"
-        if "wsj" in host:
+        if "wsj" in host or "dj.com" in host or "barrons" in host:
             return "wsj"
         if "ft.com" in host:
             return "ft"
@@ -60,6 +60,10 @@ class RssClient:
             return "cnbc"
         if "marketwatch" in host:
             return "marketwatch"
+        if "yahoo" in host:
+            return "yahoo_finance"
+        if "thestreet" in host:
+            return "thestreet"
         if "seekingalpha" in host:
             return "seekingalpha"
         return "rss"
@@ -222,3 +226,77 @@ class RssClient:
                 )
 
         return items, checks
+
+    def fetch_ticker_news(
+        self, tickers: list[str]
+    ) -> tuple[list[RawNewsItem], list[SourceCheck]]:
+        """Fetch per-ticker RSS headlines from Yahoo Finance.
+
+        Yields ticker-tagged items (source_tier=1) providing high-precision
+        stock-specific news that supplements general RSS feeds.
+        """
+        if not self.settings.enable_rss or not self.settings.enable_ticker_rss:
+            return [], []
+
+        all_items: list[RawNewsItem] = []
+        ticker_counts: dict[str, int] = {}
+
+        for ticker in tickers:
+            feed_url = f"https://finance.yahoo.com/rss/headline?s={ticker}"
+            try:
+                feed = feedparser.parse(feed_url)
+            except Exception as exc:
+                logger.warning("Yahoo Finance ticker RSS failed %s: %s", ticker, exc)
+                continue
+
+            count = 0
+            for entry in feed.entries[:20]:
+                url = entry.get("link")
+                title = (entry.get("title") or "").strip()
+                body = entry.get("summary", "") or entry.get("description", "") or ""
+                if not url or not title:
+                    continue
+
+                published_raw = (
+                    entry.get("published")
+                    or entry.get("updated")
+                    or entry.get("pubDate")
+                    or utc_now().isoformat()
+                )
+                try:
+                    published = dt_parser.parse(published_raw)
+                except Exception:
+                    published = utc_now()
+
+                item_hash = make_hash("yahoo_finance", url, title)
+                all_items.append(
+                    RawNewsItem(
+                        source="yahoo_finance",
+                        url=url,
+                        title=title,
+                        body=body,
+                        published_at=published,
+                        ingested_at=utc_now(),
+                        hash=item_hash,
+                        source_tier=1,  # ticker-specific → tier 1
+                        metadata={"ticker": ticker, "feed": feed_url},
+                    )
+                )
+                count += 1
+            if count:
+                ticker_counts[ticker] = count
+
+        total = sum(ticker_counts.values())
+        if total == 0:
+            return [], []
+
+        check = SourceCheck(
+            source_key="yahoo_finance_ticker_rss",
+            source_name="yahoo_finance",
+            source_type="rss",
+            display_name="Yahoo Finance Ticker RSS",
+            status="ONLINE",
+            details={"items": total, "tickers": len(ticker_counts)},
+        )
+        logger.info("Yahoo Finance ticker RSS: %d items for %d tickers", total, len(ticker_counts))
+        return all_items, [check]

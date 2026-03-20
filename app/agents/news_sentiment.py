@@ -18,10 +18,16 @@ Respond ONLY with valid JSON, no markdown fences, in the exact format specified 
 """
 
 _USER_PROMPT_TEMPLATE = """\
-Analyze the following recent news and events for ticker {ticker}, then determine the sentiment signal.
+Analyze the following news and events for ticker {ticker}.
+
+News recency labels guide how to weight information:
+  🔴 BREAKING  = within 24h  → HIGHEST weight, likely still moving the stock
+  🟡 RECENT    = 1-3 days   → HIGH weight, market is still absorbing
+  🟢 THIS WEEK = 3-7 days   → MEDIUM weight, partially priced in
+  ⚪ OLDER     = 7-14 days  → BACKGROUND context only
 
 {news_context}
-
+{sentiment_block}
 Return a JSON object with these exact fields:
 {{
   "signal": "<BUY|SHORT|HOLD>",
@@ -29,17 +35,17 @@ Return a JSON object with these exact fields:
   "sentiment": "<STRONGLY_BULLISH|BULLISH|NEUTRAL|BEARISH|STRONGLY_BEARISH>",
   "event_strength": "<STRONG|MODERATE|WEAK|NOISE>",
   "key_catalyst": "<1 sentence describing the most impactful event, or 'none'>",
-  "reasoning": "<2-3 sentence summary of news impact>"
+  "reasoning": "<2-3 sentence summary emphasizing BREAKING/RECENT news>"
 }}
 
 Guidelines:
-- BUY if recent news is bullish: earnings beat, positive guidance, deal announcement, upgrades, sector tailwinds, insider buying, buyback
-- SHORT if recent news is bearish: earnings miss, negative guidance, fraud/legal, downgrades, sector headwinds, layoffs, revenue decline, tariff risk, competitive threat
-- HOLD only if there is truly NO relevant news at all (zero articles). If any news exists, pick a direction!
-- Even moderately positive/negative news should result in BUY/SHORT with moderate confidence (40-60)
-- Multiple articles in the same direction → HIGH confidence (70+)
-- confidence 60-100 = strong/clear signal, 30-60 = moderate signal, 0-30 = weak/absent
-- Do NOT default to HOLD just because news is a few days old — news from the past 2 weeks is still actionable
+- Weight 🔴/🟡 news heavily. 🟢/⚪ is background context.
+- BUY if net sentiment is bullish: earnings beat, positive guidance, upgrades, buyback, deal win, tariff relief
+- SHORT if net sentiment is bearish: earnings miss, downgrades, fraud/legal, revenue decline, tariff risk, competitive threat
+- HOLD ONLY if there are truly NO articles at all (no labels visible in context).
+  If ANY recent news exists, pick a direction!
+- Multiple 🔴/🟡 articles in same direction → confidence 70+
+- Conflicting signals between BREAKING and OLDER → trust the newer news
 - When in doubt between HOLD and a direction, CHOOSE THE DIRECTION with lower confidence
 """
 
@@ -60,7 +66,26 @@ class NewsSentimentAgent(BaseAgent):
             if perf_ctx:
                 combined = f"{combined}\n\n{perf_ctx}"
 
-            user_prompt = _USER_PROMPT_TEMPLATE.format(ticker=ticker, news_context=combined)
+            # Finnhub news-sentiment scores (live mode only — skip when as_of is set)
+            sentiment_block = ""
+            if not as_of:
+                scores = self._fetch_finnhub_sentiment(ticker)
+                if scores:
+                    sentiment_block = (
+                        f"\n[FINNHUB AGGREGATED SENTIMENT for {ticker}]\n"
+                        f"  Bullish articles: {scores['bullish_pct']}% | "
+                        f"Bearish articles: {scores['bearish_pct']}%\n"
+                        f"  Sentiment score: {scores['sentiment_score']:+.3f} "
+                        f"(+1=max bullish, -1=max bearish)\n"
+                        f"  Buzz score: {scores['buzz_score']:.3f} | "
+                        f"Articles this week: {scores['articles_this_week']}\n"
+                    )
+
+            user_prompt = _USER_PROMPT_TEMPLATE.format(
+                ticker=ticker,
+                news_context=combined,
+                sentiment_block=sentiment_block,
+            )
 
             raw = self._call_llm(_SYSTEM_PROMPT, user_prompt, response_format="json")
             parsed = self._parse_json_response(raw)
@@ -87,3 +112,14 @@ class NewsSentimentAgent(BaseAgent):
         except Exception as exc:
             logger.exception("[news_sentiment] Unexpected error for %s: %s", ticker, exc)
             return AgentSignal.error_signal(self.name, str(exc))
+
+    def _fetch_finnhub_sentiment(self, ticker: str) -> dict | None:
+        """Fetch Finnhub aggregated news sentiment (live mode only)."""
+        try:
+            from app.ingestion.finnhub_client import FinnhubNewsClient
+            client = FinnhubNewsClient(self.settings)
+            return client.fetch_news_sentiment(ticker)
+        except Exception as exc:
+            logger.debug("[news_sentiment] Finnhub sentiment fetch failed for %s: %s", ticker, exc)
+            return None
+

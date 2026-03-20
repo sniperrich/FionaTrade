@@ -205,20 +205,21 @@ def get_event_detail(session: Session, event_id: int) -> dict | None:
 
 
 def get_ticker_news_summary(
-    session: Session, ticker: str, lookback_hours: int = 72, limit: int = 15,
+    session: Session, ticker: str, lookback_hours: int = 72, limit: int = 25,
     as_of: datetime | None = None,
 ) -> list[dict]:
     """Return recent RawItems mentioning a ticker directly.
 
     Uses word-boundary matching for ticker symbols AND company name matching
     via _TICKER_COMPANY_NAMES to maximize recall while avoiding false positives.
-    Also searches metadata_json for SEC/Finnhub ticker tags.
+    Also searches metadata_json for SEC/Finnhub/Yahoo ticker tags, and body text
+    for company name mentions.
     """
     ref_time = as_of or datetime.now(timezone.utc)
     since = ref_time - timedelta(hours=lookback_hours)
     ticker_upper = ticker.upper()
 
-    # Word-boundary patterns for ticker symbol
+    # Word-boundary patterns for ticker symbol in title
     title_patterns = [
         f"({ticker_upper})%",   # (AAPL)...
         f"% {ticker_upper} %",  # ... AAPL ...
@@ -229,22 +230,28 @@ def get_ticker_news_summary(
         f"% {ticker_upper}",    # ... AAPL (end of title)
     ]
 
-    # Company name patterns (catches "Apple", "Amazon", etc.)
+    # Company name patterns (catches "Apple", "Amazon", etc.) in title and body
     company_names = _TICKER_COMPANY_NAMES.get(ticker_upper, [])
     for name in company_names:
         title_patterns.append(f"%{name}%")
 
-    # Metadata exact match for SEC/Finnhub tagged items
+    # Metadata exact match for SEC/Finnhub/Yahoo tagged items
     metadata_pattern = f'%"ticker": "{ticker_upper}"%'
 
     title_conditions = [RawItem.title.ilike(p) for p in title_patterns]
 
+    # Body text matching for company names (first 600 chars to keep it efficient)
+    body_conditions = []
+    for name in company_names:
+        body_conditions.append(sa.func.substr(RawItem.body, 1, 600).ilike(f"%{name}%"))
+
+    all_conditions = [*title_conditions, RawItem.metadata_json.ilike(metadata_pattern)]
+    if body_conditions:
+        all_conditions.extend(body_conditions)
+
     stmt = select(RawItem).where(
         RawItem.published_at >= since,
-        sa.or_(
-            *title_conditions,
-            RawItem.metadata_json.ilike(metadata_pattern),
-        ),
+        sa.or_(*all_conditions),
     )
     if as_of:
         stmt = stmt.where(RawItem.published_at <= ref_time)
@@ -258,38 +265,84 @@ def get_ticker_news_summary(
             "title": row.title,
             "source": row.source,
             "published_at": row.published_at.isoformat(),
-            "body_snippet": row.body[:400],
+            "body_snippet": (row.body or "")[:400],
             "source_tier": row.source_tier,
         })
 
     return results
 
 
+def _age_label(hours: float) -> str:
+    """Return a recency label for news context formatting."""
+    if hours <= 24:
+        return "🔴 BREAKING"
+    elif hours <= 72:
+        return "🟡 RECENT"
+    elif hours <= 168:
+        return "🟢 THIS WEEK"
+    else:
+        return "⚪ OLDER"
+
+
+def _hours_since(ts_str: str, ref_time: datetime) -> float:
+    try:
+        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return max(0.0, (ref_time - ts).total_seconds() / 3600)
+    except Exception:
+        return 999.0
+
+
 def build_news_context_text(
     session: Session, ticker: str, lookback_hours: int = 336, as_of: datetime | None = None,
 ) -> str:
-    """Build a compact text block of recent news/events for LLM prompts.
-    
-    Default 336h (14 days) lookback to ensure adequate news coverage.
-    """
-    events = get_recent_events(session, ticker=ticker, lookback_hours=lookback_hours, limit=15, as_of=as_of)
-    news = get_ticker_news_summary(session, ticker=ticker, lookback_hours=lookback_hours, limit=10, as_of=as_of)
+    """Build a time-bucketed news context block for LLM prompts.
 
-    lines: list[str] = [f"=== RECENT EVENTS FOR {ticker} ==="]
+    News is organized into recency tiers so the agent can weight recent catalysts
+    more heavily than background context. Labels:
+      🔴 BREAKING  = within 24h
+      🟡 RECENT    = 1–3 days
+      🟢 THIS WEEK = 3–7 days
+      ⚪ OLDER     = 7–14 days
+    """
+    ref_time = as_of or datetime.now(timezone.utc)
+
+    events = get_recent_events(
+        session, ticker=ticker, lookback_hours=lookback_hours, limit=25, as_of=as_of
+    )
+    news = get_ticker_news_summary(
+        session, ticker=ticker, lookback_hours=lookback_hours, limit=20, as_of=as_of
+    )
+
+    lines: list[str] = [f"=== NEWS & EVENTS FOR {ticker} ==="]
+    lines.append("(🔴=<24h  🟡=1-3d  🟢=3-7d  ⚪=7-14d)")
+
+    lines.append("\n[VALIDATED EVENTS — clustered & confidence-scored]")
     if events:
         for ev in events:
+            age = _hours_since(ev["event_time"], ref_time)
+            label = _age_label(age)
+            summary = (ev.get("summary") or "")[:200]
             lines.append(
-                f"  [{ev['event_time'][:16]}] {ev['event_type']} "
-                f"(conf={ev['confidence']}, sev={ev['severity']}): {ev['summary'][:150]}"
+                f"  {label} [{ev['event_time'][:16]}] {ev['event_type']} "
+                f"conf={ev['confidence']} sev={ev['severity']}: {summary}"
             )
     else:
-        lines.append("  No recent events found.")
+        lines.append("  (none)")
 
-    lines.append(f"\n=== RECENT NEWS FOR {ticker} ===")
+    lines.append("\n[RAW HEADLINES — direct from sources]")
     if news:
         for item in news:
-            lines.append(f"  [{item['source']}] {item['title']}")
+            age = _hours_since(item["published_at"], ref_time)
+            label = _age_label(age)
+            body = (item.get("body_snippet") or "").strip().replace("\n", " ")[:200]
+            tier_tag = f"[tier{item['source_tier']}]"
+            line = f"  {label} {tier_tag} [{item['source']}] {item['title']}"
+            if body:
+                line += f"\n    → {body}"
+            lines.append(line)
     else:
-        lines.append("  No recent news found.")
+        lines.append("  (none)")
 
     return "\n".join(lines)

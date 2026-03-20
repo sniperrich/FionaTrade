@@ -52,6 +52,8 @@ SOURCE_TIER = {
     "ft": 1,
     "cnbc": 1,
     "marketwatch": 2,
+    "yahoo_finance": 2,
+    "thestreet": 2,
     "seekingalpha": 2,
     "finnhub": 2,
     "rss": 2,

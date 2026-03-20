@@ -114,15 +114,23 @@ class Settings(BaseSettings):
     sec_poller_limit: int = 100
     rss_sources: list[str] = Field(
         default_factory=lambda: [
-            "https://feeds.bloomberg.com/markets/news.rss",
+            # Tier-1 sources (reliable, no login required)
             "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+            "https://www.cnbc.com/id/15839069/device/rss/rss.html",  # CNBC Markets
             "https://www.marketwatch.com/rss/topstories",
             "https://feeds.reuters.com/reuters/businessNews",
             "https://feeds.reuters.com/reuters/topNews",
             "https://apnews.com/hub/financial-markets?format=rss",
-            "https://seekingalpha.com/market_currents.xml",
+            # Tier-2 sources (good coverage, freely accessible)
+            "https://finance.yahoo.com/rss/topstories",
+            "https://www.thestreet.com/rss/public/rss-topstories.xml",
+            "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",  # Dow Jones / WSJ public feed
         ]
     )
+    # Enable per-ticker Yahoo Finance RSS headlines during ingestion
+    enable_ticker_rss: bool = True
+    # Max number of tickers to fetch per-ticker Yahoo Finance RSS for (0 = all sp100)
+    ticker_rss_max_tickers: int = 0
 
     sp100_tickers: list[str] = Field(default_factory=lambda: SP100_TICKERS.copy())
 

@@ -53,6 +53,17 @@ class IngestionService:
         items.extend(rss_items)
         checks.extend(rss_checks)
 
+        # Per-ticker Yahoo Finance RSS (ticker-specific headlines, tier 1)
+        max_tickers = self.settings.ticker_rss_max_tickers
+        tickers_to_fetch = (
+            self.settings.sp100_tickers[:max_tickers]
+            if max_tickers > 0
+            else self.settings.sp100_tickers
+        )
+        ticker_rss_items, ticker_rss_checks = self.rss.fetch_ticker_news(tickers_to_fetch)
+        items.extend(ticker_rss_items)
+        checks.extend(ticker_rss_checks)
+
         finnhub_items, finnhub_check = self.finnhub.fetch()
         items.extend(finnhub_items)
         checks.append(finnhub_check)

@@ -173,6 +173,45 @@ class FinnhubNewsClient:
             details={"items": len(items), "tickers": len(tickers), "errors": errors},
         )
 
+    def fetch_news_sentiment(self, ticker: str) -> dict | None:
+        """Fetch aggregated news sentiment scores from Finnhub /news-sentiment.
+
+        Returns a dict with keys:
+            buzz (articlesMentionedInLastWeek, weeklyAverage, buzz score 0-1),
+            sentiment (bearishPercent, bullishPercent, score -1..1),
+            companyNewsScore (0-1 overall score).
+
+        Returns None if API is unavailable or key not configured.
+        NOTE: This is a live API call — not backtest-safe. Agents should only use
+        this in live/paper mode and skip it when context["as_of"] is set.
+        """
+        if not self.settings.enable_finnhub or not self.settings.finnhub_api_key:
+            return None
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(
+                    f"{self.BASE_URL}/news-sentiment",
+                    params={"symbol": ticker, "token": self.settings.finnhub_api_key},
+                )
+                if resp.status_code != 200:
+                    logger.debug("Finnhub news-sentiment ticker=%s status=%s", ticker, resp.status_code)
+                    return None
+                data = resp.json()
+                sentiment_data = data.get("sentiment") or {}
+                buzz_data = data.get("buzz") or {}
+                return {
+                    "bullish_pct": round(sentiment_data.get("bullishPercent", 0) * 100),
+                    "bearish_pct": round(sentiment_data.get("bearishPercent", 0) * 100),
+                    "sentiment_score": round(sentiment_data.get("score", 0), 3),
+                    "buzz_score": round(buzz_data.get("buzz", 0), 3),
+                    "weekly_avg_mentions": buzz_data.get("weeklyAverage", 0),
+                    "articles_this_week": buzz_data.get("articlesInLastWeek", 0),
+                    "company_news_score": round(data.get("companyNewsScore", 0), 3),
+                }
+        except Exception as exc:
+            logger.debug("Finnhub news-sentiment ticker=%s error: %s", ticker, exc)
+            return None
+
     def fetch_earnings_calendar(
         self,
         from_date: str,
