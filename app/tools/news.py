@@ -8,6 +8,108 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Event, EventEvidence, RawItem
 
+# Map tickers to company name search terms for broader news matching.
+# Only include names distinctive enough to avoid false positives.
+_TICKER_COMPANY_NAMES: dict[str, list[str]] = {
+    "AAPL": ["Apple"],
+    "ABBV": ["AbbVie"],
+    "ABT": ["Abbott Lab"],
+    "ACN": ["Accenture"],
+    "ADBE": ["Adobe"],
+    "AIG": ["AIG"],
+    "AMD": ["AMD"],
+    "AMGN": ["Amgen"],
+    "AMZN": ["Amazon"],
+    "AVGO": ["Broadcom"],
+    "AXP": ["American Express"],
+    "BA": ["Boeing"],
+    "BAC": ["Bank of America"],
+    "BLK": ["BlackRock"],
+    "BMY": ["Bristol-Myers"],
+    "BRK.B": ["Berkshire"],
+    "C": ["Citigroup", "Citibank"],
+    "CAT": ["Caterpillar"],
+    "CHTR": ["Charter Comm"],
+    "CL": ["Colgate"],
+    "CMCSA": ["Comcast"],
+    "COP": ["ConocoPhillips"],
+    "COST": ["Costco"],
+    "CRM": ["Salesforce"],
+    "CSCO": ["Cisco"],
+    "CVS": ["CVS Health"],
+    "CVX": ["Chevron"],
+    "DE": ["Deere"],
+    "DHR": ["Danaher"],
+    "DIS": ["Disney"],
+    "DUK": ["Duke Energy"],
+    "EMR": ["Emerson"],
+    "FDX": ["FedEx"],
+    "GD": ["General Dynamics"],
+    "GE": ["GE Aerospace"],
+    "GILD": ["Gilead"],
+    "GM": ["General Motors"],
+    "GOOG": ["Alphabet", "Google"],
+    "GOOGL": ["Alphabet", "Google"],
+    "GS": ["Goldman Sachs"],
+    "HD": ["Home Depot"],
+    "HON": ["Honeywell"],
+    "IBM": ["IBM"],
+    "INTC": ["Intel"],
+    "INTU": ["Intuit"],
+    "ISRG": ["Intuitive Surgical"],
+    "JNJ": ["Johnson & Johnson", "J&J"],
+    "JPM": ["JPMorgan", "JP Morgan"],
+    "KO": ["Coca-Cola"],
+    "LIN": ["Linde"],
+    "LLY": ["Eli Lilly"],
+    "LMT": ["Lockheed Martin"],
+    "LOW": ["Lowe's"],
+    "MA": ["Mastercard"],
+    "MCD": ["McDonald"],
+    "MDLZ": ["Mondelez"],
+    "MDT": ["Medtronic"],
+    "MET": ["MetLife"],
+    "META": ["Meta Platform"],
+    "MMM": ["3M "],
+    "MO": ["Altria"],
+    "MRK": ["Merck"],
+    "MS": ["Morgan Stanley"],
+    "MSFT": ["Microsoft"],
+    "NEE": ["NextEra"],
+    "NFLX": ["Netflix"],
+    "NKE": ["Nike"],
+    "NOW": ["ServiceNow"],
+    "NVDA": ["Nvidia", "NVIDIA"],
+    "ORCL": ["Oracle"],
+    "PEP": ["PepsiCo", "Pepsi"],
+    "PFE": ["Pfizer"],
+    "PG": ["Procter & Gamble", "P&G"],
+    "PM": ["Philip Morris"],
+    "PYPL": ["PayPal"],
+    "QCOM": ["Qualcomm"],
+    "RTX": ["Raytheon"],
+    "SBUX": ["Starbucks"],
+    "SCHW": ["Schwab"],
+    "SO": ["Southern Co"],
+    "SPG": ["Simon Property"],
+    "T": ["AT&T"],
+    "TGT": ["Target "],
+    "TMO": ["Thermo Fisher"],
+    "TMUS": ["T-Mobile"],
+    "TSLA": ["Tesla"],
+    "TXN": ["Texas Instruments"],
+    "UNH": ["UnitedHealth"],
+    "UNP": ["Union Pacific"],
+    "UPS": ["UPS "],
+    "USB": ["U.S. Bancorp"],
+    "V": ["Visa"],
+    "VZ": ["Verizon"],
+    "WBA": ["Walgreens"],
+    "WFC": ["Wells Fargo"],
+    "WMT": ["Walmart"],
+    "XOM": ["Exxon", "ExxonMobil"],
+}
+
 
 def get_recent_events(
     session: Session,
@@ -108,28 +210,44 @@ def get_ticker_news_summary(
 ) -> list[dict]:
     """Return recent RawItems mentioning a ticker directly.
 
-    Searches title, body, AND metadata_json (for SEC/Finnhub ticker tags).
-    Includes all source tiers but sorts by tier (higher quality first).
+    Uses word-boundary matching for ticker symbols AND company name matching
+    via _TICKER_COMPANY_NAMES to maximize recall while avoiding false positives.
+    Also searches metadata_json for SEC/Finnhub ticker tags.
     """
     ref_time = as_of or datetime.now(timezone.utc)
     since = ref_time - timedelta(hours=lookback_hours)
     ticker_upper = ticker.upper()
 
-    ticker_pattern = f"%{ticker_upper}%"
-    # Also search metadata_json for ticker field (SEC filings, Finnhub)
+    # Word-boundary patterns for ticker symbol
+    title_patterns = [
+        f"({ticker_upper})%",   # (AAPL)...
+        f"% {ticker_upper} %",  # ... AAPL ...
+        f"% {ticker_upper},%",  # ... AAPL,...
+        f"% {ticker_upper}:%",  # ... AAPL:...
+        f"% {ticker_upper}'%",  # ... AAPL's...
+        f"{ticker_upper} %",    # AAPL ... (start of title)
+        f"% {ticker_upper}",    # ... AAPL (end of title)
+    ]
+
+    # Company name patterns (catches "Apple", "Amazon", etc.)
+    company_names = _TICKER_COMPANY_NAMES.get(ticker_upper, [])
+    for name in company_names:
+        title_patterns.append(f"%{name}%")
+
+    # Metadata exact match for SEC/Finnhub tagged items
     metadata_pattern = f'%"ticker": "{ticker_upper}"%'
+
+    title_conditions = [RawItem.title.ilike(p) for p in title_patterns]
 
     stmt = select(RawItem).where(
         RawItem.published_at >= since,
         sa.or_(
-            RawItem.title.ilike(ticker_pattern),
-            RawItem.body.ilike(ticker_pattern),
+            *title_conditions,
             RawItem.metadata_json.ilike(metadata_pattern),
         ),
     )
     if as_of:
         stmt = stmt.where(RawItem.published_at <= ref_time)
-    # Sort by source_tier first (better sources first), then recency
     rows = session.execute(
         stmt.order_by(RawItem.source_tier.asc(), RawItem.published_at.desc()).limit(limit)
     ).scalars().all()
