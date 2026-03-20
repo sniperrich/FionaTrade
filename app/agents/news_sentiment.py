@@ -33,12 +33,14 @@ Return a JSON object with these exact fields:
 }}
 
 Guidelines:
-- BUY if recent news is bullish: earnings beat, positive guidance, deal announcement, upgrades, sector tailwinds
-- SHORT if recent news is bearish: earnings miss, negative guidance, fraud/legal, downgrades, sector headwinds
-- HOLD only if news is genuinely mixed with no clear lean, or if there is truly no relevant news at all
+- BUY if recent news is bullish: earnings beat, positive guidance, deal announcement, upgrades, sector tailwinds, insider buying, buyback
+- SHORT if recent news is bearish: earnings miss, negative guidance, fraud/legal, downgrades, sector headwinds, layoffs, revenue decline, tariff risk, competitive threat
+- HOLD only if there is truly NO relevant news at all (zero articles). If any news exists, pick a direction!
 - Even moderately positive/negative news should result in BUY/SHORT with moderate confidence (40-60)
+- Multiple articles in the same direction → HIGH confidence (70+)
 - confidence 60-100 = strong/clear signal, 30-60 = moderate signal, 0-30 = weak/absent
-- Do NOT default to HOLD just because news is a few days old — news from the past week is still actionable
+- Do NOT default to HOLD just because news is a few days old — news from the past 2 weeks is still actionable
+- When in doubt between HOLD and a direction, CHOOSE THE DIRECTION with lower confidence
 """
 
 

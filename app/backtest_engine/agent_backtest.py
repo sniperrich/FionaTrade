@@ -135,7 +135,7 @@ class AgentBacktestEngine:
             start_date: "YYYY-MM-DD" (default: "2026-02-02")
             end_date: "YYYY-MM-DD" (default: "2026-02-27")
             initial_capital: float (default: 100000)
-            decision_frequency: int trading days between decisions (default: 5)
+            decision_frequency: int trading days between decisions (default: 3)
             max_position_pct: float max per-ticker position (default: 0.15)
             slippage_pct: float slippage per trade (default: 0.0005 = 0.05%)
             stop_loss_pct: float default stop-loss (default: 0.05 = 5%)
@@ -145,7 +145,7 @@ class AgentBacktestEngine:
         start = date.fromisoformat(p.get("start_date", "2026-02-02"))
         end = date.fromisoformat(p.get("end_date", "2026-02-27"))
         initial_capital = float(p.get("initial_capital", 100_000))
-        freq = int(p.get("decision_frequency", 5))
+        freq = int(p.get("decision_frequency", 3))
         max_pos_pct = float(p.get("max_position_pct", 0.15))
         slippage_pct = float(p.get("slippage_pct", 0.0005))
         stop_loss_pct = float(p.get("stop_loss_pct", 0.05))
@@ -189,7 +189,7 @@ class AgentBacktestEngine:
         # Direction inertia: track when each ticker last changed direction
         # Key: ticker, Value: decision_day index when position was opened/reversed
         ticker_entry_decision_idx: dict[str, int] = {}
-        _INERTIA_CYCLES = 2  # must hold at least 2 decision cycles before reversing
+        _INERTIA_CYCLES = 1  # must hold at least 1 decision cycle before reversing
 
         peak_equity = initial_capital
         max_drawdown = 0.0

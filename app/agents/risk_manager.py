@@ -14,7 +14,7 @@ logger = get_app_logger()
 # Risk rule thresholds
 _MAX_POSITION_PCT = 0.20       # max 20% of portfolio in one ticker
 _MAX_DAILY_LOSS_PCT = 0.03     # halt trading if intraday loss > 3%
-_MIN_CONSENSUS_COUNT = 2       # at least 2 agents must agree on direction
+_MIN_CONSENSUS_COUNT = 1       # at least 1 agent must give directional signal
 _MAX_SAME_DIRECTION = 3        # max tickers in same direction (long or short)
 _TICKER_MAX_CONSECUTIVE_LOSSES = 2  # block ticker after N consecutive losses
 
@@ -130,9 +130,10 @@ class RiskManagerAgent(BaseAgent):
             dominant_direction = "BUY" if buy_count >= short_count else "SHORT"
             dominant_count = max(buy_count, short_count)
 
-            if dominant_count < _MIN_CONSENSUS_COUNT:
+            total_directional = buy_count + short_count
+            if total_directional < _MIN_CONSENSUS_COUNT:
                 block_reasons.append(
-                    f"Weak consensus: {buy_count} BUY, {short_count} SHORT (need {_MIN_CONSENSUS_COUNT}+ aligned)"
+                    f"No directional signal: {buy_count} BUY, {short_count} SHORT (need {_MIN_CONSENSUS_COUNT}+)"
                 )
                 hard_block = True
             else:
@@ -190,11 +191,11 @@ class RiskManagerAgent(BaseAgent):
                 )
 
             # ── Strong consensus auto-approve (skip LLM for speed) ──
-            if dominant_count >= 3:
-                auto_pct = 0.10 if dominant_count >= 3 else 0.06
+            if dominant_count >= 2:
+                auto_pct = 0.10 if dominant_count >= 3 else 0.07
                 return AgentSignal(
                     agent_name=self.name,
-                    signal="BUY",
+                    signal=dominant_direction,
                     confidence=80,
                     reasoning=f"Auto-approved: {dominant_count} agents agree on {dominant_direction}. "
                               f"Checks: {'; '.join(rule_checks)}",
@@ -254,7 +255,7 @@ class RiskManagerAgent(BaseAgent):
 
             return AgentSignal(
                 agent_name=self.name,
-                signal="HOLD" if not approved else "BUY",
+                signal="HOLD" if not approved else dominant_direction,
                 confidence=70,
                 reasoning=parsed.get("reasoning", ""),
                 metadata={

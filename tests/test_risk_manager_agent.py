@@ -56,11 +56,11 @@ class TestRiskManagerHardBlock:
 
 class TestRiskManagerConsensus:
     def test_weak_consensus_blocks(self, settings, session):
-        """Only 1 BUY signal should be blocked (need 2+)."""
+        """Zero directional signals should be blocked (need 1+)."""
         weak_signals = {
             "macro_analyst": {"signal": "HOLD", "confidence": 50, "reasoning": "mixed"},
             "news_sentiment": {"signal": "HOLD", "confidence": 50, "reasoning": "nothing"},
-            "fundamentals": {"signal": "BUY", "confidence": 60, "reasoning": "ok"},
+            "fundamentals": {"signal": "HOLD", "confidence": 60, "reasoning": "ok"},
             "technicals": {"signal": "HOLD", "confidence": 40, "reasoning": "flat"},
         }
         agent = _make_agent(settings)
@@ -71,6 +71,19 @@ class TestRiskManagerConsensus:
         assert result.metadata.get("hard_block") is True
         assert result.metadata.get("approved") is False
         llm_spy.assert_not_called()
+
+    def test_single_directional_passes(self, settings, session):
+        """1 BUY signal should pass consensus (threshold lowered to 1)."""
+        signals = {
+            "macro_analyst": {"signal": "HOLD", "confidence": 50, "reasoning": "mixed"},
+            "news_sentiment": {"signal": "HOLD", "confidence": 50, "reasoning": "nothing"},
+            "fundamentals": {"signal": "BUY", "confidence": 60, "reasoning": "ok"},
+            "technicals": {"signal": "HOLD", "confidence": 40, "reasoning": "flat"},
+        }
+        agent = _make_agent(settings)
+        with patch.object(agent, "_call_llm", return_value=_LLM_APPROVE):
+            result = agent.analyze(session, "AAPL", {"agent_signals": signals})
+        assert result.metadata.get("hard_block") is False
 
     def test_strong_consensus_passes(self, settings, session):
         """2+ BUY signals should pass consensus check."""
@@ -177,11 +190,11 @@ class TestRiskManagerLLMApproval:
 
     def test_llm_rejects_trade(self, settings, session):
         agent = _make_agent(settings)
-        # Use exactly 2-agent consensus so it goes to LLM (not auto-approved)
-        two_signals = _build_signals(macro="BUY", news="BUY", fund="HOLD", tech="HOLD")
+        # Use exactly 1-agent directional so it goes to LLM (not auto-approved)
+        one_signal = _build_signals(macro="BUY", news="HOLD", fund="HOLD", tech="HOLD")
         llm_resp = '{"approved":false,"max_position_pct":0.0,"stop_loss_pct":0.05,"risk_level":"HIGH","concerns":["high VIX"],"reasoning":"Too risky"}'
         with patch.object(agent, "_call_llm", return_value=llm_resp):
-            result = agent.analyze(session, "TSLA", {"agent_signals": two_signals})
+            result = agent.analyze(session, "TSLA", {"agent_signals": one_signal})
         assert result.metadata.get("approved") is False
         assert result.signal == "HOLD"
 

@@ -59,16 +59,14 @@ Return a JSON object with these exact fields:
 IMPORTANT RULES:
 1. If risk_manager approved=false, you MUST set action=HOLD and position_pct=0.0
 2. position_pct must not exceed max_position_pct from risk manager
-3. If risk_manager approved=true, you should ACT (BUY, SHORT, or SELL) unless all specialists say HOLD
+3. If risk_manager approved=true, you MUST ACT (BUY or SHORT) — do NOT return HOLD when risk approved
 4. Use SELL to close an existing long position when outlook has turned negative or neutral
-5. Weight technicals and news highest for timing; fundamentals for direction; macro for context
+5. Weight news and fundamentals highest for direction; technicals for timing; macro for context
 6. conviction=HIGH requires at least 2 agents aligned; MEDIUM requires 1 strong signal; LOW for mixed
 7. When 2+ agents say SHORT/SELL, you SHOULD short or sell — do not override with BUY
 8. When agents disagree (e.g., fund=BUY, tech=SHORT, news=SHORT), side with the MAJORITY
 9. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
-10. DIRECTION INERTIA: If we already hold a position, do NOT reverse unless at least 3 agents
-    clearly support the opposite direction. Staying in a winning position is better than whipsawing.
-    If the current position is profitable, prefer HOLD over reversal.
+10. If we already hold a profitable position and agents are mixed, prefer HOLD over reversal
 """
 
 

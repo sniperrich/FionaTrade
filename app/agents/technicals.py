@@ -122,9 +122,9 @@ class TechnicalsAgent(BaseAgent):
             abs_score = abs(score)
             confidence = min(95, int(abs_score * 1.2))  # scale to 0-95
 
-            if score >= 25:
+            if score >= 15:
                 signal = "BUY"
-            elif score <= -25:
+            elif score <= -15:
                 signal = "SHORT"
             else:
                 signal = "HOLD"

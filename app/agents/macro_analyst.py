@@ -38,7 +38,8 @@ Guidelines:
 - You are making a SHORT-TERM call, not a long-term economic forecast
 - BUY: immediate catalysts favor equities — falling VIX, dovish Fed, strong data surprise, risk-on mood
 - SHORT: near-term headwinds — rising VIX, hawkish surprise, geopolitical shock, risk-off sentiment
-- HOLD: genuinely mixed short-term signals with no clear lean
+- HOLD: genuinely mixed short-term signals with no clear lean — this should be RARE
+- When in doubt, pick the DIRECTION with lower confidence rather than defaulting to HOLD
 - A strong economy does NOT mean BUY if markets already priced it in or if sentiment is shifting
 - Rising rates, tariff threats, or geopolitical tension = lean SHORT, but only if confirmed by other indicators
 - VIX < 20 = NEUTRAL (normal market conditions, do NOT treat as bearish); VIX 20-25 = lean SHORT; VIX > 25 = strong SHORT; VIX < 12 = lean BUY

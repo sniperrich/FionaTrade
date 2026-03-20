@@ -34,14 +34,15 @@ Return a JSON object with these exact fields:
 }}
 
 Guidelines:
-- BUY: undervalued or fair valuation WITH strong/accelerating fundamentals
-- SHORT: overvalued OR deteriorating fundamentals OR decelerating earnings
-- HOLD: fair valuation with stable but unexciting fundamentals
-- CRITICAL: High P/E (>25), high P/B (>8), or low earnings yield = lean SHORT or HOLD, not BUY
-- Strong fundamentals at OVERVALUED levels = HOLD at best (the market already priced it in)
+- BUY: undervalued or fair valuation WITH strong/accelerating fundamentals, OR price dropped >5% with stable fundamentals (value opportunity)
+- SHORT: overvalued (P/E>30) OR deteriorating fundamentals OR decelerating earnings OR analyst downgrades
+- HOLD: ONLY when you genuinely cannot lean either way — this should be rare (<20% of cases)
+- CRITICAL: High P/E (>25), high P/B (>8), or low earnings yield = lean SHORT, not HOLD
+- Strong fundamentals at OVERVALUED levels = SHORT (the market will correct)
 - Analyst consensus alone is NOT sufficient — analysts are often late and herd-like
-- If recent price is near 52-week highs with average fundamentals = HOLD or SHORT
+- If recent price is near 52-week highs with average fundamentals = SHORT
 - If recent price dropped significantly with strong fundamentals = BUY (value opportunity)
+- When in doubt between HOLD and a direction, CHOOSE THE DIRECTION with lower confidence
 - confidence: 60-100 = clear, 35-60 = moderate, 0-35 = insufficient data
 """
 
