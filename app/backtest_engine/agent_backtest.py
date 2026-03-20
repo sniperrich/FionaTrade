@@ -8,7 +8,9 @@ look-ahead bias: all data queries are bounded by the simulation timestamp.
 from __future__ import annotations
 
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any
@@ -27,11 +29,19 @@ logger = get_app_logger()
 _NY = ZoneInfo("America/New_York")
 _MARKET_CLOSE = dt_time(16, 0)
 _MARKET_OPEN = dt_time(9, 30)
+_print_lock = threading.Lock()
 
 
 def _ts() -> str:
     """Compact timestamp for progress output."""
     return datetime.now().strftime("%H:%M:%S")
+
+
+def _safe_print(*args, **kwargs):
+    """Thread-safe print."""
+    with _print_lock:
+        print(*args, **kwargs)
+        sys.stdout.flush()
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -172,6 +182,10 @@ class AgentBacktestEngine:
         errors: list[str] = []
         graph = AgentGraph(self.settings)
 
+        # Per-ticker consecutive loss tracking
+        ticker_loss_streak: dict[str, int] = {t: 0 for t in tickers}
+        ticker_last_side: dict[str, str | None] = {}
+
         peak_equity = initial_capital
         max_drawdown = 0.0
 
@@ -179,141 +193,171 @@ class AgentBacktestEngine:
             is_decision_day = day in decision_days
 
             if is_decision_day:
-                # Run agent graph for each ticker at market close
+                # Run agent graph for each ticker — parallel across tickers
                 as_of = datetime.combine(day, _MARKET_CLOSE, tzinfo=_NY).astimezone(timezone.utc)
                 decision_idx = decision_days.index(day) + 1
                 print(f"\n[{_ts()}] 📊 Decision Day {decision_idx}/{len(decision_days)}: {day}")
                 sys.stdout.flush()
 
-                for ticker in tickers:
-                    try:
-                        t0 = time.time()
-                        print(f"  [{_ts()}] 🤖 Running agents for {ticker}...", end="", flush=True)
+                # Pre-compute shared state for all tickers
+                close_prices = self._get_close_prices(session, tickers, day)
+                current_equity = portfolio.equity(close_prices)
+                dd_pct = max_drawdown
 
-                        # Build portfolio state for risk manager
-                        close_prices = self._get_close_prices(session, tickers, day)
-                        current_equity = portfolio.equity(close_prices)
-                        pos = portfolio.positions.get(ticker)
-                        pos_value = portfolio.position_value(ticker, close_prices.get(ticker, 0))
-                        pos_pct_current = pos_value / max(current_equity, 1)
-                        current_side = pos.side if pos else None
+                # Build portfolio positions snapshot for concentration checks
+                portfolio_positions = {
+                    t: {"side": p.side, "shares": p.shares, "entry": p.avg_entry}
+                    for t, p in portfolio.positions.items()
+                }
 
-                        # Compute daily P&L for this ticker from today's trades
-                        daily_pnl = sum(
-                            t.notional * (-1 if t.side in ("BUY", "COVER") else 1)
-                            for t in all_trades if str(t.date) == str(day) and t.ticker == ticker
-                        )
+                def _run_ticker_agents(ticker: str) -> dict:
+                    """Run agent graph for a single ticker (thread-safe)."""
+                    t0 = time.time()
+                    _safe_print(f"  [{_ts()}] 🤖 Running agents for {ticker}...", end="")
 
-                        bt_context = {
-                            "portfolio_state": {
-                                "position_pct": pos_pct_current,
-                                "daily_pnl": daily_pnl,
-                                "equity": current_equity,
-                                "current_side": current_side,
-                            },
-                            "current_position": {
-                                "side": current_side,
-                                "shares": pos.shares if pos else 0,
-                                "entry_price": pos.avg_entry if pos else 0,
-                                "entry_date": str(pos.entry_date) if pos else None,
-                            },
-                        }
-                        state = graph.run(session, ticker, context=bt_context, as_of=as_of)
-                        elapsed = time.time() - t0
+                    pos = portfolio.positions.get(ticker)
+                    pos_value = portfolio.position_value(ticker, close_prices.get(ticker, 0))
+                    pos_pct_current = pos_value / max(current_equity, 1)
+                    current_side = pos.side if pos else None
 
-                        action = state.get("final_action", "HOLD")
-                        pos_pct = float(state.get("final_position_pct", 0.0))
-                        reasoning = state.get("final_reasoning", "")[:300]
+                    daily_pnl = sum(
+                        t.notional * (-1 if t.side in ("BUY", "COVER") else 1)
+                        for t in all_trades if str(t.date) == str(day) and t.ticker == ticker
+                    )
 
-                        signals = {
-                            k: v.get("signal", "?") if isinstance(v, dict) else "?"
-                            for k, v in state.get("agent_signals", {}).items()
-                        }
-                        signal_str = " ".join(f"{k[:4]}={v}" for k, v in signals.items())
-                        print(f" → {action} {pos_pct:.0%} ({elapsed:.0f}s) [{signal_str}]")
-                        sys.stdout.flush()
+                    bt_context = {
+                        "portfolio_state": {
+                            "position_pct": pos_pct_current,
+                            "daily_pnl": daily_pnl,
+                            "equity": current_equity,
+                            "current_side": current_side,
+                            "drawdown_pct": dd_pct,
+                        },
+                        "current_position": {
+                            "side": current_side,
+                            "shares": pos.shares if pos else 0,
+                            "entry_price": pos.avg_entry if pos else 0,
+                            "entry_date": str(pos.entry_date) if pos else None,
+                        },
+                        "portfolio_positions": portfolio_positions,
+                        "ticker_loss_streak": ticker_loss_streak,
+                    }
+                    state = graph.run(session, ticker, context=bt_context, as_of=as_of)
+                    elapsed = time.time() - t0
 
-                        all_decisions.append(BTDecision(
-                            date=day, ticker=ticker, action=action,
-                            position_pct=pos_pct, reasoning=reasoning,
-                            agent_signals=signals,
-                        ))
+                    action = state.get("final_action", "HOLD")
+                    pos_pct = float(state.get("final_position_pct", 0.0))
+                    reasoning = state.get("final_reasoning", "")[:300]
+                    signals = {
+                        k: v.get("signal", "?") if isinstance(v, dict) else "?"
+                        for k, v in state.get("agent_signals", {}).items()
+                    }
+                    signal_str = " ".join(f"{k[:4]}={v}" for k, v in signals.items())
+                    _safe_print(f" → {action} {pos_pct:.0%} ({elapsed:.0f}s) [{signal_str}]")
 
-                        # Execute trade at next day's open
-                        next_day = self._next_trading_day(trading_days, day)
-                        if next_day and action in ("BUY", "SHORT"):
-                            open_price = self._get_price(session, ticker, next_day, "open")
-                            if open_price and open_price > 0:
-                                exec_price = open_price * (1 + slippage_pct) if action == "BUY" else open_price * (1 - slippage_pct)
-                                target_pct = min(pos_pct, max_pos_pct)
-                                equity = portfolio.equity(
-                                    self._get_close_prices(session, tickers, day)
-                                )
-                                trades_before = len(all_trades)
-                                self._execute_decision(
-                                    portfolio, ticker, action, target_pct,
-                                    equity, exec_price, next_day, all_trades,
-                                    stop_loss_pct=stop_loss_pct,
-                                )
-                                if len(all_trades) > trades_before:
-                                    t = all_trades[-1]
-                                    print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f})")
-                                    sys.stdout.flush()
-                        elif action == "SELL" and ticker in portfolio.positions:
-                            # Explicit close position at next day's open
-                            open_price = self._get_price(session, ticker, next_day, "open") if next_day else None
-                            if open_price and open_price > 0:
-                                exec_price = open_price * (1 - slippage_pct)
-                                self._close_position(portfolio, ticker, exec_price, next_day, all_trades, "agent_sell")
+                    return {
+                        "ticker": ticker, "action": action, "pos_pct": pos_pct,
+                        "reasoning": reasoning, "signals": signals, "state": state,
+                    }
+
+                # Run all tickers in parallel
+                ticker_results = []
+                with ThreadPoolExecutor(max_workers=min(len(tickers), 5)) as pool:
+                    futures = {pool.submit(_run_ticker_agents, t): t for t in tickers}
+                    for future in as_completed(futures):
+                        tk = futures[future]
+                        try:
+                            result = future.result(timeout=300)
+                            ticker_results.append(result)
+                        except Exception as exc:
+                            err = f"Day {day} {tk}: {exc}"
+                            logger.warning("[agent_backtest] %s", err)
+                            errors.append(err)
+
+                # Execute trades sequentially (order matters for cash management)
+                for result in sorted(ticker_results, key=lambda r: tickers.index(r["ticker"])):
+                    ticker = result["ticker"]
+                    action = result["action"]
+                    pos_pct = result["pos_pct"]
+
+                    all_decisions.append(BTDecision(
+                        date=day, ticker=ticker, action=action,
+                        position_pct=pos_pct, reasoning=result["reasoning"],
+                        agent_signals=result["signals"],
+                    ))
+
+                    next_day = self._next_trading_day(trading_days, day)
+                    trades_before = len(all_trades)
+
+                    if next_day and action in ("BUY", "SHORT"):
+                        open_price = self._get_price(session, ticker, next_day, "open")
+                        if open_price and open_price > 0:
+                            exec_price = open_price * (1 + slippage_pct) if action == "BUY" else open_price * (1 - slippage_pct)
+                            target_pct = min(pos_pct, max_pos_pct)
+                            equity = portfolio.equity(
+                                self._get_close_prices(session, tickers, day)
+                            )
+                            self._execute_decision(
+                                portfolio, ticker, action, target_pct,
+                                equity, exec_price, next_day, all_trades,
+                                stop_loss_pct=stop_loss_pct,
+                            )
+                            if len(all_trades) > trades_before:
                                 t = all_trades[-1]
                                 print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f})")
                                 sys.stdout.flush()
-                        elif action == "HOLD" and ticker in portfolio.positions:
-                            # Reduce position by 50% when signal weakens to HOLD
-                            pos = portfolio.positions[ticker]
-                            if pos.shares > 0 and next_day:
-                                open_price = self._get_price(session, ticker, next_day, "open")
-                                if open_price and open_price > 0:
-                                    reduce_shares = pos.shares * 0.5
-                                    if reduce_shares * open_price > 500:  # Min $500 to bother
-                                        if pos.side == "LONG":
-                                            exec_price = open_price * (1 - slippage_pct)
-                                            proceeds = reduce_shares * exec_price
-                                            portfolio.cash += proceeds
-                                            pos.shares -= reduce_shares
-                                            if pos.shares < 0.01:
-                                                portfolio.positions.pop(ticker)
-                                            all_trades.append(BTTrade(
-                                                date=next_day, ticker=ticker, side="SELL",
-                                                shares=round(reduce_shares, 4), price=exec_price,
-                                                notional=round(proceeds, 2), reason="hold_reduce_50pct",
-                                            ))
-                                            print(f"    📉 REDUCE: SELL {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (HOLD→reduce)")
-                                            sys.stdout.flush()
-                                        elif pos.side == "SHORT":
-                                            exec_price = open_price * (1 + slippage_pct)
-                                            cost = reduce_shares * exec_price
-                                            portfolio.cash -= cost
-                                            pos.shares -= reduce_shares
-                                            if pos.shares < 0.01:
-                                                portfolio.positions.pop(ticker)
-                                            all_trades.append(BTTrade(
-                                                date=next_day, ticker=ticker, side="COVER",
-                                                shares=round(reduce_shares, 4), price=exec_price,
-                                                notional=round(cost, 2), reason="hold_reduce_50pct",
-                                            ))
-                                            print(f"    📉 REDUCE: COVER {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (HOLD→reduce)")
-                                            sys.stdout.flush()
-                        elif action == "HOLD":
-                            pass  # No position, nothing to do
+                                ticker_last_side[ticker] = action
+                    elif action == "SELL" and ticker in portfolio.positions:
+                        open_price = self._get_price(session, ticker, next_day, "open") if next_day else None
+                        if open_price and open_price > 0:
+                            # Track P&L before closing
+                            pos = portfolio.positions.get(ticker)
+                            if pos and pos.side == "LONG":
+                                trade_pnl = (open_price - pos.avg_entry) * pos.shares
+                                self._update_loss_streak(ticker_loss_streak, ticker, trade_pnl)
 
-                        # Rate limit between LLM calls
-                        time.sleep(2)
-
-                    except Exception as exc:
-                        err = f"Day {day} {ticker}: {exc}"
-                        logger.warning("[agent_backtest] %s", err)
-                        errors.append(err)
+                            exec_price = open_price * (1 - slippage_pct)
+                            self._close_position(portfolio, ticker, exec_price, next_day, all_trades, "agent_sell")
+                            t = all_trades[-1]
+                            print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f})")
+                            sys.stdout.flush()
+                    elif action == "HOLD" and ticker in portfolio.positions:
+                        pos = portfolio.positions[ticker]
+                        if pos.shares > 0 and next_day:
+                            open_price = self._get_price(session, ticker, next_day, "open")
+                            if open_price and open_price > 0:
+                                reduce_shares = pos.shares * 0.5
+                                if reduce_shares * open_price > 500:
+                                    if pos.side == "LONG":
+                                        exec_price = open_price * (1 - slippage_pct)
+                                        proceeds = reduce_shares * exec_price
+                                        portfolio.cash += proceeds
+                                        pos.shares -= reduce_shares
+                                        if pos.shares < 0.01:
+                                            portfolio.positions.pop(ticker)
+                                        all_trades.append(BTTrade(
+                                            date=next_day, ticker=ticker, side="SELL",
+                                            shares=round(reduce_shares, 4), price=exec_price,
+                                            notional=round(proceeds, 2), reason="hold_reduce_50pct",
+                                        ))
+                                        print(f"    📉 REDUCE: SELL {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (HOLD→reduce)")
+                                        sys.stdout.flush()
+                                    elif pos.side == "SHORT":
+                                        exec_price = open_price * (1 + slippage_pct)
+                                        cost = reduce_shares * exec_price
+                                        portfolio.cash -= cost
+                                        pos.shares -= reduce_shares
+                                        if pos.shares < 0.01:
+                                            portfolio.positions.pop(ticker)
+                                        all_trades.append(BTTrade(
+                                            date=next_day, ticker=ticker, side="COVER",
+                                            shares=round(reduce_shares, 4), price=exec_price,
+                                            notional=round(cost, 2), reason="hold_reduce_50pct",
+                                        ))
+                                        print(f"    📉 REDUCE: COVER {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (HOLD→reduce)")
+                                        sys.stdout.flush()
+                    elif action == "HOLD":
+                        pass
 
             # ── Stop-loss check on every day ──
             close_prices = self._get_close_prices(session, tickers, day)
@@ -328,11 +372,15 @@ class AgentBacktestEngine:
                 if pos.side == "LONG" and price <= pos.avg_entry * (1 - sl_pct):
                     exec_price = price * (1 - slippage_pct)
                     print(f"  [{_ts()}] 🛑 STOP-LOSS {ticker_sl}: price ${price:.2f} < entry ${pos.avg_entry:.2f} - {sl_pct:.1%}")
+                    # Track loss
+                    self._update_loss_streak(ticker_loss_streak, ticker_sl, -1)
                     self._close_position(portfolio, ticker_sl, exec_price, day, all_trades, "stop_loss")
                     sys.stdout.flush()
                 elif pos.side == "SHORT" and price >= pos.avg_entry * (1 + sl_pct):
                     exec_price = price * (1 + slippage_pct)
                     print(f"  [{_ts()}] 🛑 STOP-LOSS {ticker_sl}: price ${price:.2f} > entry ${pos.avg_entry:.2f} + {sl_pct:.1%}")
+                    # Track loss
+                    self._update_loss_streak(ticker_loss_streak, ticker_sl, -1)
                     self._close_position(portfolio, ticker_sl, exec_price, day, all_trades, "stop_loss")
                     sys.stdout.flush()
 
@@ -395,6 +443,9 @@ class AgentBacktestEngine:
         print(f"  Trades: {len(all_trades)} ({winning}W / {losing}L)")
         if stop_loss_count:
             print(f"  Stop-losses triggered: {stop_loss_count}")
+        streaks = {t: s for t, s in ticker_loss_streak.items() if s > 0}
+        if streaks:
+            print(f"  Loss streaks: {streaks}")
         print(f"  Slippage: {slippage_pct:.2%} per trade")
         print(f"  Decisions: {len(all_decisions)}")
         print(f"{'='*60}\n")
@@ -613,3 +664,13 @@ class AgentBacktestEngine:
                     pnls.append((entry.price - t.price) * entry.shares)
 
         return pnls
+
+    @staticmethod
+    def _update_loss_streak(
+        ticker_loss_streak: dict[str, int], ticker: str, pnl: float,
+    ) -> None:
+        """Update consecutive loss counter for a ticker."""
+        if pnl < 0:
+            ticker_loss_streak[ticker] = ticker_loss_streak.get(ticker, 0) + 1
+        else:
+            ticker_loss_streak[ticker] = 0

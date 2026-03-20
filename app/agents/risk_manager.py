@@ -14,14 +14,19 @@ logger = get_app_logger()
 # Risk rule thresholds
 _MAX_POSITION_PCT = 0.20       # max 20% of portfolio in one ticker
 _MAX_DAILY_LOSS_PCT = 0.03     # halt trading if intraday loss > 3%
-_MIN_CONSENSUS_COUNT = 1       # at least 1 agent must give actionable signal
-_SCORE_SCALE = 100             # full signal scale
+_MIN_CONSENSUS_COUNT = 2       # at least 2 agents must agree on direction
+_MAX_SAME_DIRECTION = 3        # max tickers in same direction (long or short)
+_TICKER_MAX_CONSECUTIVE_LOSSES = 2  # block ticker after N consecutive losses
 
 _SYSTEM_PROMPT = """\
 Task: Risk management assessment for equity trading.
-You are a risk manager who enables trades when risk is acceptable, not one who blocks them.
-Assess the risk of executing a proposed trade given the current portfolio and market conditions.
-Your goal is to APPROVE trades with appropriate position sizing unless there is a clear, specific danger.
+You are a STRICT risk manager who protects capital. You approve trades only when
+the risk/reward is clearly favorable. You actively BLOCK trades when:
+- Portfolio is over-concentrated in one direction
+- The ticker has been losing money recently
+- Agent consensus is weak (mixed signals)
+- Daily losses are accumulating
+
 Respond ONLY with valid JSON, no markdown fences, in the exact format specified below.
 """
 
@@ -38,8 +43,8 @@ RULE-BASED PRE-CHECKS:
 {rule_checks}
 
 Based on the signals and risk context, determine:
-1. Whether the trade should proceed (default to APPROVE unless specific danger exists)
-2. The recommended position size as a % of portfolio (5-15% for normal trades)
+1. Whether the trade should proceed — be STRICT, not permissive
+2. The recommended position size as a % of portfolio
 3. Any risk mitigations required
 
 Return a JSON object with these exact fields:
@@ -47,14 +52,17 @@ Return a JSON object with these exact fields:
   "risk_level": "<LOW|MEDIUM|HIGH|EXTREME>",
   "approved": <true|false>,
   "max_position_pct": <float 0.0-0.20>,
-  "stop_loss_pct": <float, e.g. 0.02 for 2%>,
+  "stop_loss_pct": <float, e.g. 0.05 for 5%>,
   "concerns": ["<concern1>", "<concern2>"],
   "reasoning": "<2-3 sentence summary>"
 }}
 
-IMPORTANT: Approve trades when at least one agent provides a directional signal with >=40% confidence.
-Only reject if there are concrete dangers like extreme daily loss, max position reached, or extreme VIX.
-If approved=false, set max_position_pct to 0.
+IMPORTANT:
+- REJECT if fewer than 2 agents agree on direction
+- REJECT if the ticker has lost money on consecutive recent trades
+- REJECT if portfolio already has {max_same_dir} positions in the same direction
+- If approved, set max_position_pct between 0.03-0.12 (conservative sizing)
+- If approved=false, set max_position_pct to 0
 """
 
 
@@ -71,19 +79,18 @@ class RiskManagerAgent(BaseAgent):
             # ── Rule-based pre-checks ──────────────────────────────────────
             rule_checks: list[str] = []
             hard_block = False
+            block_reasons: list[str] = []
             capital = self.settings.initial_nav
 
             # Check portfolio state — prefer backtest-injected state over live DB
             bt_portfolio = context.get("portfolio_state")
             if bt_portfolio:
-                # Backtest mode: use injected portfolio state
                 position_pct = bt_portfolio.get("position_pct", 0.0)
                 daily_pnl = bt_portfolio.get("daily_pnl", 0.0)
                 current_equity = bt_portfolio.get("equity", capital)
-                current_side = bt_portfolio.get("current_side")  # "LONG", "SHORT", or None
+                current_side = bt_portfolio.get("current_side")
                 capital = current_equity
             else:
-                # Live mode: query Position table
                 position = session.execute(
                     select(Position).where(Position.ticker == ticker)
                 ).scalar_one_or_none()
@@ -105,39 +112,87 @@ class RiskManagerAgent(BaseAgent):
                     for f in today_fills
                 )
 
+            # ── Check 1: Max position size ──
             if position_pct >= _MAX_POSITION_PCT:
-                rule_checks.append(
-                    f"Already at max position ({position_pct:.1%}); no additional size permitted"
-                )
+                block_reasons.append(f"Max position reached ({position_pct:.1%})")
                 hard_block = True
             else:
-                rule_checks.append(f"Current position size: {position_pct:.1%}")
+                rule_checks.append(f"Position size: {position_pct:.1%} (max {_MAX_POSITION_PCT:.0%})")
 
+            # ── Check 2: Daily loss limit ──
             if daily_pnl < -(_MAX_DAILY_LOSS_PCT * capital):
-                rule_checks.append(
-                    f"Daily loss limit reached for {ticker} (P&L: ${daily_pnl:,.0f})"
-                )
+                block_reasons.append(f"Daily loss limit hit (${daily_pnl:,.0f})")
                 hard_block = True
             else:
-                rule_checks.append(f"Intraday P&L for {ticker}: ${daily_pnl:+,.0f}")
+                rule_checks.append(f"Daily P&L: ${daily_pnl:+,.0f}")
 
-            # Check agent consensus
+            # ── Check 3: Agent consensus (require 2+ directional agreement) ──
             actionable_signals = [
                 v for v in agent_signals.values()
                 if isinstance(v, dict) and v.get("signal") in ("BUY", "SHORT")
             ]
-            if len(actionable_signals) < _MIN_CONSENSUS_COUNT:
-                rule_checks.append(
-                    f"Low consensus: only {len(actionable_signals)} actionable signal(s)"
+            buy_count = sum(1 for v in actionable_signals if v.get("signal") == "BUY")
+            short_count = sum(1 for v in actionable_signals if v.get("signal") == "SHORT")
+            dominant_direction = "BUY" if buy_count >= short_count else "SHORT"
+            dominant_count = max(buy_count, short_count)
+
+            if dominant_count < _MIN_CONSENSUS_COUNT:
+                block_reasons.append(
+                    f"Weak consensus: {buy_count} BUY, {short_count} SHORT (need {_MIN_CONSENSUS_COUNT}+ aligned)"
                 )
+                hard_block = True
+            else:
+                rule_checks.append(f"Consensus: {buy_count} BUY, {short_count} SHORT")
+
+            # ── Check 4: Concentration limit (max N tickers same direction) ──
+            portfolio_positions = context.get("portfolio_positions", {})
+            if portfolio_positions:
+                long_count = sum(1 for p in portfolio_positions.values() if p.get("side") == "LONG")
+                short_count_port = sum(1 for p in portfolio_positions.values() if p.get("side") == "SHORT")
+
+                proposed_direction = dominant_direction
+                if proposed_direction == "BUY" and long_count >= _MAX_SAME_DIRECTION:
+                    block_reasons.append(
+                        f"Concentration limit: already {long_count} LONG positions (max {_MAX_SAME_DIRECTION})"
+                    )
+                    hard_block = True
+                elif proposed_direction == "SHORT" and short_count_port >= _MAX_SAME_DIRECTION:
+                    block_reasons.append(
+                        f"Concentration limit: already {short_count_port} SHORT positions (max {_MAX_SAME_DIRECTION})"
+                    )
+                    hard_block = True
+                else:
+                    rule_checks.append(f"Portfolio: {long_count}L/{short_count_port}S positions")
+
+            # ── Check 5: Per-ticker consecutive loss tracking ──
+            ticker_losses = context.get("ticker_loss_streak", {})
+            loss_streak = ticker_losses.get(ticker, 0)
+            if loss_streak >= _TICKER_MAX_CONSECUTIVE_LOSSES:
+                block_reasons.append(
+                    f"{ticker} on {loss_streak}-trade losing streak (max {_TICKER_MAX_CONSECUTIVE_LOSSES})"
+                )
+                hard_block = True
+            elif loss_streak > 0:
+                rule_checks.append(f"{ticker} loss streak: {loss_streak}")
+
+            # ── Check 6: Total portfolio drawdown ──
+            total_dd = context.get("portfolio_state", {}).get("drawdown_pct", 0.0)
+            if total_dd > 0.05:
+                block_reasons.append(f"Portfolio drawdown {total_dd:.1%} exceeds 5% limit")
+                hard_block = True
+            elif total_dd > 0.03:
+                rule_checks.append(f"⚠️ Elevated drawdown: {total_dd:.1%}")
 
             if hard_block:
                 return AgentSignal(
                     agent_name=self.name,
                     signal="HOLD",
                     confidence=95,
-                    reasoning=f"Hard risk block: {'; '.join(rule_checks)}",
-                    metadata={"approved": False, "max_position_pct": 0.0, "hard_block": True},
+                    reasoning=f"BLOCKED: {'; '.join(block_reasons)}",
+                    metadata={
+                        "approved": False, "max_position_pct": 0.0,
+                        "hard_block": True, "block_reasons": block_reasons,
+                    },
                 )
 
             # ── LLM risk review ────────────────────────────────────────────
@@ -153,7 +208,8 @@ class RiskManagerAgent(BaseAgent):
                 f"Current {ticker} position: {position_pct:.1%} of portfolio{side_str}\n"
                 f"Available capital: ${capital:,.0f}\n"
                 f"Initial capital: ${self.settings.initial_nav:,.0f}\n"
-                f"Daily P&L: ${daily_pnl:+,.0f}"
+                f"Daily P&L: ${daily_pnl:+,.0f}\n"
+                f"Drawdown: {total_dd:.1%}"
             )
 
             user_prompt = _USER_PROMPT_TEMPLATE.format(
@@ -161,14 +217,14 @@ class RiskManagerAgent(BaseAgent):
                 signals_summary=signals_summary,
                 portfolio_context=portfolio_context,
                 rule_checks="\n".join(f"- {c}" for c in rule_checks),
+                max_same_dir=_MAX_SAME_DIRECTION,
             )
 
             raw = self._call_llm(_SYSTEM_PROMPT, user_prompt, response_format="json")
             parsed = self._parse_json_response(raw)
 
             if not parsed:
-                # LLM unavailable — approve if any actionable signal exists
-                approved = len(actionable_signals) >= _MIN_CONSENSUS_COUNT
+                approved = dominant_count >= _MIN_CONSENSUS_COUNT
                 return AgentSignal(
                     agent_name=self.name,
                     signal="HOLD" if not approved else "BUY",
@@ -176,7 +232,7 @@ class RiskManagerAgent(BaseAgent):
                     reasoning="LLM unavailable; rule-based fallback applied",
                     metadata={
                         "approved": approved,
-                        "max_position_pct": 0.10 if approved else 0.0,
+                        "max_position_pct": 0.08 if approved else 0.0,
                         "hard_block": False,
                     },
                 )
@@ -193,7 +249,7 @@ class RiskManagerAgent(BaseAgent):
                     "approved": approved,
                     "risk_level": parsed.get("risk_level", "MEDIUM"),
                     "max_position_pct": max_pct,
-                    "stop_loss_pct": float(parsed.get("stop_loss_pct", 0.02)),
+                    "stop_loss_pct": float(parsed.get("stop_loss_pct", 0.05)),
                     "concerns": parsed.get("concerns", []),
                     "hard_block": False,
                 },
