@@ -79,8 +79,9 @@ class BTPortfolio:
             if pos.side == "LONG":
                 eq += pos.shares * price
             else:
-                eq -= pos.shares * (price - pos.avg_entry)
-                eq += pos.shares * pos.avg_entry
+                # Short: cash already has proceeds from short sale.
+                # We owe shares at current market price to close.
+                eq -= pos.shares * price
         return eq
 
     def position_value(self, ticker: str, price: float) -> float:
@@ -238,8 +239,44 @@ class AgentBacktestEngine:
                                 t = all_trades[-1]
                                 print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f})")
                                 sys.stdout.flush()
+                        elif action == "HOLD" and ticker in portfolio.positions:
+                            # Reduce position by 50% when signal weakens to HOLD
+                            pos = portfolio.positions[ticker]
+                            if pos.shares > 0 and next_day:
+                                open_price = self._get_price(session, ticker, next_day, "open")
+                                if open_price and open_price > 0:
+                                    reduce_shares = pos.shares * 0.5
+                                    if reduce_shares * open_price > 500:  # Min $500 to bother
+                                        if pos.side == "LONG":
+                                            exec_price = open_price * (1 - slippage_pct)
+                                            proceeds = reduce_shares * exec_price
+                                            portfolio.cash += proceeds
+                                            pos.shares -= reduce_shares
+                                            if pos.shares < 0.01:
+                                                portfolio.positions.pop(ticker)
+                                            all_trades.append(BTTrade(
+                                                date=next_day, ticker=ticker, side="SELL",
+                                                shares=round(reduce_shares, 4), price=exec_price,
+                                                notional=round(proceeds, 2), reason="hold_reduce_50pct",
+                                            ))
+                                            print(f"    📉 REDUCE: SELL {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (HOLD→reduce)")
+                                            sys.stdout.flush()
+                                        elif pos.side == "SHORT":
+                                            exec_price = open_price * (1 + slippage_pct)
+                                            cost = reduce_shares * exec_price
+                                            portfolio.cash -= cost
+                                            pos.shares -= reduce_shares
+                                            if pos.shares < 0.01:
+                                                portfolio.positions.pop(ticker)
+                                            all_trades.append(BTTrade(
+                                                date=next_day, ticker=ticker, side="COVER",
+                                                shares=round(reduce_shares, 4), price=exec_price,
+                                                notional=round(cost, 2), reason="hold_reduce_50pct",
+                                            ))
+                                            print(f"    📉 REDUCE: COVER {reduce_shares:.2f} {ticker} @ ${exec_price:.2f} (HOLD→reduce)")
+                                            sys.stdout.flush()
                         elif action == "HOLD":
-                            pass  # Keep existing position
+                            pass  # No position, nothing to do
 
                         # Rate limit between LLM calls
                         time.sleep(2)
@@ -259,12 +296,12 @@ class AgentBacktestEngine:
                 price = close_prices.get(ticker_sl, 0)
                 if price <= 0:
                     continue
-                if pos.side == "long" and price <= pos.avg_entry * (1 - sl_pct):
+                if pos.side == "LONG" and price <= pos.avg_entry * (1 - sl_pct):
                     exec_price = price * (1 - slippage_pct)
                     print(f"  [{_ts()}] 🛑 STOP-LOSS {ticker_sl}: price ${price:.2f} < entry ${pos.avg_entry:.2f} - {sl_pct:.1%}")
                     self._close_position(portfolio, ticker_sl, exec_price, day, all_trades, "stop_loss")
                     sys.stdout.flush()
-                elif pos.side == "short" and price >= pos.avg_entry * (1 + sl_pct):
+                elif pos.side == "SHORT" and price >= pos.avg_entry * (1 + sl_pct):
                     exec_price = price * (1 + slippage_pct)
                     print(f"  [{_ts()}] 🛑 STOP-LOSS {ticker_sl}: price ${price:.2f} > entry ${pos.avg_entry:.2f} + {sl_pct:.1%}")
                     self._close_position(portfolio, ticker_sl, exec_price, day, all_trades, "stop_loss")
@@ -516,11 +553,10 @@ class AgentBacktestEngine:
                 notional=round(proceeds, 2), reason=reason,
             ))
         else:
+            # Short close: buy back shares at current price.
+            # Original short sale proceeds are already in cash.
             cost = pos.shares * price
             portfolio.cash -= cost
-            # P&L = (entry - exit) * shares for short
-            pnl = (pos.avg_entry - price) * pos.shares
-            portfolio.cash += pos.shares * pos.avg_entry  # return collateral
             trades.append(BTTrade(
                 date=close_date, ticker=ticker, side="COVER",
                 shares=round(pos.shares, 4), price=price,

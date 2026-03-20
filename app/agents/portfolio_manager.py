@@ -58,10 +58,11 @@ IMPORTANT RULES:
 2. position_pct must not exceed max_position_pct from risk manager
 3. If risk_manager approved=true, you should ACT (BUY, SHORT, or SELL) unless all specialists say HOLD
 4. Use SELL to close an existing long position when outlook has turned negative or neutral
-5. Weight news and fundamentals highest for direction; technicals for timing; macro for context
+5. Weight technicals and news highest for timing; fundamentals for direction; macro for context
 6. conviction=HIGH requires at least 2 agents aligned; MEDIUM requires 1 strong signal; LOW for mixed
-7. When in doubt between HOLD and a directional trade, prefer the trade if risk is approved
-8. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
+7. When 2+ agents say SHORT/SELL, you SHOULD short or sell — do not override with BUY
+8. When agents disagree (e.g., fund=BUY, tech=SHORT, news=SHORT), side with the MAJORITY
+9. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
 """
 
 
@@ -163,11 +164,11 @@ class PortfolioManagerAgent(BaseAgent):
 
     @staticmethod
     def _compute_weighted_confidence(agent_signals: dict[str, dict]) -> float:
-        """Weighted average confidence: technicals=30%, news=25%, fundamentals=25%, macro=20%."""
+        """Weighted average confidence: technicals=35%, news=25%, fundamentals=20%, macro=20%."""
         weights = {
-            "technicals": 0.30,
+            "technicals": 0.35,
             "news_sentiment": 0.25,
-            "fundamentals": 0.25,
+            "fundamentals": 0.20,
             "macro_analyst": 0.20,
         }
         total, weight_sum = 0.0, 0.0
