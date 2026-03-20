@@ -64,6 +64,12 @@ class MacroAnalystAgent(BaseAgent):
                 return AgentSignal.no_signal(self.name, "No FRED data available yet")
 
             combined_context = f"{macro_text}\n\n{market_ctx}"
+
+            # Inject performance feedback if available
+            perf_ctx = self._get_performance_context(context)
+            if perf_ctx:
+                combined_context = f"{combined_context}\n\n{perf_ctx}"
+
             user_prompt = _USER_PROMPT_TEMPLATE.format(macro_context=combined_context)
             raw = self._call_llm(_SYSTEM_PROMPT, user_prompt, response_format="json")
             parsed = self._parse_json_response(raw)

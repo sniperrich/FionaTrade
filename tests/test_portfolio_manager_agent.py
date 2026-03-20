@@ -87,7 +87,8 @@ class TestPortfolioManagerHoldDecision:
 
 class TestPortfolioManagerWeightedConfidence:
     def test_weighted_confidence_calculation(self, settings, session):
-        """Test the static weighted confidence helper."""
+        """Test the weighted confidence helper."""
+        agent = _make_agent(settings)
         signals = {
             "technicals": {"signal": "BUY", "confidence": 80},
             "news_sentiment": {"signal": "BUY", "confidence": 60},
@@ -95,20 +96,22 @@ class TestPortfolioManagerWeightedConfidence:
             "macro_analyst": {"signal": "BUY", "confidence": 50},
         }
         # 80*0.35 + 60*0.25 + 70*0.20 + 50*0.20 = 28+15+14+10 = 67.0
-        conf = PortfolioManagerAgent._compute_weighted_confidence(signals)
+        conf = agent._compute_weighted_confidence(signals)
         assert abs(conf - 67.0) < 0.1
 
     def test_no_signals_returns_fifty(self, settings, session):
-        conf = PortfolioManagerAgent._compute_weighted_confidence({})
+        agent = _make_agent(settings)
+        conf = agent._compute_weighted_confidence({})
         assert conf == 50.0
 
     def test_no_signal_type_excluded(self, settings, session):
+        agent = _make_agent(settings)
         signals = {
             "technicals": {"signal": "NO_SIGNAL", "confidence": 90},
             "news_sentiment": {"signal": "BUY", "confidence": 60},
         }
         # Only news_sentiment counts (weight 0.25)
-        conf = PortfolioManagerAgent._compute_weighted_confidence(signals)
+        conf = agent._compute_weighted_confidence(signals)
         assert abs(conf - 60.0) < 0.1
 
 

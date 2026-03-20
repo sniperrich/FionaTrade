@@ -362,3 +362,40 @@ class AgentRun(Base):
     execution_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
+
+class AgentScore(Base):
+    """Tracks each agent's prediction accuracy for reward/penalty feedback.
+
+    After a prediction is made, the scorer evaluates what actually happened
+    to the stock and assigns a score (-100 to +100). This feeds back into
+    agent prompts and dynamic weight adjustment.
+    """
+
+    __tablename__ = "agent_scores"
+    __table_args__ = (
+        Index("ix_agent_scores_agent_ticker", "agent_name", "ticker"),
+        Index("ix_agent_scores_scored_at", "scored_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    agent_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    agent_name: Mapped[str] = mapped_column(String(64), index=True)
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+
+    # What the agent predicted
+    signal: Mapped[str] = mapped_column(String(16))  # BUY / SHORT / HOLD / NO_SIGNAL
+    confidence: Mapped[int] = mapped_column(Integer, default=50)
+    predicted_at: Mapped[datetime] = mapped_column(DateTime)
+
+    # What actually happened
+    price_at_prediction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_return_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    eval_horizon_days: Mapped[int] = mapped_column(Integer, default=3)
+
+    # Score: -100 (terrible) to +100 (perfect)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    score_reasoning: Mapped[str] = mapped_column(Text, default="")
+
+    scored_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+

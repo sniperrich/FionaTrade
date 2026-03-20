@@ -128,7 +128,7 @@ class AgentBacktestEngine:
             decision_frequency: int trading days between decisions (default: 3)
             max_position_pct: float max per-ticker position (default: 0.15)
             slippage_pct: float slippage per trade (default: 0.0005 = 0.05%)
-            stop_loss_pct: float default stop-loss (default: 0.03 = 3%)
+            stop_loss_pct: float default stop-loss (default: 0.05 = 5%)
         """
         p = params or {}
         tickers = p.get("tickers", ["AAPL", "NVDA", "JPM", "XOM", "AMZN"])
@@ -138,7 +138,7 @@ class AgentBacktestEngine:
         freq = int(p.get("decision_frequency", 3))
         max_pos_pct = float(p.get("max_position_pct", 0.15))
         slippage_pct = float(p.get("slippage_pct", 0.0005))
-        stop_loss_pct = float(p.get("stop_loss_pct", 0.03))
+        stop_loss_pct = float(p.get("stop_loss_pct", 0.05))
 
         # Build list of trading days from bar data
         trading_days = self._get_trading_days(session, start, end, tickers[0])
@@ -189,7 +189,36 @@ class AgentBacktestEngine:
                     try:
                         t0 = time.time()
                         print(f"  [{_ts()}] 🤖 Running agents for {ticker}...", end="", flush=True)
-                        state = graph.run(session, ticker, as_of=as_of)
+
+                        # Build portfolio state for risk manager
+                        close_prices = self._get_close_prices(session, tickers, day)
+                        current_equity = portfolio.equity(close_prices)
+                        pos = portfolio.positions.get(ticker)
+                        pos_value = portfolio.position_value(ticker, close_prices.get(ticker, 0))
+                        pos_pct_current = pos_value / max(current_equity, 1)
+                        current_side = pos.side if pos else None
+
+                        # Compute daily P&L for this ticker from today's trades
+                        daily_pnl = sum(
+                            t.notional * (-1 if t.side in ("BUY", "COVER") else 1)
+                            for t in all_trades if str(t.date) == str(day) and t.ticker == ticker
+                        )
+
+                        bt_context = {
+                            "portfolio_state": {
+                                "position_pct": pos_pct_current,
+                                "daily_pnl": daily_pnl,
+                                "equity": current_equity,
+                                "current_side": current_side,
+                            },
+                            "current_position": {
+                                "side": current_side,
+                                "shares": pos.shares if pos else 0,
+                                "entry_price": pos.avg_entry if pos else 0,
+                                "entry_date": str(pos.entry_date) if pos else None,
+                            },
+                        }
+                        state = graph.run(session, ticker, context=bt_context, as_of=as_of)
                         elapsed = time.time() - t0
 
                         action = state.get("final_action", "HOLD")

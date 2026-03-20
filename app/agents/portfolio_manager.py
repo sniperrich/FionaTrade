@@ -39,6 +39,9 @@ RISK MANAGER:
 approved={risk_approved}, max_position_pct={max_pct:.1%}, risk_level={risk_level}
 {risk_reasoning}
 
+CURRENT POSITION:
+{position_context}
+
 Based on all inputs above, make the final decision.
 
 Return a JSON object with these exact fields:
@@ -63,6 +66,9 @@ IMPORTANT RULES:
 7. When 2+ agents say SHORT/SELL, you SHOULD short or sell — do not override with BUY
 8. When agents disagree (e.g., fund=BUY, tech=SHORT, news=SHORT), side with the MAJORITY
 9. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
+10. DIRECTION INERTIA: If we already hold a position, do NOT reverse unless at least 3 agents
+    clearly support the opposite direction. Staying in a winning position is better than whipsawing.
+    If the current position is profitable, prefer HOLD over reversal.
 """
 
 
@@ -74,6 +80,15 @@ class PortfolioManagerAgent(BaseAgent):
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         context = context or {}
         agent_signals: dict[str, dict] = context.get("agent_signals", {})
+
+        # Compute dynamic weights based on agent track records
+        as_of = context.get("as_of")
+        try:
+            from app.agents.reward import compute_dynamic_weights
+            dyn_weights = compute_dynamic_weights(session, as_of=as_of)
+        except Exception:
+            dyn_weights = None
+        self._current_weights = dyn_weights  # store for confidence calc
 
         def _sig(agent: str) -> dict:
             return agent_signals.get(agent, {})
@@ -87,6 +102,19 @@ class PortfolioManagerAgent(BaseAgent):
 
             risk_approved = risk.get("metadata", {}).get("approved", False) if risk else False
             max_pct = risk.get("metadata", {}).get("max_position_pct", 0.05) if risk else 0.05
+
+            # Build position context for direction inertia
+            current_pos = context.get("current_position", {})
+            current_side = current_pos.get("side")
+            if current_side:
+                position_context = (
+                    f"Currently holding {current_side} position "
+                    f"({current_pos.get('shares', 0):.1f} shares @ ${current_pos.get('entry_price', 0):.2f}, "
+                    f"opened {current_pos.get('entry_date', 'unknown')}). "
+                    f"Reversing direction is COSTLY — only reverse if 3+ agents clearly support the opposite."
+                )
+            else:
+                position_context = "No current position in this ticker."
 
             user_prompt = _USER_PROMPT_TEMPLATE.format(
                 ticker=ticker,
@@ -106,6 +134,7 @@ class PortfolioManagerAgent(BaseAgent):
                 max_pct=max_pct,
                 risk_level=risk.get("metadata", {}).get("risk_level", "UNKNOWN") if risk else "UNKNOWN",
                 risk_reasoning=risk.get("reasoning", "No risk assessment")[:200],
+                position_context=position_context,
             )
 
             # If risk hard-blocked, skip LLM to save tokens
@@ -162,15 +191,17 @@ class PortfolioManagerAgent(BaseAgent):
             logger.exception("[portfolio_manager] Unexpected error for %s: %s", ticker, exc)
             return AgentSignal.error_signal(self.name, str(exc))
 
-    @staticmethod
-    def _compute_weighted_confidence(agent_signals: dict[str, dict]) -> float:
-        """Weighted average confidence: technicals=35%, news=25%, fundamentals=20%, macro=20%."""
-        weights = {
-            "technicals": 0.35,
-            "news_sentiment": 0.25,
-            "fundamentals": 0.20,
-            "macro_analyst": 0.20,
-        }
+    def _compute_weighted_confidence(self, agent_signals: dict[str, dict]) -> float:
+        """Weighted average confidence — uses dynamic weights if available, else defaults."""
+        weights = (
+            getattr(self, "_current_weights", None)
+            or {
+                "technicals": 0.35,
+                "news_sentiment": 0.25,
+                "fundamentals": 0.20,
+                "macro_analyst": 0.20,
+            }
+        )
         total, weight_sum = 0.0, 0.0
         for agent, weight in weights.items():
             sig = agent_signals.get(agent)

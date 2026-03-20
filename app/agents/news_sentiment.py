@@ -53,6 +53,11 @@ class NewsSentimentAgent(BaseAgent):
             news_text = build_news_context_text(session, ticker, lookback_hours=336, as_of=as_of)
             market_ctx = build_market_context_text(session, ticker, as_of=as_of)
             combined = f"{news_text}\n\n{market_ctx}"
+
+            perf_ctx = self._get_performance_context(context)
+            if perf_ctx:
+                combined = f"{combined}\n\n{perf_ctx}"
+
             user_prompt = _USER_PROMPT_TEMPLATE.format(ticker=ticker, news_context=combined)
 
             raw = self._call_llm(_SYSTEM_PROMPT, user_prompt, response_format="json")

@@ -62,6 +62,11 @@ class FundamentalsAgent(BaseAgent):
                 return AgentSignal.no_signal(self.name, "No fundamentals data available yet")
 
             combined = f"{fundamentals_text}\n\n{market_ctx}"
+
+            perf_ctx = self._get_performance_context(context)
+            if perf_ctx:
+                combined = f"{combined}\n\n{perf_ctx}"
+
             user_prompt = _USER_PROMPT_TEMPLATE.format(
                 ticker=ticker, fundamentals_context=combined
             )

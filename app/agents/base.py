@@ -149,6 +149,13 @@ class BaseAgent(ABC):
 
     # ── Abstract interface ────────────────────────────────────────────────────
 
+    def _get_performance_context(self, context: dict | None) -> str:
+        """Extract this agent's performance feedback from context (if available)."""
+        if not context:
+            return ""
+        agent_perf = context.get("agent_performance", {})
+        return agent_perf.get(self.name, "")
+
     @abstractmethod
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         """Run analysis and return a structured signal.

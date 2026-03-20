@@ -12,6 +12,7 @@ from app.agents.fundamentals import FundamentalsAgent
 from app.agents.macro_analyst import MacroAnalystAgent
 from app.agents.news_sentiment import NewsSentimentAgent
 from app.agents.portfolio_manager import PortfolioManagerAgent
+from app.agents.reward import build_performance_context, compute_dynamic_weights, batch_score_runs
 from app.agents.risk_manager import RiskManagerAgent
 from app.agents.technicals import TechnicalsAgent
 from app.core.config import Settings
@@ -51,6 +52,24 @@ class AgentGraph:
         """
         ticker = state["ticker"]
         context = state.get("context", {})
+        as_of = context.get("as_of")
+
+        # Score any unscored past runs to keep performance data fresh
+        try:
+            batch_score_runs(session, as_of=as_of)
+        except Exception as exc:
+            logger.debug("[graph] batch_score_runs failed (non-critical): %s", exc)
+
+        # Build per-agent performance context
+        agent_perf_ctx = {}
+        for agent_name in ("macro_analyst", "news_sentiment", "fundamentals", "technicals"):
+            try:
+                perf_text = build_performance_context(session, agent_name, ticker, as_of=as_of)
+                if perf_text:
+                    agent_perf_ctx[agent_name] = perf_text
+            except Exception:
+                pass
+        context["agent_performance"] = agent_perf_ctx
 
         # Use injected session_factory or fall back to production SessionLocal
         if self._session_factory is not None:

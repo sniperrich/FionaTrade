@@ -71,45 +71,55 @@ class RiskManagerAgent(BaseAgent):
             # ── Rule-based pre-checks ──────────────────────────────────────
             rule_checks: list[str] = []
             hard_block = False
-
-            # Check current position size
-            position = session.execute(
-                select(Position).where(Position.ticker == ticker)
-            ).scalar_one_or_none()
-            position_pct = 0.0
-            if position:
-                position_pct = abs(float(position.qty) * float(position.avg_price or 0)) / max(
-                    self.settings.initial_nav, 1
-                )
-                if position_pct >= _MAX_POSITION_PCT:
-                    rule_checks.append(
-                        f"Already at max position ({position_pct:.1%}); no additional size permitted"
-                    )
-                    hard_block = True
-                else:
-                    rule_checks.append(f"Current position size: {position_pct:.1%}")
-
-            # Check intraday P&L via today's fills
-            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            today_fills = session.execute(
-                select(PaperFill).where(
-                    PaperFill.ticker == ticker,
-                    PaperFill.filled_at >= today_start,
-                )
-            ).scalars().all()
-            # Approximate P&L from fill notional (sells reduce, buys increase cost basis)
-            intraday_pnl = sum(
-                float(f.notional) * (-1 if f.side in ("BUY", "COVER") else 1)
-                for f in today_fills
-            )
             capital = self.settings.initial_nav
-            if intraday_pnl < -(_MAX_DAILY_LOSS_PCT * capital):
+
+            # Check portfolio state — prefer backtest-injected state over live DB
+            bt_portfolio = context.get("portfolio_state")
+            if bt_portfolio:
+                # Backtest mode: use injected portfolio state
+                position_pct = bt_portfolio.get("position_pct", 0.0)
+                daily_pnl = bt_portfolio.get("daily_pnl", 0.0)
+                current_equity = bt_portfolio.get("equity", capital)
+                current_side = bt_portfolio.get("current_side")  # "LONG", "SHORT", or None
+                capital = current_equity
+            else:
+                # Live mode: query Position table
+                position = session.execute(
+                    select(Position).where(Position.ticker == ticker)
+                ).scalar_one_or_none()
+                position_pct = 0.0
+                current_side = None
+                if position:
+                    position_pct = abs(float(position.qty) * float(position.avg_price or 0)) / max(capital, 1)
+                    current_side = "LONG" if float(position.qty) > 0 else "SHORT"
+
+                today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                today_fills = session.execute(
+                    select(PaperFill).where(
+                        PaperFill.ticker == ticker,
+                        PaperFill.filled_at >= today_start,
+                    )
+                ).scalars().all()
+                daily_pnl = sum(
+                    float(f.notional) * (-1 if f.side in ("BUY", "COVER") else 1)
+                    for f in today_fills
+                )
+
+            if position_pct >= _MAX_POSITION_PCT:
                 rule_checks.append(
-                    f"Daily loss limit reached for {ticker} (P&L: ${intraday_pnl:,.0f})"
+                    f"Already at max position ({position_pct:.1%}); no additional size permitted"
                 )
                 hard_block = True
             else:
-                rule_checks.append(f"Intraday P&L for {ticker}: ${intraday_pnl:+,.0f}")
+                rule_checks.append(f"Current position size: {position_pct:.1%}")
+
+            if daily_pnl < -(_MAX_DAILY_LOSS_PCT * capital):
+                rule_checks.append(
+                    f"Daily loss limit reached for {ticker} (P&L: ${daily_pnl:,.0f})"
+                )
+                hard_block = True
+            else:
+                rule_checks.append(f"Intraday P&L for {ticker}: ${daily_pnl:+,.0f}")
 
             # Check agent consensus
             actionable_signals = [
@@ -138,10 +148,12 @@ class RiskManagerAgent(BaseAgent):
                 for name, sig in agent_signals.items()
             ) or "No agent signals available"
 
+            side_str = f" ({current_side})" if current_side else ""
             portfolio_context = (
-                f"Current {ticker} position: {position_pct:.1%} of portfolio\n"
+                f"Current {ticker} position: {position_pct:.1%} of portfolio{side_str}\n"
                 f"Available capital: ${capital:,.0f}\n"
-                f"Initial capital: ${self.settings.initial_nav:,.0f}"
+                f"Initial capital: ${self.settings.initial_nav:,.0f}\n"
+                f"Daily P&L: ${daily_pnl:+,.0f}"
             )
 
             user_prompt = _USER_PROMPT_TEMPLATE.format(
