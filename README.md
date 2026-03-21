@@ -133,6 +133,7 @@ tests/           137 个 pytest 测试
 > - `/api/news` 现在额外返回 `metadata` 和 `body_preview`
 > - `/api/live/set_enabled` 同时接受 `POST` 和 `PUT`
 > - Dashboard/Live 首屏改成 `snapshot + sessionStorage`，重新打开页面会先用上次结果秒开，再后台刷新
+> - 模板页面脚本必须放在 `base.html` 的 `{% block scripts %}` 中，不能直接内联在 `content` 里，否则会先于全局工具函数执行
 
 ---
 
