@@ -26,7 +26,7 @@
       <tbody>
         {% for r in runs %}
         <tr>
-          <td class="mono text-sm">{{ r.id[:8] }}…</td>
+          <td class="mono text-sm">{{ r.id }}</td>
           <td>
             {% if r.status == 'completed' %}<span class="badge badge-green">DONE</span>
             {% elif r.status == 'running' %}<span class="badge badge-yellow">RUNNING</span>

@@ -32,6 +32,9 @@ def dashboard(request: Request, session: Session = Depends(get_db), settings: Se
     latest_ingest = session.execute(select(func.max(RawItem.ingested_at))).scalar_one()
     source_latency_sec = 0.0
     if latest_ingest:
+        from datetime import timezone
+        if latest_ingest.tzinfo is None:
+            latest_ingest = latest_ingest.replace(tzinfo=timezone.utc)
         source_latency_sec = (now - latest_ingest).total_seconds()
 
     engine = PaperEngineService(settings)
