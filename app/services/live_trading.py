@@ -15,9 +15,10 @@ regular session unless live_allow_premarket is set.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.agent_graph.graph import AgentGraph
@@ -25,8 +26,9 @@ from app.broker.alpaca import AlpacaBroker
 from app.core.config import Settings
 from app.core.logging import get_app_logger
 from app.core.market_hours import market_session_info
-from app.db.models import LiveTrade
+from app.db.models import AgentRun, LiveTrade
 from app.services.orchestrator import PipelineOrchestrator
+from app.tools.news import count_new_raw_items
 
 logger = get_app_logger()
 
@@ -66,11 +68,34 @@ class LiveTradingService:
             }
 
         # ── 1. Fresh news ingestion ──────────────────────────────────────────
+        cycle_start = datetime.now(timezone.utc)
+        new_article_count = 0
         try:
             orchestrator = PipelineOrchestrator(self.settings)
             orchestrator.run_ingestion_validation(session)
+            new_article_count = count_new_raw_items(session, cycle_start)
         except Exception as exc:
             logger.warning("[live] Ingestion failed (continuing): %s", exc)
+
+        # ── Freshness gate — skip agent if no new articles AND recent run exists ──
+        # Allow the agent to run unconditionally if it hasn't run in the last 30 min.
+        last_global_run = self._get_last_agent_run_time(session, ticker=None)
+        time_since_last = (
+            (cycle_start - last_global_run).total_seconds() / 60
+            if last_global_run else 999
+        )
+        if new_article_count == 0 and time_since_last < 30:
+            logger.info(
+                "[live] Cycle %s: no new articles (last run %.0f min ago) — skipping agents",
+                cycle_id, time_since_last,
+            )
+            return {
+                "cycle_id": cycle_id,
+                "skipped": True,
+                "reason": "no_new_articles",
+                "new_articles": 0,
+                "market_time": msi["et_time_str"],
+            }
 
         # ── 2. Broker & portfolio state ─────────────────────────────────────
         broker = AlpacaBroker(self.settings)
@@ -102,6 +127,7 @@ class LiveTradingService:
             "market_session": msi["label"],
             "portfolio_value": portfolio_value,
             "tickers_processed": len(tickers),
+            "new_articles": new_article_count,
             "orders_placed": sum(1 for r in results if r.get("order_placed")),
             "results": results,
         }
@@ -118,6 +144,19 @@ class LiveTradingService:
         if not tickers:
             tickers = list(self.settings.agent_tickers_override or [])
         return [t.upper() for t in tickers if t]
+
+    def _get_last_agent_run_time(self, session: Session, ticker: str | None) -> datetime | None:
+        """Return the created_at of the most recent AgentRun (optionally filtered by ticker)."""
+        try:
+            stmt = select(AgentRun.created_at).order_by(desc(AgentRun.created_at)).limit(1)
+            if ticker:
+                stmt = stmt.where(AgentRun.ticker == ticker)
+            result = session.execute(stmt).scalar_one_or_none()
+            if result and result.tzinfo is None:
+                result = result.replace(tzinfo=timezone.utc)
+            return result
+        except Exception:
+            return None
 
     def _get_agent_graph(self) -> AgentGraph:
         if self._agent_graph is None:
@@ -137,7 +176,12 @@ class LiveTradingService:
 
         # ── Agent decision ───────────────────────────────────────────────────
         graph = self._get_agent_graph()
-        state = graph.run(session, ticker)
+
+        # Inject last-run timestamp so NewsSentimentAgent screener can focus on new articles
+        last_run_at = self._get_last_agent_run_time(session, ticker=ticker)
+        graph_context = {"last_agent_run_at": last_run_at} if last_run_at else {}
+
+        state = graph.run(session, ticker, context=graph_context)
 
         desired_action = (state.get("final_action") or "HOLD").upper()
         target_pct = float(state.get("final_position_pct") or 0.0)
@@ -148,8 +192,6 @@ class LiveTradingService:
 
         agent_run_id: int | None = None
         try:
-            from app.db.models import AgentRun
-            from sqlalchemy import select, desc
             latest = session.execute(
                 select(AgentRun)
                 .where(AgentRun.ticker == ticker)

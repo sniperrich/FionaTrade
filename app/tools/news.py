@@ -266,12 +266,20 @@ def get_ticker_news_summary(
             "title": row.title,
             "source": row.source,
             "published_at": row.published_at.isoformat(),
+            "ingested_at": row.ingested_at.isoformat() if row.ingested_at else None,
             "body_snippet": (row.body or "")[:400],
             "body_full": row.body or "",
             "source_tier": row.source_tier,
         })
 
     return results
+
+
+def count_new_raw_items(session: Session, since: datetime) -> int:
+    """Count RawItems ingested after `since` (used for cycle freshness gate)."""
+    return session.execute(
+        select(sa.func.count()).select_from(RawItem).where(RawItem.ingested_at >= since)
+    ).scalar_one()
 
 
 def get_articles_full_text(session: Session, item_ids: list[int]) -> dict[int, dict]:
@@ -317,39 +325,100 @@ def _hours_since(ts_str: str, ref_time: datetime) -> float:
         return 999.0
 
 
+def _parse_dt(ts_str: str | None) -> datetime | None:
+    if not ts_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+    except Exception:
+        return None
+
+
 def build_news_screening_text(
-    session: Session, ticker: str, lookback_hours: int = 336, as_of: datetime | None = None,
+    session: Session,
+    ticker: str,
+    lookback_hours: int = 336,
+    as_of: datetime | None = None,
+    since: datetime | None = None,
 ) -> tuple[str, list[dict]]:
     """Build a numbered screening list with article IDs for the pre-screening pass.
 
-    Returns (screening_text, raw_news_list) so the caller has IDs to map back.
-    Each article gets a sequential number [N] and shows the DB id for expansion.
+    Args:
+        since: When provided (live trading mode), articles ingested before this
+               timestamp are shown as "(already analyzed)" background context —
+               the screener is instructed NOT to request full reads for them.
+               Articles ingested after `since` are marked ⭐ NEW.
+
+    Returns (screening_text, raw_news_list).
     """
     ref_time = as_of or datetime.now(timezone.utc)
     news = get_ticker_news_summary(
         session, ticker=ticker, lookback_hours=lookback_hours, limit=25, as_of=as_of
     )
 
+    # Partition articles: new (unseen) vs already-analyzed
+    new_articles = []
+    old_articles = []
+    for item in news:
+        ingested = _parse_dt(item.get("ingested_at"))
+        if since and ingested and ingested < since:
+            old_articles.append(item)
+        else:
+            new_articles.append(item)
+
+    has_new = bool(new_articles)
     lines: list[str] = [
         f"=== ARTICLE SCREENING LIST FOR {ticker} ===",
-        "(Read headlines and snippets below. Return which article IDs are worth reading in full.)",
-        "(🔴=<24h  🟡=1-3d  🟢=3-7d  ⚪=7-14d  |  tier1=top source, tier3=low quality)",
-        "",
     ]
 
-    for i, item in enumerate(news, 1):
-        age = _hours_since(item["published_at"], ref_time)
-        label = _age_label(age)
-        tier_tag = f"[tier{item['source_tier']}]"
-        snippet = (item.get("body_snippet") or "").strip().replace("\n", " ")[:180]
-        lines.append(f"[{i}] id={item['id']}  {label} {tier_tag} [{item['source']}]")
-        lines.append(f"    {item['title']}")
-        if snippet and snippet.strip() != item["title"].strip():
-            lines.append(f"    → {snippet}")
+    if since:
+        lines.append(
+            f"⭐ NEW articles (ingested since last run): {len(new_articles)}  |  "
+            f"Old/already-analyzed: {len(old_articles)}"
+        )
+        lines.append(
+            "IMPORTANT: Only request full_read for ⭐ NEW articles. "
+            "Old articles were visible in the previous agent run."
+        )
+    else:
+        lines.append("(Read headlines and snippets. Return which article IDs are worth reading in full.)")
+
+    lines.append("(🔴=<24h  🟡=1-3d  🟢=3-7d  ⚪=7-14d  |  tier1=top source, tier3=low quality)")
+    lines.append("")
+
+    # NEW articles first
+    if new_articles:
+        lines.append("── ⭐ NEW SINCE LAST RUN ──" if since else "── ARTICLES ──")
+        for item in new_articles:
+            age = _hours_since(item["published_at"], ref_time)
+            label = _age_label(age)
+            tier_tag = f"[tier{item['source_tier']}]"
+            snippet = (item.get("body_snippet") or "").strip().replace("\n", " ")[:180]
+            lines.append(f"  ⭐ id={item['id']}  {label} {tier_tag} [{item['source']}]")
+            lines.append(f"     {item['title']}")
+            if snippet and snippet.strip() != item["title"].strip():
+                lines.append(f"     → {snippet}")
+            lines.append("")
+    elif since:
+        lines.append("── ⭐ NEW SINCE LAST RUN: (none) ──")
+        lines.append("")
+
+    # OLD articles — shown as background only
+    if old_articles and since:
+        lines.append("── 📚 BACKGROUND (already analyzed in previous run — do NOT request full read) ──")
+        for item in old_articles[:8]:  # cap old articles to save tokens
+            age = _hours_since(item["published_at"], ref_time)
+            label = _age_label(age)
+            lines.append(f"  [OLD] id={item['id']}  {label} [{item['source']}] {item['title']}")
+        if len(old_articles) > 8:
+            lines.append(f"  ... and {len(old_articles) - 8} more older articles")
         lines.append("")
 
     if not news:
         lines.append("  (no articles found)")
+
+
 
     return "\n".join(lines), news
 

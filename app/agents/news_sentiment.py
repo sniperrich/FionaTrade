@@ -111,14 +111,23 @@ class NewsSentimentAgent(BaseAgent):
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         try:
             as_of = (context or {}).get("as_of")
+            last_run_at = (context or {}).get("last_agent_run_at")  # set by LiveTradingService
 
             # ── Build geo / sentiment blocks (shared across both passes) ──
             geo_block, sentiment_block = self._build_aux_blocks(session, ticker, as_of, context)
 
             # ── Pass 1: screening — which articles are worth reading in full? ──
+            # In live mode, `since=last_run_at` ensures screener focuses on NEW articles only.
             screening_text, raw_news = build_news_screening_text(
-                session, ticker, lookback_hours=336, as_of=as_of
+                session, ticker, lookback_hours=336, as_of=as_of, since=last_run_at
             )
+
+            # Count genuinely new articles (unseen since last run)
+            new_count = sum(
+                1 for item in raw_news
+                if not last_run_at or (item.get("ingested_at") and
+                   item["ingested_at"] >= last_run_at.isoformat())
+            ) if last_run_at else len(raw_news)
 
             expanded_articles: dict[int, dict] = {}
             if raw_news:
@@ -139,12 +148,13 @@ class NewsSentimentAgent(BaseAgent):
                         expanded_articles = get_articles_full_text(session, capped)
                         logger.info(
                             "[news_sentiment] %s screener requested %d full articles "
-                            "(ids=%s): %s",
-                            ticker, len(capped), capped, reason,
+                            "(ids=%s, new_count=%d): %s",
+                            ticker, len(capped), capped, new_count, reason,
                         )
                     else:
                         logger.debug(
-                            "[news_sentiment] %s screener: all noise — %s", ticker, reason
+                            "[news_sentiment] %s screener: all noise (new_count=%d) — %s",
+                            ticker, new_count, reason,
                         )
 
             # ── Pass 2: full analysis (with or without expanded full text) ──
