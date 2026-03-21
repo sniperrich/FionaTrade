@@ -128,6 +128,7 @@ class Settings(BaseSettings):
             # Geopolitical / world events — feed the MacroAnalystAgent
             "https://feeds.bbci.co.uk/news/world/rss.xml",            # BBC World
             "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml",  # BBC US policy
+            "https://feeds.bbci.co.uk/news/business/rss.xml",         # BBC Business (economic impact)
             "https://www.aljazeera.com/xml/rss/all.xml",               # Al Jazeera
             "https://api.axios.com/feed/",                             # Axios (full articles)
         ]

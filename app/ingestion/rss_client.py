@@ -45,6 +45,31 @@ def _strip_html(text: str) -> str:
 # Geo/world-news sources whose bodies need HTML-stripping (Axios returns full HTML)
 _HTML_BODY_SOURCES = {"axios.com", "api.axios.com"}
 
+# Pre-filter keywords for geo sources: articles that don't contain any of these
+# are pure noise (celebrity/sports/culture) and are skipped before DB write.
+# Axios is excluded (100% relevant, full articles). BBC Business is excluded
+# (economically scoped feed, all articles market-relevant).
+_GEO_INGEST_KW = [
+    "war", "military", "strike", "attack", "bomb", "missile", "ceasefire",
+    "iran", "russia", "china", "ukraine", "nato", "israel", "syria", "korea",
+    "tariff", "sanction", "embargo", "export ban", "trade deal", "trade war",
+    "opec", "oil", "energy", "gas price", "hormuz",
+    "trump", "white house", "congress", "senate", "executive order", "legislation",
+    "federal reserve", "fed rate", "interest rate", "inflation", "gdp", "recession",
+    "policy", "g7", "g20", "imf", "central bank",
+    "nuclear", "weapon", "defence", "defense", "pentagon",
+    "economy", "market", "stock", "investor", "financial",
+    "wage", "employment", "jobs", "unemployment", "hiring",
+    "mortgage", "housing", "retail sales", "consumer", "borrowing",
+    "supply chain", "shipping", "port", "freight",
+]
+# Sources that always pass (no pre-filter needed — either 100% relevant or topic-scoped)
+_GEO_NO_FILTER_HOSTS = {
+    "api.axios.com", "axios.com",     # Axios: 100% relevant
+    # BBC sub-feeds that are already topic-scoped (business, tech) don't need geo-filtering
+    # BBC World and BBC US&Canada go through the filter (general news feeds)
+}
+
 # ---------------------------------------------------------------------------
 # Ticker relevance: pre-compiled lookup structures built from company_names.py
 # ---------------------------------------------------------------------------
@@ -200,6 +225,8 @@ class RssClient:
             feed_items = 0
             feed_host = urlparse(feed_url).netloc.lower()
             needs_html_strip = any(h in feed_host for h in _HTML_BODY_SOURCES)
+            is_geo_source = source_name in {"bbc", "aljazeera", "axios", "npr"}
+            apply_geo_filter = is_geo_source and feed_host not in _GEO_NO_FILTER_HOSTS
             for entry in feed.entries[:60]:
                 url = entry.get("link")
                 title = entry.get("title", "").strip()
@@ -207,6 +234,12 @@ class RssClient:
                 body = _strip_html(raw_body) if needs_html_strip else raw_body
                 if not url or not title:
                     continue
+
+                # Drop pure noise from general-news geo sources (celebrity, sports, culture)
+                if apply_geo_filter:
+                    search_text = (title + " " + body[:300]).lower()
+                    if not any(kw in search_text for kw in _GEO_INGEST_KW):
+                        continue
 
                 published_raw = (
                     entry.get("published")
