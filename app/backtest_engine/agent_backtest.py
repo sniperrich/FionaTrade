@@ -31,6 +31,40 @@ _MARKET_CLOSE = dt_time(16, 0)
 _MARKET_OPEN = dt_time(9, 30)
 _print_lock = threading.Lock()
 
+# ── Sector map for concentration limiting ────────────────────────────────────
+_TICKER_SECTOR: dict[str, str] = {
+    # Tech
+    "AAPL": "tech", "NVDA": "tech", "MSFT": "tech", "META": "tech",
+    "AMZN": "tech", "GOOGL": "tech", "GOOG": "tech", "TSLA": "tech",
+    "ORCL": "tech", "ADBE": "tech", "CRM": "tech", "AMD": "tech",
+    "INTC": "tech", "QCOM": "tech", "TXN": "tech", "AVGO": "tech",
+    "NFLX": "tech", "PYPL": "tech", "EBAY": "tech", "NOW": "tech",
+    # Financials
+    "JPM": "financials", "BAC": "financials", "GS": "financials",
+    "MS": "financials", "WFC": "financials", "BRK.B": "financials",
+    "V": "financials", "MA": "financials", "AXP": "financials",
+    "BLK": "financials", "C": "financials", "USB": "financials",
+    "PNC": "financials", "TFC": "financials", "COF": "financials",
+    # Energy
+    "XOM": "energy", "CVX": "energy", "COP": "energy", "EOG": "energy",
+    "SLB": "energy", "PSX": "energy", "MPC": "energy", "VLO": "energy",
+    # Healthcare
+    "JNJ": "healthcare", "PFE": "healthcare", "UNH": "healthcare",
+    "ABT": "healthcare", "MRK": "healthcare", "LLY": "healthcare",
+    "ABBV": "healthcare", "BMY": "healthcare", "AMGN": "healthcare",
+    "MDT": "healthcare", "TMO": "healthcare", "DHR": "healthcare",
+    # Consumer
+    "WMT": "consumer", "HD": "consumer", "COST": "consumer",
+    "MCD": "consumer", "SBUX": "consumer", "NKE": "consumer",
+    "LOW": "consumer", "TGT": "consumer", "DIS": "consumer",
+    "CMCSA": "consumer", "F": "consumer", "GM": "consumer",
+    # Industrials
+    "HON": "industrials", "CAT": "industrials", "BA": "industrials",
+    "GE": "industrials", "RTX": "industrials", "LMT": "industrials",
+    "GD": "industrials", "UPS": "industrials", "FDX": "industrials",
+}
+_MAX_SECTOR_POSITIONS = 2  # max open positions in the same sector
+
 
 def _ts() -> str:
     """Compact timestamp for progress output."""
@@ -324,24 +358,38 @@ class AgentBacktestEngine:
                                 action = "HOLD"  # override to HOLD
 
                     if next_day and action in ("BUY", "SHORT"):
-                        open_price = self._get_price(session, ticker, next_day, "open")
-                        if open_price and open_price > 0:
-                            exec_price = open_price * (1 + slippage_pct) if action == "BUY" else open_price * (1 - slippage_pct)
-                            target_pct = min(pos_pct, max_pos_pct)
-                            equity = portfolio.equity(
-                                self._get_close_prices(session, tickers, day)
-                            )
-                            self._execute_decision(
-                                portfolio, ticker, action, target_pct,
-                                equity, exec_price, next_day, all_trades,
-                                stop_loss_pct=stop_loss_pct,
-                            )
-                            if len(all_trades) > trades_before:
-                                t = all_trades[-1]
-                                print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f})")
-                                sys.stdout.flush()
-                                ticker_last_side[ticker] = action
-                                ticker_entry_decision_idx[ticker] = decision_idx
+                        # Sector concentration check: max _MAX_SECTOR_POSITIONS per sector
+                        ticker_sector = _TICKER_SECTOR.get(ticker, "other")
+                        sector_positions = [
+                            t for t, p in portfolio.positions.items()
+                            if t != ticker and _TICKER_SECTOR.get(t, "other") == ticker_sector
+                        ]
+                        if len(sector_positions) >= _MAX_SECTOR_POSITIONS and ticker not in portfolio.positions:
+                            print(f"    🏭 SECTOR LIMIT: {ticker} ({ticker_sector}) blocked — already {len(sector_positions)} in sector ({', '.join(sector_positions)})")
+                            sys.stdout.flush()
+                        else:
+                            open_price = self._get_price(session, ticker, next_day, "open")
+                            if open_price and open_price > 0:
+                                exec_price = open_price * (1 + slippage_pct) if action == "BUY" else open_price * (1 - slippage_pct)
+                                target_pct = min(pos_pct, max_pos_pct)
+                                equity = portfolio.equity(
+                                    self._get_close_prices(session, tickers, day)
+                                )
+                                # ATR-based adaptive stop-loss per ticker
+                                atr_stop = self._compute_atr_stop(
+                                    session, ticker, next_day, default_stop=stop_loss_pct
+                                )
+                                self._execute_decision(
+                                    portfolio, ticker, action, target_pct,
+                                    equity, exec_price, next_day, all_trades,
+                                    stop_loss_pct=atr_stop,
+                                )
+                                if len(all_trades) > trades_before:
+                                    t = all_trades[-1]
+                                    print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f}) [stop={atr_stop:.1%}]")
+                                    sys.stdout.flush()
+                                    ticker_last_side[ticker] = action
+                                    ticker_entry_decision_idx[ticker] = decision_idx
                     elif action == "SELL" and ticker in portfolio.positions:
                         open_price = self._get_price(session, ticker, next_day, "open") if next_day else None
                         if open_price and open_price > 0:
@@ -550,6 +598,56 @@ class AgentBacktestEngine:
             if price:
                 prices[ticker] = price
         return prices
+
+    def _compute_atr_stop(
+        self,
+        session: Session,
+        ticker: str,
+        as_of: date,
+        default_stop: float = 0.05,
+        atr_mult: float = 2.5,
+        min_stop: float = 0.03,
+        max_stop: float = 0.08,
+        lookback_days: int = 90,
+    ) -> float:
+        """Compute ATR-based stop-loss percentage from recent daily ranges.
+
+        Uses a 90-day lookback so it can find data across gaps in bar history.
+        Groups Bar1m data into daily buckets and computes average high-low range
+        as a fraction of the last close. Returns 2.5×ATR clamped to [min_stop,
+        max_stop]. Falls back to default_stop when fewer than 3 days are found.
+        """
+        cutoff = datetime.combine(as_of, dt_time(0, 0), tzinfo=timezone.utc)
+        lookback_start = cutoff - timedelta(days=lookback_days)
+
+        rows = session.execute(
+            select(
+                func.strftime('%Y-%m-%d', Bar1m.ts).label("day"),
+                func.max(Bar1m.high).label("day_high"),
+                func.min(Bar1m.low).label("day_low"),
+                func.avg(Bar1m.close).label("day_close"),
+            )
+            .where(
+                Bar1m.ticker == ticker.upper(),
+                Bar1m.ts >= lookback_start,
+                Bar1m.ts < cutoff,
+            )
+            .group_by(func.strftime('%Y-%m-%d', Bar1m.ts))
+            .order_by(func.strftime('%Y-%m-%d', Bar1m.ts).desc())
+            .limit(20)
+        ).all()
+
+        if len(rows) < 3:
+            return default_stop
+
+        daily_ranges = [float(r.day_high) - float(r.day_low) for r in rows]
+        avg_range = sum(daily_ranges) / len(daily_ranges)
+        last_close = float(rows[0].day_close)
+        if last_close <= 0:
+            return default_stop
+
+        atr_pct = (avg_range / last_close) * atr_mult
+        return round(max(min_stop, min(max_stop, atr_pct)), 4)
 
     def _execute_decision(
         self,
