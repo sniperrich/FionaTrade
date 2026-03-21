@@ -83,6 +83,7 @@ def _scheduled_bar_refresh() -> None:
     """Refresh Bar1m data for live-trading tickers (runs every 20 min during market hours)."""
     if not is_market_open():
         patch_live_runtime("bar_backfill", status="idle", mode="scheduled", stage="waiting_for_market")
+        push_live_event("bar_backfill", "Scheduled bar refresh waiting for market open", mode="scheduled")
         return  # Skip when market is closed — saves Finnhub API quota
     try:
         from datetime import datetime, timedelta, timezone
@@ -91,6 +92,8 @@ def _scheduled_bar_refresh() -> None:
 
         tickers = list(settings.live_trading_tickers) or list(settings.agent_tickers_override or [])
         if not tickers:
+            push_live_event("bar_backfill", "Scheduled bar refresh skipped: no live tickers configured", level="warn", mode="scheduled")
+            patch_live_runtime("bar_backfill", status="idle", mode="scheduled", stage="no_tickers", total_tickers=0, completed_tickers=0)
             return
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -125,6 +128,7 @@ def _startup_backfill_bars() -> None:
 
         tickers = list(settings.live_trading_tickers) or list(settings.agent_tickers_override or [])
         if not tickers:
+            push_live_event("bar_backfill", "Startup bar refresh skipped: no live tickers configured", level="warn", mode="startup")
             patch_live_runtime("bar_backfill", status="idle", mode="startup", stage="no_tickers")
             return
 

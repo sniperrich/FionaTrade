@@ -107,10 +107,22 @@ class LiveTradingService:
         if not tickers:
             patch_live_runtime(
                 "live_cycle",
-                status="error",
+                status="completed",
                 cycle_id=cycle_id,
                 stage="no_tickers",
-                error="No tickers configured for live trading",
+                current_ticker=None,
+                current_agent=None,
+                total_tickers=0,
+                completed_tickers=0,
+                last_result={"error": "No tickers configured for live trading"},
+                error=None,
+            )
+            push_live_event(
+                "live_cycle",
+                f"Cycle {cycle_id} skipped: no live tickers configured",
+                level="warn",
+                cycle_id=cycle_id,
+                reason="no_tickers_configured",
             )
             return {"cycle_id": cycle_id, "error": "No tickers configured for live trading"}
 

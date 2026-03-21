@@ -174,7 +174,8 @@ def _build_bar_cache_status(
     settings: Settings,
     selected_ticker: str,
 ) -> dict[str, Any]:
-    tracked = [t.upper() for t in (settings.live_trading_tickers or list(settings.agent_tickers_override or []))]
+    configured = [t.upper() for t in (settings.live_trading_tickers or list(settings.agent_tickers_override or []))]
+    tracked = list(configured)
     if not tracked and selected_ticker:
         tracked = [selected_ticker.upper()]
     selected = selected_ticker.upper()
@@ -226,6 +227,9 @@ def _build_bar_cache_status(
     })
     return {
         "selected_ticker": selected,
+        "configured_tickers_count": len(configured),
+        "configured_tickers": configured,
+        "using_fallback_ticker": not bool(configured),
         "selected": {
             **selected_summary,
             "source_counts": {source: count for source, count in selected_sources},
@@ -1279,6 +1283,7 @@ def set_live_enabled(
 
     was_enabled = bool(settings.live_trading_enabled)
     enabled = bool(body.get("enabled", True))
+    has_tickers = bool(settings.live_trading_tickers or list(settings.agent_tickers_override or []))
     settings.live_trading_enabled = enabled
     patch_live_runtime("live_cycle", status="idle" if not enabled else "waiting", stage="enabled" if enabled else "disabled")
     push_live_event("control", f"Live trading {'enabled' if enabled else 'disabled'} from WebUI", enabled=enabled)
@@ -1339,6 +1344,10 @@ def set_live_enabled(
             + (
                 "Started background bar backfill and an immediate live cycle. "
                 if enabled and not was_enabled else ""
+            )
+            + (
+                "No live tickers are configured yet. "
+                if enabled and not has_tickers else ""
             )
             + f"To persist, set LIVE_TRADING_ENABLED={'true' if enabled else 'false'} in .env"
         ),

@@ -139,6 +139,8 @@ tests/           137 个 pytest 测试
 > - `/api/live/trades` 现支持 `ticker/limit/offset`
 > - Live 页的 runtime 状态来自进程内状态仓库，不需要盯控制台日志
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
+> - 若当前是周末/美股闭市，live cycle 会显示 `analysis mode`，这是预期行为，不是失败
+> - 若 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 都为空，live cycle 会明确显示 `no live tickers configured`
 > - 模板页面脚本必须放在 `base.html` 的 `{% block scripts %}` 中，不能直接内联在 `content` 里，否则会先于全局工具函数执行
 
 ---

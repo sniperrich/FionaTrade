@@ -631,8 +631,15 @@ async function loadBarCacheStatus(data=null){
     document.getElementById('bar-cache-selected-sub').textContent=
       selected.last_ts ? `${selected.row_count||0} rows · ${selected.status} · ${selected.age_hours?.toFixed ? selected.age_hours.toFixed(1) : selected.age_hours}h old` : 'No cached bars yet';
     document.getElementById('bar-cache-universe').textContent=`${d.fresh_count||0}/${d.tracked_count||0}`;
-    document.getElementById('bar-cache-universe-sub').textContent='fresh tracked tickers';
+    document.getElementById('bar-cache-universe-sub').textContent=
+      d.using_fallback_ticker ? 'no live tickers configured; showing selected chart ticker only' : `${d.configured_tickers_count||0} configured live tickers`;
     const lines = [];
+    if(d.using_fallback_ticker){
+      lines.push(`<div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:rgba(196,153,36,0.08)">
+        <div class="bold">Live ticker list is empty</div>
+        <div class="text-muted text-sm mt4">Set <code>LIVE_TRADING_TICKERS</code> or <code>AGENT_TICKERS_OVERRIDE</code>, otherwise the live cycle has 0 tickers to process.</div>
+      </div>`);
+    }
     const sourceCounts = selected.source_counts || {};
     const sourceText = Object.entries(sourceCounts).slice(0,4).map(([name, count]) => `${name}: ${count}`).join(' · ');
     lines.push(`<div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
