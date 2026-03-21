@@ -141,8 +141,8 @@ async function loadSystemStatus() {
   try {
     const [h, live] = await Promise.all([apiFetch('/api/health'), apiFetch('/api/live/status')]);
     const rows = [
-      ['Market', live.market_session?.tradeable ? '<span class="badge badge-green">Open</span>' : `<span class="badge badge-grey">${live.market_session?.label||'closed'}</span>`],
-      ['Live Trading', live.live_trading_enabled ? '<span class="badge badge-accent">Enabled</span>' : '<span class="badge badge-grey">Disabled</span>'],
+      ['Market', live.market_tradeable ? '<span class="badge badge-green">Open</span>' : `<span class="badge badge-grey">${live.market_session||'closed'}</span>`],
+      ['Live Trading', live.enabled ? '<span class="badge badge-accent">Enabled</span>' : '<span class="badge badge-grey">Disabled</span>'],
       ['LLM', h.llm_configured ? `<span class="badge badge-green">${h.llm_model||'configured'}</span>` : '<span class="badge badge-warn">Not configured</span>'],
       ['Sources', `<span class="badge badge-blue">${h.sources_online||0} online</span>`],
       ['Last ingest', h.last_ingest_age_s!=null ? (h.last_ingest_age_s<120?'<span class="badge badge-green">'+Math.round(h.last_ingest_age_s)+'s ago</span>':'<span class="badge badge-warn">'+Math.round(h.last_ingest_age_s/60)+'m ago</span>') : '—'],
@@ -152,27 +152,28 @@ async function loadSystemStatus() {
         <span class="text-muted text-sm">${k}</span><span>${v}</span>
        </div>`
     ).join('');
-    document.getElementById('dash-time').textContent = live.market_session?.et_time_str || '';
+    document.getElementById('dash-time').textContent = live.market_time || '';
   } catch(e) {}
 }
 
 async function loadRecentRuns() {
   try {
-    const runs = await apiFetch('/api/agent/runs?limit=8');
-    if (!runs.length) { document.getElementById('recent-runs-body').innerHTML = '<tr><td colspan="10" class="empty-state text-muted">No agent runs yet</td></tr>'; return; }
-    document.getElementById('recent-runs-body').innerHTML = runs.map(r => {
+    const {runs} = await apiFetch('/api/agent/runs?limit=8');
+    const list = runs || [];
+    if (!list.length) { document.getElementById('recent-runs-body').innerHTML = '<tr><td colspan="10" class="empty-state text-muted">No agent runs yet</td></tr>'; return; }
+    document.getElementById('recent-runs-body').innerHTML = list.map(r => {
       const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString() : '—';
-      const conv = r.portfolio_output?.conviction||'';
+      const conv = r.portfolio_result?.metadata?.conviction||'';
       const convBadge = conv==='HIGH'?'<span class="badge badge-green">HIGH</span>':conv==='MEDIUM'?'<span class="badge badge-accent">MED</span>':'<span class="badge badge-grey">LOW</span>';
       return `<tr>
         <td class="bold">${r.ticker}</td>
         <td>${actionBadge(r.final_action)}</td>
         <td>${convBadge}</td>
         <td class="num">${r.final_position_pct!=null?(r.final_position_pct*100).toFixed(1)+'%':'—'}</td>
-        <td>${sigBadge(r.macro_output?.signal)}</td>
-        <td>${sigBadge(r.news_output?.signal)}</td>
-        <td>${sigBadge(r.technicals_output?.signal)}</td>
-        <td>${r.risk_output?.approved?'<span class="text-green text-sm">✓</span>':'<span class="text-red text-sm">✗</span>'}</td>
+        <td>${sigBadge(r.macro_result?.signal)}</td>
+        <td>${sigBadge(r.news_result?.signal)}</td>
+        <td>${sigBadge(r.technicals_result?.signal)}</td>
+        <td>${r.risk_result?.metadata?.approved?'<span class="text-green text-sm">✓</span>':'<span class="text-red text-sm">✗</span>'}</td>
         <td class="text-muted text-xs">${ts}</td>
         <td><a href="/agents?ticker=${r.ticker}" class="expand-btn">details</a></td>
       </tr>`;
@@ -182,14 +183,15 @@ async function loadRecentRuns() {
 
 async function loadLatestNews() {
   try {
-    const items = await apiFetch('/api/news?limit=6');
+    const d = await apiFetch('/api/news?limit=6');
+    const items = d.items || [];
     if (!items.length) { document.getElementById('latest-news-body').innerHTML = '<div class="empty-state text-muted">No recent news</div>'; return; }
     document.getElementById('latest-news-body').innerHTML = items.map(n=>{
       const age = n.ingested_at ? Math.round((Date.now()-new Date(n.ingested_at))/60000) : null;
       const ageStr = age!=null ? (age<60?age+'m ago':Math.round(age/60)+'h ago') : '';
-      const ticker = (n.tickers||[]).slice(0,3).map(t=>`<span class="badge badge-accent">${t}</span>`).join('');
+      const ticker = n.metadata?.ticker ? `<span class="badge badge-accent">${n.metadata.ticker}</span>` : '';
       return `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
-        <div style="font-size:13.5px;font-weight:500;margin-bottom:4px">${n.headline||n.title||'(no title)'}</div>
+        <div style="font-size:13.5px;font-weight:500;margin-bottom:4px">${n.title||'(no title)'}</div>
         <div class="news-meta">${ticker}<span class="badge badge-grey">${n.source||'unknown'}</span><span>${ageStr}</span></div>
       </div>`;
     }).join('');

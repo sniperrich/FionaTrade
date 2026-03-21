@@ -125,15 +125,14 @@ async function loadLLMStatus(){
 async function loadClock(){
   try{
     const d=await apiFetch('/api/live/status');
-    const msi=d.market_session||{};
-    const open=msi.tradeable;
+    const open=d.market_tradeable;
     document.getElementById('clock-body').innerHTML=`
       <div class="flex-center gap8 mb4">
         <div class="dot ${open?'green pulse':'grey'}"></div>
         <span style="font-weight:600">${open?'Open':'Closed'}</span>
-        <span class="badge badge-grey text-xs">${msi.label||''}</span>
+        <span class="badge badge-grey text-xs">${d.market_session||''}</span>
       </div>
-      <div class="text-muted text-xs">${msi.et_time_str||''}</div>
+      <div class="text-muted text-xs">${d.market_time||''}</div>
     `;
   } catch(e){}
 }
@@ -144,7 +143,8 @@ async function loadRuns(){
   let url='/api/agent/runs?limit=50';
   if(ticker) url+='&ticker='+ticker;
   try{
-    let runs=await apiFetch(url);
+    let {runs}=await apiFetch(url);
+    runs=runs||[];
     if(action) runs=runs.filter(r=>r.final_action===action);
     if(!runs.length){
       document.getElementById('runs-body').innerHTML='<tr><td colspan="12" class="empty-state text-muted">No agent runs yet</td></tr>';
@@ -152,20 +152,20 @@ async function loadRuns(){
     }
     document.getElementById('runs-body').innerHTML=runs.map(r=>{
       const rid='ar-'+r.id;
-      const portfolio=r.portfolio_output||{};
-      const risk=r.risk_output||{};
+      const portfolio=r.portfolio_result||{};
+      const risk=r.risk_result||{};
       const ts=r.created_at?new Date(r.created_at).toLocaleString():'—';
       return `<tr onclick="document.getElementById('${rid}').classList.toggle('open')" style="cursor:pointer">
         <td class="bold">${r.ticker}</td>
         <td>${actionBadge(r.final_action)}</td>
         <td class="num">${r.final_position_pct!=null?(r.final_position_pct*100).toFixed(1)+'%':'—'}</td>
-        <td>${convBadge(portfolio.conviction)}</td>
-        <td>${sigBadge(r.macro_output?.signal)}</td>
-        <td>${sigBadge(r.news_output?.signal)}</td>
-        <td>${sigBadge(r.fundamentals_output?.signal)}</td>
-        <td>${sigBadge(r.technicals_output?.signal)}</td>
-        <td>${risk.approved?'<span class="text-green bold">✓</span>':'<span class="text-red bold">✗</span>'}</td>
-        <td class="num text-muted text-xs">${r.execution_ms||'—'}</td>
+        <td>${convBadge((portfolio.metadata||{}).conviction)}</td>
+        <td>${sigBadge(r.macro_result?.signal)}</td>
+        <td>${sigBadge(r.news_result?.signal)}</td>
+        <td>${sigBadge(r.fundamentals_result?.signal)}</td>
+        <td>${sigBadge(r.technicals_result?.signal)}</td>
+        <td>${(risk.metadata||{}).approved?'<span class="text-green bold">✓</span>':'<span class="text-red bold">✗</span>'}</td>
+        <td class="num text-muted text-xs">${r.execution_time_ms||'—'}</td>
         <td class="text-muted text-xs nowrap">${ts}</td>
         <td><span class="expand-btn text-xs">▼ reasoning</span></td>
       </tr>
@@ -173,24 +173,24 @@ async function loadRuns(){
         <div class="grid g2 gap12" style="font-size:12.5px">
           <div>
             <div class="bold mb4">📰 News Sentiment</div>
-            <div class="text-muted">${r.news_output?.reasoning||'—'}</div>
+            <div class="text-muted">${r.news_result?.reasoning||'—'}</div>
           </div>
           <div>
             <div class="bold mb4">🌐 Macro Analysis</div>
-            <div class="text-muted">${r.macro_output?.reasoning||'—'}</div>
+            <div class="text-muted">${r.macro_result?.reasoning||'—'}</div>
           </div>
           <div>
             <div class="bold mb4">📊 Technicals</div>
-            <div class="text-muted">${r.technicals_output?.reasoning||'—'}</div>
+            <div class="text-muted">${r.technicals_result?.reasoning||'—'}</div>
           </div>
           <div>
             <div class="bold mb4">📈 Fundamentals</div>
-            <div class="text-muted">${r.fundamentals_output?.reasoning||'—'}</div>
+            <div class="text-muted">${r.fundamentals_result?.reasoning||'—'}</div>
           </div>
         </div>
         <div class="divider"></div>
         <div class="bold mb4">⚖️ Risk Manager</div>
-        <div class="text-muted" style="font-size:12.5px">${r.risk_output?.reasoning||'—'}</div>
+        <div class="text-muted" style="font-size:12.5px">${r.risk_result?.reasoning||'—'}</div>
         <div class="divider"></div>
         <div class="bold mb4">💼 Portfolio Manager Decision</div>
         <div style="font-size:12.5px">${r.final_reasoning||'—'}</div>
@@ -216,8 +216,8 @@ async function runAgents(){
 // ── Get list of unique tickers for filter ────────────────────────────────
 async function populateTickerFilter(){
   try{
-    const runs=await apiFetch('/api/agent/runs?limit=200');
-    const tickers=[...new Set(runs.map(r=>r.ticker))].sort();
+    const {runs}=await apiFetch('/api/agent/runs?limit=200');
+    const tickers=[...new Set((runs||[]).map(r=>r.ticker))].sort();
     const sel=document.getElementById('ticker-filter');
     const cur=sel.value;
     sel.innerHTML='<option value="">All tickers</option>'+tickers.map(t=>`<option${t===cur?' selected':''}>${t}</option>`).join('');

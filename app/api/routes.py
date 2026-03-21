@@ -25,12 +25,19 @@ def health(
     settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
     audit = HealthAuditService(settings).snapshot(session)
-    llm_enabled = bool(settings.llm_base_url and settings.llm_model)
+    llm_configured = bool(settings.llm_base_url and settings.llm_model)
+    sources_online = sum(1 for s in (audit.get("sources") or {}).values() if s.get("status") == "ONLINE")
+    last_ingest = audit.get("last_ingest_age_s")
     return {
         "status": audit["status"],
         "app": settings.app_name,
         "time": utc_now(),
-        "analysis_mode": "llm" if llm_enabled else "rules_fallback",
+        "llm_configured": llm_configured,
+        "llm_model": settings.llm_model if llm_configured else None,
+        "llm_base_url": settings.llm_base_url if llm_configured else None,
+        "sources_online": sources_online,
+        "last_ingest_age_s": last_ingest,
+        "analysis_mode": "llm" if llm_configured else "rules_fallback",
         "audit": audit,
     }
 
@@ -577,3 +584,196 @@ def live_positions(
         }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
+
+
+# ── Manual order placement ───────────────────────────────────────────────
+
+@router.post("/live/order")
+def place_manual_order(
+    body: dict = Body(...),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Place a manual order via Alpaca. Supports market, limit, stop, bracket, notional."""
+    from app.broker.alpaca import AlpacaBroker
+    broker = AlpacaBroker(settings)
+    ticker = (body.get("ticker") or "").upper()
+    action = (body.get("action") or "BUY").upper()
+    order_type = (body.get("order_type") or "market").lower()
+    tif = body.get("time_in_force", "day")
+
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+
+    try:
+        if order_type == "bracket":
+            tp = body.get("take_profit_price")
+            sl = body.get("stop_loss_price")
+            if not tp or not sl:
+                raise HTTPException(status_code=400, detail="bracket order requires take_profit_price and stop_loss_price")
+            result = broker.place_bracket_order(
+                ticker=ticker, action=action,
+                quantity=float(body.get("quantity", 1)),
+                take_profit_price=float(tp), stop_loss_price=float(sl),
+                time_in_force=tif,
+            )
+        elif order_type == "notional":
+            result = broker.place_notional_order(
+                ticker=ticker, action=action,
+                notional=float(body.get("notional", body.get("quantity", 100))),
+                time_in_force=tif,
+            )
+        else:
+            result = broker.place_order(
+                ticker=ticker, action=action,
+                quantity=float(body.get("quantity", 1)),
+                order_type=order_type,
+                limit_price=body.get("limit_price"),
+                stop_price=body.get("stop_price"),
+                time_in_force=tif,
+            )
+
+        if not result.success:
+            raise HTTPException(status_code=502, detail=result.error or "Order failed")
+        return {"success": True, "order_id": result.order_id, "ticker": ticker, "action": action}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/live/open_orders")
+def get_open_orders(
+    ticker: str | None = Query(default=None),
+    settings: Settings = Depends(get_app_settings),
+) -> list[dict[str, Any]]:
+    """Return all currently open Alpaca orders."""
+    from app.broker.alpaca import AlpacaBroker
+    broker = AlpacaBroker(settings)
+    try:
+        return broker.get_open_orders(ticker=ticker)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
+
+
+@router.post("/live/cancel_order/{order_id}")
+def cancel_order(
+    order_id: str,
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Cancel a specific open order by ID."""
+    from app.broker.alpaca import AlpacaBroker
+    broker = AlpacaBroker(settings)
+    try:
+        success = broker.cancel_order(order_id)
+        return {"success": success, "order_id": order_id}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
+
+
+@router.post("/live/cancel_all_orders")
+def cancel_all_orders(
+    ticker: str | None = Query(default=None),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Cancel all open orders (optionally for a specific ticker)."""
+    from app.broker.alpaca import AlpacaBroker
+    broker = AlpacaBroker(settings)
+    try:
+        cancelled = broker.cancel_all_orders(ticker=ticker)
+        return {"success": True, "cancelled": cancelled}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
+
+
+@router.post("/live/close_position")
+def close_position_endpoint(
+    ticker: str = Query(...),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Close the full position for a ticker at market price."""
+    from app.broker.alpaca import AlpacaBroker
+    broker = AlpacaBroker(settings)
+    try:
+        result = broker.close_position(ticker.upper())
+        return {"success": True, "ticker": ticker.upper(), "result": result}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
+
+
+@router.get("/live/latest_price")
+def get_latest_price(
+    ticker: str = Query(...),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Return the latest trade price for a ticker from Alpaca."""
+    from app.broker.alpaca import AlpacaBroker
+    broker = AlpacaBroker(settings)
+    try:
+        price = broker.get_latest_price(ticker.upper())
+        return {"ticker": ticker.upper(), "price": price}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
+
+
+@router.get("/live/portfolio_history")
+def portfolio_history(
+    period: str = Query(default="1M"),
+    timeframe: str = Query(default="1D"),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Return portfolio equity curve from Alpaca (period: 1D/1W/1M/3M/6M/1A, timeframe: 1D/1H/15Min)."""
+    from app.broker.alpaca import AlpacaBroker
+    broker = AlpacaBroker(settings)
+    try:
+        return broker.get_portfolio_history(period=period, timeframe=timeframe)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
+
+
+@router.post("/live/set_enabled")
+def set_live_enabled(
+    body: dict = Body(default={}),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Toggle live trading on/off at runtime (resets on server restart).
+    Set LIVE_TRADING_ENABLED=true in .env for persistence.
+    """
+    import app.main as _main_module
+
+    enabled = bool(body.get("enabled", True))
+    settings.live_trading_enabled = enabled
+
+    sched = getattr(_main_module, "scheduler", None)
+    if sched and sched.running:
+        from app.main import _scheduled_live_trading, _scheduled_bar_refresh  # type: ignore[attr-defined]
+        if enabled:
+            # Add jobs if not already present
+            job_ids = {j.id for j in sched.get_jobs()}
+            if "live_cycle" not in job_ids:
+                sched.add_job(
+                    _scheduled_live_trading,
+                    "interval",
+                    seconds=max(60, settings.live_cycle_interval_seconds),
+                    max_instances=1,
+                    id="live_cycle",
+                )
+            if "bar_refresh" not in job_ids:
+                sched.add_job(
+                    _scheduled_bar_refresh,
+                    "interval",
+                    minutes=20,
+                    max_instances=1,
+                    id="bar_refresh",
+                )
+        else:
+            for jid in ("live_cycle", "bar_refresh"):
+                try:
+                    sched.remove_job(jid)
+                except Exception:
+                    pass
+
+    return {
+        "enabled": enabled,
+        "message": f"Live trading {'enabled' if enabled else 'disabled'} for this session. "
+                   f"To persist, set LIVE_TRADING_ENABLED={'true' if enabled else 'false'} in .env",
+    }

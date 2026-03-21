@@ -5,18 +5,25 @@
     <div>
       <div class="page-title">Live Trading</div>
       <div class="page-sub">
+        <span id="live-enable-badge">
         {% if live_enabled %}
           <span class="badge badge-accent">Live Enabled</span>
         {% else %}
           <span class="badge badge-grey">Live Disabled</span>
         {% endif %}
+        </span>
         &nbsp;<span id="market-status-badge"></span>
         &nbsp;<span class="text-muted text-sm" id="live-et-time"></span>
       </div>
     </div>
     <div style="display:flex;gap:8px;align-items:center">
       <button class="btn btn-ghost btn-sm" onclick="refreshAll()">↻ Refresh</button>
-      <button class="btn btn-primary btn-sm" onclick="triggerCycle()">▶ Run Cycle</button>
+      <button id="toggle-live-btn" class="btn btn-sm {% if live_enabled %}btn-ghost{% else %}btn-primary{% endif %}"
+        onclick="toggleLiveTrading()"
+        title="{% if live_enabled %}Disable live trading{% else %}Enable live trading (Alpaca paper mode){% endif %}">
+        {% if live_enabled %}⏹ Disable Live{% else %}▶ Enable Live{% endif %}
+      </button>
+      <button class="btn btn-ghost btn-sm" onclick="triggerCycle()">⚡ Run Cycle</button>
     </div>
   </div>
 </div>
@@ -298,11 +305,32 @@ async function loadTradeHistory(){
 async function loadMarketStatus(){
   try{
     const d=await apiFetch('/api/live/status');
-    const msi=d.market_session||{};
-    const open=msi.tradeable;
-    document.getElementById('market-status-badge').innerHTML=open?'<span class="badge badge-green">Market Open</span>':'<span class="badge badge-grey">'+(msi.label||'closed')+'</span>';
-    document.getElementById('live-et-time').textContent=msi.et_time_str||'';
+    const open=d.market_tradeable;
+    document.getElementById('market-status-badge').innerHTML=open?'<span class="badge badge-green">Market Open</span>':'<span class="badge badge-grey">'+(d.market_session||'closed')+'</span>';
+    document.getElementById('live-et-time').textContent=d.market_time||'';
+    // sync toggle button state
+    const btn=document.getElementById('toggle-live-btn');
+    if(btn){
+      btn.textContent=d.enabled?'⏹ Disable Live':'▶ Enable Live';
+      btn.className=d.enabled?'btn btn-ghost btn-sm':'btn btn-primary btn-sm';
+    }
+    document.getElementById('live-enable-badge').innerHTML=d.enabled?
+      '<span class="badge badge-accent">Live Enabled</span>':
+      '<span class="badge badge-grey">Live Disabled</span>';
   } catch(e){}
+}
+
+async function toggleLiveTrading(){
+  const btn=document.getElementById('toggle-live-btn');
+  const currentlyEnabled=btn.textContent.includes('Disable');
+  const enable=!currentlyEnabled;
+  btn.disabled=true; btn.textContent='…';
+  try{
+    const d=await apiFetch('/api/live/set_enabled',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enable})});
+    toast(d.message,'success');
+    setTimeout(loadMarketStatus,500);
+  } catch(e){ toast('Error: '+e.message,'error'); }
+  finally{ btn.disabled=false; }
 }
 
 async function closePosition(ticker){
@@ -340,7 +368,7 @@ async function triggerCycle(){
     toast('Cycle done — '+(d.orders_placed||0)+' orders placed','success');
     setTimeout(refreshAll,2000);
   } catch(e){ toast('Error: '+e.message,'error'); }
-  finally{ btn.disabled=false; btn.textContent='▶ Run Cycle'; }
+  finally{ btn.disabled=false; btn.textContent='⚡ Run Cycle'; }
 }
 
 function onTypeChange(){

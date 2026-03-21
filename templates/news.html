@@ -43,31 +43,24 @@
 <!-- News list -->
 <div id="news-list">
 {% for item in news_items %}
-<div class="news-card" data-source="{{ item.source }}" data-tickers="{{ item.tickers | join(',') if item.tickers else '' }}" data-headline="{{ (item.headline or item.title or '') | lower }}">
-  <div class="news-headline">{{ item.headline or item.title or "(no title)" }}</div>
+{% set item_ticker = item.metadata_json.get('ticker') if item.metadata_json else None %}
+<div class="news-card" data-source="{{ item.source }}" data-tickers="{{ item_ticker or '' }}" data-headline="{{ (item.title or '') | lower }}">
+  <div class="news-headline">{{ item.title or "(no title)" }}</div>
   <div class="news-meta">
-    {% for ticker in (item.tickers or [])[:4] %}
-    <span class="badge badge-accent">{{ ticker }}</span>
-    {% endfor %}
+    {% if item_ticker %}
+    <span class="badge badge-accent">{{ item_ticker }}</span>
+    {% endif %}
     <span class="badge badge-grey">{{ item.source or "unknown" }}</span>
-    {% if item.event_type %}
-    <span class="badge badge-blue">{{ item.event_type }}</span>
-    {% endif %}
-    {% if item.sentiment_label %}
-    <span class="badge {% if item.sentiment_label == 'POSITIVE' %}badge-green{% elif item.sentiment_label == 'NEGATIVE' %}badge-red{% else %}badge-grey{% endif %}">
-      {{ item.sentiment_label }}
-    </span>
-    {% endif %}
     {% if item.ingested_at %}
     <span class="text-muted text-xs" title="{{ item.ingested_at }}">{{ item.ingested_at.strftime('%H:%M') if item.ingested_at else '' }}</span>
     {% endif %}
-    {% if item.source_url %}
-    <a href="{{ item.source_url }}" target="_blank" class="text-xs" style="color:var(--accent)">↗ source</a>
+    {% if item.url %}
+    <a href="{{ item.url }}" target="_blank" class="text-xs" style="color:var(--accent)">↗ source</a>
     {% endif %}
   </div>
-  {% if item.body_full or item.body_summary %}
+  {% if item.body %}
   <span class="news-expand" onclick="toggleBody(this)">▼ Read more</span>
-  <div class="news-body">{{ (item.body_full or item.body_summary or '')[:2000] }}</div>
+  <div class="news-body">{{ item.body[:3000] }}</div>
   {% endif %}
 </div>
 {% else %}
