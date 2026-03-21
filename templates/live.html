@@ -234,7 +234,7 @@
   <div class="section-header mb8">
     <div class="section-title">Agent Trade History</div>
     <div class="filter-bar" style="margin:0">
-      <select id="hist-ticker-filter" onchange="refreshAll()" style="width:120px">
+      <select id="hist-ticker-filter" onchange="resetLiveTradesPage()" style="width:120px">
         <option value="">All tickers</option>
         {% for t in tickers %}
         <option value="{{ t }}" {% if selected_ticker == t %}selected{% endif %}>{{ t }}</option>
@@ -254,12 +254,22 @@
       </tbody>
     </table>
   </div>
+  <div class="pager-bar">
+    <div class="pager-summary" id="live-trades-pager-summary">Loading trades…</div>
+    <div class="pager-actions">
+      <button id="live-trades-prev-btn" class="btn btn-ghost btn-sm" onclick="setLiveTradesPage(liveTradesPage-1)">← Prev</button>
+      <span id="live-trades-page-label" class="pager-label">Page 1</span>
+      <button id="live-trades-next-btn" class="btn btn-ghost btn-sm" onclick="setLiveTradesPage(liveTradesPage+1)">Next →</button>
+    </div>
+  </div>
 </div>
 
 {% endblock %}
 {% block scripts %}
 <script>
 const LIVE_CACHE_PREFIX = 'ui:live_snapshot:v2:';
+let liveTradesPage = 1;
+const LIVE_TRADES_PER_PAGE = 20;
 
 function fmt$(n){return n==null?'—':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function sideBadge(s){return s==='long'?'<span class="badge badge-green">LONG</span>':'<span class="badge badge-red">SHORT</span>';}
@@ -268,11 +278,12 @@ function actionBadge(a){const m={BUY:'badge-green',SHORT:'badge-red',SELL:'badge
 function safeSlice(v, n=8){return typeof v==='string'?v.slice(0,n):String(v||'').slice(0,n);}
 function liveSnapshotCacheKey(){
   const tradeTicker=(document.getElementById('hist-ticker-filter')?.value || '').toUpperCase();
+  const tradeOffset=(liveTradesPage - 1) * LIVE_TRADES_PER_PAGE;
   const chartTicker=(document.getElementById('chart-ticker')?.value || '').toUpperCase();
   const chartTimeframe=document.getElementById('chart-timeframe')?.value || '5Min';
   const portfolioPeriod=document.getElementById('portfolio-period')?.value || '1M';
   const portfolioTimeframe=document.getElementById('portfolio-timeframe')?.value || '1D';
-  return `${LIVE_CACHE_PREFIX}${tradeTicker}:${chartTicker}:${chartTimeframe}:${portfolioPeriod}:${portfolioTimeframe}`;
+  return `${LIVE_CACHE_PREFIX}${tradeTicker}:${tradeOffset}:${chartTicker}:${chartTimeframe}:${portfolioPeriod}:${portfolioTimeframe}`;
 }
 function ensureSelectOption(selectEl, value){
   if(!selectEl || !value) return;
@@ -412,10 +423,17 @@ async function loadOpenOrders(data=null){
 
 async function loadTradeHistory(data=null){
   const ticker=document.getElementById('hist-ticker-filter').value;
-  const url='/api/live/trades?limit=50'+(ticker?'&ticker='+ticker:'');
+  const url=`/api/live/trades?limit=${LIVE_TRADES_PER_PAGE + 1}&offset=${(liveTradesPage - 1) * LIVE_TRADES_PER_PAGE}`+(ticker?'&ticker='+ticker:'');
   try{
-    const trades=data || await apiFetch(url);
+    let trades=data || await apiFetch(url);
+    const hasMore=trades.length > LIVE_TRADES_PER_PAGE;
+    trades=trades.slice(0, LIVE_TRADES_PER_PAGE);
+    updateLiveTradesPager(trades.length, hasMore);
     if(!trades.length){
+      if(liveTradesPage > 1){
+        liveTradesPage -= 1;
+        return loadTradeHistory();
+      }
       document.getElementById('trade-history-body').innerHTML='<tr><td colspan="9" class="empty-state text-muted">No trade history yet</td></tr>';
       return;
     }
@@ -440,6 +458,26 @@ async function loadTradeHistory(data=null){
       </div></td></tr>`;
     }).join('');
   } catch(e){}
+}
+
+function updateLiveTradesPager(count, hasMore){
+  document.getElementById('live-trades-page-label').textContent=`Page ${liveTradesPage}`;
+  document.getElementById('live-trades-prev-btn').disabled=liveTradesPage<=1;
+  document.getElementById('live-trades-next-btn').disabled=!hasMore;
+  const start=(liveTradesPage - 1) * LIVE_TRADES_PER_PAGE + (count ? 1 : 0);
+  const end=(liveTradesPage - 1) * LIVE_TRADES_PER_PAGE + count;
+  document.getElementById('live-trades-pager-summary').textContent=count ? `Showing ${start}-${end}` : 'No trades on this page';
+}
+
+function setLiveTradesPage(nextPage){
+  if(nextPage < 1) return;
+  liveTradesPage = nextPage;
+  refreshAll();
+}
+
+function resetLiveTradesPage(){
+  liveTradesPage = 1;
+  refreshAll();
 }
 
 async function loadMarketStatus(data=null){
@@ -640,6 +678,7 @@ function hydrateLiveSnapshot(snapshot){
 
 async function refreshAll(){
   const tradeTicker=(document.getElementById('hist-ticker-filter').value||'').trim().toUpperCase();
+  const tradeOffset=(liveTradesPage - 1) * LIVE_TRADES_PER_PAGE;
   const chartTicker=(document.getElementById('chart-ticker').value||'').trim().toUpperCase();
   const chartTimeframe=document.getElementById('chart-timeframe').value;
   const portfolioPeriod=document.getElementById('portfolio-period').value;
@@ -647,7 +686,7 @@ async function refreshAll(){
   const cacheKey=liveSnapshotCacheKey();
   try{
     const snapshot=await apiFetch(
-      `/api/ui/live_snapshot?trade_ticker=${encodeURIComponent(tradeTicker)}&chart_ticker=${encodeURIComponent(chartTicker)}&chart_timeframe=${encodeURIComponent(chartTimeframe)}&portfolio_period=${encodeURIComponent(portfolioPeriod)}&portfolio_timeframe=${encodeURIComponent(portfolioTimeframe)}`,
+      `/api/ui/live_snapshot?trade_ticker=${encodeURIComponent(tradeTicker)}&trade_offset=${encodeURIComponent(tradeOffset)}&trade_limit=${encodeURIComponent(LIVE_TRADES_PER_PAGE + 1)}&chart_ticker=${encodeURIComponent(chartTicker)}&chart_timeframe=${encodeURIComponent(chartTimeframe)}&portfolio_period=${encodeURIComponent(portfolioPeriod)}&portfolio_timeframe=${encodeURIComponent(portfolioTimeframe)}`,
       { timeout: 12000 }
     );
     writeViewCache(cacheKey, snapshot);

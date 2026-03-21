@@ -58,17 +58,17 @@
 
 <!-- Filter -->
 <div class="filter-bar mb8">
-  <select id="ticker-filter" onchange="loadRuns()" style="width:140px">
+  <select id="ticker-filter" onchange="resetRunsPage()" style="width:140px">
     <option value="">All tickers</option>
     {% for t in tickers %}
     <option value="{{ t }}" {% if selected_ticker == t %}selected{% endif %}>{{ t }}</option>
     {% endfor %}
   </select>
-  <select id="action-filter" onchange="loadRuns()" style="width:120px">
+  <select id="action-filter" onchange="resetRunsPage()" style="width:120px">
     <option value="">All actions</option>
     <option>BUY</option><option>SELL</option><option>SHORT</option><option>HOLD</option>
   </select>
-  <button class="btn btn-ghost btn-sm" onclick="loadRuns()">↻ Refresh</button>
+  <button class="btn btn-ghost btn-sm" onclick="resetRunsPage()">↻ Refresh</button>
 </div>
 
 <!-- Runs table -->
@@ -94,11 +94,22 @@
       </tbody>
     </table>
   </div>
+  <div class="pager-bar">
+    <div class="pager-summary" id="runs-pager-summary">Loading runs…</div>
+    <div class="pager-actions">
+      <button id="runs-prev-btn" class="btn btn-ghost btn-sm" onclick="setRunsPage(agentRunsPage-1)">← Prev</button>
+      <span id="runs-page-label" class="pager-label">Page 1</span>
+      <button id="runs-next-btn" class="btn btn-ghost btn-sm" onclick="setRunsPage(agentRunsPage+1)">Next →</button>
+    </div>
+  </div>
 </div>
 
 {% endblock %}
 {% block scripts %}
 <script>
+let agentRunsPage = 1;
+const AGENT_RUNS_PER_PAGE = 20;
+
 function sigBadge(s){
   if(!s||s==='NO_SIGNAL') return '<span class="text-muted text-xs">—</span>';
   const m={BUY:'text-green',SHORT:'text-red',SELL:'text-red',HOLD:'text-muted'};
@@ -142,13 +153,20 @@ async function loadClock(){
 async function loadRuns(){
   const ticker=document.getElementById('ticker-filter').value;
   const action=document.getElementById('action-filter').value;
-  let url='/api/agent/runs?limit=50';
+  let url=`/api/agent/runs?limit=${AGENT_RUNS_PER_PAGE + 1}&offset=${(agentRunsPage - 1) * AGENT_RUNS_PER_PAGE}`;
   if(ticker) url+='&ticker='+ticker;
+  if(action) url+='&action='+action;
   try{
     let {runs}=await apiFetch(url);
     runs=runs||[];
-    if(action) runs=runs.filter(r=>r.final_action===action);
+    const hasMore=runs.length > AGENT_RUNS_PER_PAGE;
+    runs=runs.slice(0, AGENT_RUNS_PER_PAGE);
+    updateRunsPager(runs.length, hasMore);
     if(!runs.length){
+      if(agentRunsPage > 1){
+        agentRunsPage -= 1;
+        return loadRuns();
+      }
       document.getElementById('runs-body').innerHTML='<tr><td colspan="12" class="empty-state text-muted">No agent runs yet</td></tr>';
       return;
     }
@@ -200,6 +218,26 @@ async function loadRuns(){
       </div></td></tr>`;
     }).join('');
   } catch(e){ document.getElementById('runs-body').innerHTML=`<tr><td colspan="12" class="empty-state text-red">Error loading runs</td></tr>`; }
+}
+
+function updateRunsPager(count, hasMore){
+  document.getElementById('runs-page-label').textContent=`Page ${agentRunsPage}`;
+  document.getElementById('runs-prev-btn').disabled=agentRunsPage<=1;
+  document.getElementById('runs-next-btn').disabled=!hasMore;
+  const start=(agentRunsPage - 1) * AGENT_RUNS_PER_PAGE + (count ? 1 : 0);
+  const end=(agentRunsPage - 1) * AGENT_RUNS_PER_PAGE + count;
+  document.getElementById('runs-pager-summary').textContent=count ? `Showing ${start}-${end}` : 'No runs on this page';
+}
+
+function setRunsPage(nextPage){
+  if(nextPage < 1) return;
+  agentRunsPage = nextPage;
+  loadRuns();
+}
+
+function resetRunsPage(){
+  agentRunsPage = 1;
+  loadRuns();
 }
 
 async function runAgents(){

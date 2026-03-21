@@ -2,7 +2,8 @@
 
 This service runs a recurring cycle (default: every 5 minutes during US
 market hours) that:
-  1. Refreshes Bar1m data for active tickers (Finnhub via MarketBackfillService)
+  1. Refreshes Bar1m data for active tickers (MarketBackfillService:
+     Finnhub -> Alpaca -> yfinance -> stooq)
   2. Ingests fresh news
   3. Runs the AgentGraph for each configured ticker
   4. Computes position sizing (target_pct × portfolio_value / price)
@@ -169,7 +170,7 @@ class LiveTradingService:
         return [t.upper() for t in tickers if t]
 
     def _refresh_bars(self, session: Session, tickers: list[str]) -> None:
-        """Fetch today's 1m bars for all tickers from Finnhub via MarketBackfillService."""
+        """Fetch today's bar data for all tickers via MarketBackfillService fallbacks."""
         from app.market.backfill import MarketBackfillService
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

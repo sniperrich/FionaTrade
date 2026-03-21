@@ -29,6 +29,8 @@ class MarketBackfillResult:
     requests_failed: int
     bars_inserted: int
     bars_skipped_existing: int
+    alpaca_fallback_tickers: int
+    alpaca_bars_inserted: int
     stooq_fallback_tickers: int
     stooq_bars_inserted: int
     errors: list[str]
@@ -234,6 +236,45 @@ class MarketBackfillService:
 
         return bars, None
 
+    def _fetch_alpaca_minute_bars(self, ticker: str, start_dt: datetime, end_dt: datetime) -> tuple[list[dict], str | None]:
+        if not (self.settings.alpaca_api_key and self.settings.alpaca_api_secret):
+            return [], "alpaca credentials not configured"
+
+        try:
+            from app.broker.alpaca import AlpacaBroker
+
+            broker = AlpacaBroker(self.settings)
+            bars = broker.get_bars(
+                ticker,
+                timeframe="1Min",
+                start=start_dt.isoformat().replace("+00:00", "Z"),
+                end=end_dt.isoformat().replace("+00:00", "Z"),
+                limit=10000,
+            )
+        except Exception as exc:
+            return [], f"alpaca request failed: {exc}"
+
+        if not bars:
+            return [], None
+
+        parsed: list[dict] = []
+        for bar in bars:
+            try:
+                ts = datetime.fromisoformat(str(bar["t"]).replace("Z", "+00:00"))
+                parsed.append(
+                    {
+                        "ts": ts,
+                        "open": float(bar["o"]),
+                        "high": float(bar["h"]),
+                        "low": float(bar["l"]),
+                        "close": float(bar["c"]),
+                        "volume": float(bar.get("v", 0.0)),
+                    }
+                )
+            except Exception:
+                continue
+        return parsed, None
+
     def run(
         self,
         session: Session,
@@ -257,6 +298,8 @@ class MarketBackfillService:
         skipped_existing = 0
         req_ok = 0
         req_fail = 0
+        alpaca_fallback_tickers = 0
+        alpaca_bars_inserted = 0
         stooq_fallback_tickers = 0
         stooq_bars_inserted = 0
         errors: list[str] = []
@@ -313,11 +356,11 @@ class MarketBackfillService:
                 self.settings.market_backfill_allow_stooq_fallback
                 and finnhub_inserted_for_ticker == 0
             ):
-                # Try yfinance hourly first (much better resolution than stooq daily)
-                yf_bars, yf_err = self._fetch_yfinance_hourly(ticker, start_dt, end_dt)
-                if yf_bars:
-                    logger.info("yfinance hourly fallback for %s: %d bars", ticker, len(yf_bars))
-                    for bar in yf_bars:
+                alpaca_bars, alpaca_err = self._fetch_alpaca_minute_bars(ticker, start_dt, end_dt)
+                if alpaca_bars:
+                    logger.info("alpaca 1m fallback for %s: %d bars", ticker, len(alpaca_bars))
+                    alpaca_fallback_tickers += 1
+                    for bar in alpaca_bars:
                         ts = ensure_utc(bar["ts"])
                         if ts in existing_ts:
                             skipped_existing += 1
@@ -331,24 +374,20 @@ class MarketBackfillService:
                                 low=bar["low"],
                                 close=bar["close"],
                                 volume=bar["volume"],
-                                source="yfinance_hourly",
+                                source="alpaca_1m_fallback",
                             )
                         )
                         existing_ts.add(ts)
                         inserted += 1
-                        stooq_fallback_tickers += 1
+                        alpaca_bars_inserted += 1
                 else:
-                    if yf_err:
-                        logger.warning("yfinance fallback failed for %s: %s", ticker, yf_err)
-                    # Fall back to stooq daily
-                    stooq_bars, stooq_err = self._fetch_stooq_daily(ticker, start_dt, end_dt)
-                    if stooq_err:
-                        if len(errors) < 50:
-                            errors.append(f"{ticker} stooq fallback: {stooq_err}")
-                    else:
-                        if stooq_bars:
-                            stooq_fallback_tickers += 1
-                        for bar in stooq_bars:
+                    if alpaca_err and alpaca_err != "alpaca credentials not configured":
+                        logger.warning("alpaca fallback failed for %s: %s", ticker, alpaca_err)
+                    # Try yfinance hourly next (better resolution than stooq daily)
+                    yf_bars, yf_err = self._fetch_yfinance_hourly(ticker, start_dt, end_dt)
+                    if yf_bars:
+                        logger.info("yfinance hourly fallback for %s: %d bars", ticker, len(yf_bars))
+                        for bar in yf_bars:
                             ts = ensure_utc(bar["ts"])
                             if ts in existing_ts:
                                 skipped_existing += 1
@@ -362,12 +401,43 @@ class MarketBackfillService:
                                     low=bar["low"],
                                     close=bar["close"],
                                     volume=bar["volume"],
-                                    source="stooq_daily_fallback",
+                                    source="yfinance_hourly",
                                 )
                             )
                             existing_ts.add(ts)
                             inserted += 1
-                            stooq_bars_inserted += 1
+                            stooq_fallback_tickers += 1
+                    else:
+                        if yf_err:
+                            logger.warning("yfinance fallback failed for %s: %s", ticker, yf_err)
+                        # Fall back to stooq daily
+                        stooq_bars, stooq_err = self._fetch_stooq_daily(ticker, start_dt, end_dt)
+                        if stooq_err:
+                            if len(errors) < 50:
+                                errors.append(f"{ticker} stooq fallback: {stooq_err}")
+                        else:
+                            if stooq_bars:
+                                stooq_fallback_tickers += 1
+                            for bar in stooq_bars:
+                                ts = ensure_utc(bar["ts"])
+                                if ts in existing_ts:
+                                    skipped_existing += 1
+                                    continue
+                                session.add(
+                                    Bar1m(
+                                        ticker=ticker,
+                                        ts=ts,
+                                        open=bar["open"],
+                                        high=bar["high"],
+                                        low=bar["low"],
+                                        close=bar["close"],
+                                        volume=bar["volume"],
+                                        source="stooq_daily_fallback",
+                                    )
+                                )
+                                existing_ts.add(ts)
+                                inserted += 1
+                                stooq_bars_inserted += 1
 
             session.flush()
 
@@ -381,6 +451,8 @@ class MarketBackfillService:
             requests_failed=req_fail,
             bars_inserted=inserted,
             bars_skipped_existing=skipped_existing,
+            alpaca_fallback_tickers=alpaca_fallback_tickers,
+            alpaca_bars_inserted=alpaca_bars_inserted,
             stooq_fallback_tickers=stooq_fallback_tickers,
             stooq_bars_inserted=stooq_bars_inserted,
             errors=errors,

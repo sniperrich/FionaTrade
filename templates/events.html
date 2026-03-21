@@ -47,5 +47,23 @@
       </tbody>
     </table>
   </div>
+  {% if pager.total_pages > 1 %}
+  <div class="pager-bar">
+    <div class="pager-summary">Showing {{ pager.start_item }}-{{ pager.end_item }} of {{ pager.total_count }} events</div>
+    <div class="pager-actions">
+      {% if pager.has_prev %}
+      <a class="btn btn-ghost btn-sm" href="{{ request.url.include_query_params(page=pager.page-1, per_page=pager.per_page) }}">← Prev</a>
+      {% else %}
+      <span class="btn btn-ghost btn-sm disabled">← Prev</span>
+      {% endif %}
+      <span class="pager-label">Page {{ pager.page }} / {{ pager.total_pages }}</span>
+      {% if pager.has_next %}
+      <a class="btn btn-ghost btn-sm" href="{{ request.url.include_query_params(page=pager.page+1, per_page=pager.per_page) }}">Next →</a>
+      {% else %}
+      <span class="btn btn-ghost btn-sm disabled">Next →</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
 </div>
 {% endblock %}

@@ -62,14 +62,14 @@ IngestionService → NormalizationService → ValidationService
 | 路径 | 功能 |
 |------|------|
 | `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot** |
-| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + portfolio curve + ticker K-line** |
-| `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开 |
-| `/news` | 新闻流：全文展开、来源/ticker 过滤、**30s 自动拉新 + 源状态/报错** |
+| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + portfolio curve + ticker K-line + 成交历史翻页** |
+| `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
+| `/news` | 新闻流：全文展开、来源/ticker 过滤、**30s 自动拉新 + 源状态/报错 + 历史翻页** |
 | `/settings` | 配置信息 |
-| `/signals` | 遗留信号流 |
-| `/events` | 事件流 |
-| `/paper` | 模拟盘组合 |
-| `/backtests` | 回测历史 |
+| `/signals` | 遗留信号流（翻页） |
+| `/events` | 事件流（翻页） |
+| `/paper` | 模拟盘组合（fills 翻页） |
+| `/backtests` | 回测历史（翻页） |
 
 ---
 
@@ -91,7 +91,7 @@ app/
   signal_engine/ 遗留信号引擎
   paper_engine/  模拟填单 + 持仓跟踪 + NAV
   backtest_engine/ 3 阶段回测：warmup → 并行 LLM → 串行执行
-  market/        1m K 线回填（Finnhub → yfinance → stooq）
+  market/        1m K 线回填（Finnhub → Alpaca → yfinance → stooq）
   monitoring/    HealthAuditService（数据源延迟 + 状态快照）
   api/routes.py  所有 REST API 端点
   webui/routes.py Jinja2 页面路由
@@ -133,6 +133,8 @@ tests/           137 个 pytest 测试
 > - `/api/news` 现在额外返回 `metadata` 和 `body_preview`
 > - `/api/live/set_enabled` 同时接受 `POST` 和 `PUT`
 > - Dashboard/Live 首屏改成 `snapshot + sessionStorage`，重新打开页面会先用上次结果秒开，再后台刷新
+> - `/api/agent/runs` 现支持 `ticker/action/limit/offset`
+> - `/api/live/trades` 现支持 `ticker/limit/offset`
 > - 模板页面脚本必须放在 `base.html` 的 `{% block scripts %}` 中，不能直接内联在 `content` 里，否则会先于全局工具函数执行
 
 ---
@@ -176,6 +178,8 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,GOOGL,AMZN
 ```
 或直接点击 `/live` 页面右上角的 **▶ Enable Live** 按钮。
 
+> Enable Live 现在会立即启动后台 `Bar1m` 补数线程，不再等下一轮调度或下一次真实交易循环才补 K 线。
+
 ### 下单逻辑
 - Alpaca bracket 订单（止损 + 止盈原子提交）
 - ATR 自适应止损：2.5× ATR，范围 [3%, 8%]；止盈 = 2× 止损距离
@@ -210,7 +214,7 @@ curl http://localhost:6888/api/health
 
 | 变量 | 说明 |
 |------|------|
-| `FINNHUB_API_KEY` | K 线 + 新闻（必须）|
+| `FINNHUB_API_KEY` | 新闻 + 一级 K 线源（推荐；若已配置 Alpaca，可作为 K 线主链路的第一优先级）|
 | `LLM_API_KEY` + `LLM_BASE_URL` + `LLM_MODEL` | AI 接口（必须）|
 | `ALPACA_API_KEY` + `ALPACA_API_SECRET` | 模拟/实盘（交易必须）|
 | `FRED_API_KEY` | 宏观数据（可选，免费申请）|

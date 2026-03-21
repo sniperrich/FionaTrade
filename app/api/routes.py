@@ -405,7 +405,9 @@ def run_agent_graph(
 @router.get("/agent/runs")
 def list_agent_runs(
     ticker: str | None = Query(default=None),
+    action: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
@@ -413,9 +415,11 @@ def list_agent_runs(
     from app.db.models import AgentRun
     from sqlalchemy import select, desc
 
-    stmt = select(AgentRun).order_by(desc(AgentRun.created_at)).limit(limit)
+    stmt = select(AgentRun).order_by(desc(AgentRun.created_at)).offset(offset).limit(limit)
     if ticker:
         stmt = stmt.where(AgentRun.ticker == ticker.upper())
+    if action:
+        stmt = stmt.where(AgentRun.final_action == action.upper())
 
     rows = session.execute(stmt).scalars().all()
     return {
@@ -561,13 +565,14 @@ def trigger_live_cycle(
 def list_live_trades(
     ticker: str | None = Query(default=None),
     limit: int = Query(default=50, le=500),
+    offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     """Return recent live trades, newest first."""
     from app.db.models import LiveTrade
     from sqlalchemy import select, desc
 
-    q = select(LiveTrade).order_by(desc(LiveTrade.id)).limit(limit)
+    q = select(LiveTrade).order_by(desc(LiveTrade.id)).offset(offset).limit(limit)
     if ticker:
         q = q.where(LiveTrade.ticker == ticker.upper())
     rows = session.execute(q).scalars().all()
@@ -907,6 +912,8 @@ def live_snapshot(
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
     trade_ticker: str | None = Query(default=None),
+    trade_offset: int = Query(default=0, ge=0),
+    trade_limit: int = Query(default=20, ge=1, le=200),
     chart_ticker: str | None = Query(default=None),
     chart_timeframe: str = Query(default="5Min"),
     chart_limit: int = Query(default=72, ge=10, le=500),
@@ -919,7 +926,7 @@ def live_snapshot(
         or next(iter(settings.live_trading_tickers or list(settings.agent_tickers_override or [])), "AAPL")
     )
     cache_key = (
-        f"ui:live_snapshot:{(trade_ticker or '').upper()}:{selected_chart_ticker}:"
+        f"ui:live_snapshot:{(trade_ticker or '').upper()}:{trade_offset}:{trade_limit}:{selected_chart_ticker}:"
         f"{chart_timeframe}:{chart_limit}:{portfolio_period}:{portfolio_timeframe}"
     )
     cached = _cache_get(cache_key, ttl_seconds=6.0)
@@ -953,7 +960,12 @@ def live_snapshot(
         payload["errors"]["orders"] = getattr(exc, "detail", str(exc))
 
     try:
-        payload["trades"] = list_live_trades(ticker=trade_ticker, limit=50, session=session)
+        payload["trades"] = list_live_trades(
+            ticker=trade_ticker,
+            limit=trade_limit,
+            offset=trade_offset,
+            session=session,
+        )
     except Exception as exc:
         payload["errors"]["trades"] = str(exc)
 
@@ -990,6 +1002,7 @@ def set_live_enabled(
     """
     import app.main as _main_module
 
+    was_enabled = bool(settings.live_trading_enabled)
     enabled = bool(body.get("enabled", True))
     settings.live_trading_enabled = enabled
     _cache_invalidate("live:")
@@ -1024,8 +1037,27 @@ def set_live_enabled(
                 except Exception:
                     pass
 
+    if enabled and not was_enabled:
+        try:
+            import threading
+            from app.main import _startup_backfill_bars  # type: ignore[attr-defined]
+
+            threading.Thread(
+                target=_startup_backfill_bars,
+                daemon=True,
+                name="live-enable-bar-backfill",
+            ).start()
+        except Exception:
+            pass
+
     return {
         "enabled": enabled,
-        "message": f"Live trading {'enabled' if enabled else 'disabled'} for this session. "
-                   f"To persist, set LIVE_TRADING_ENABLED={'true' if enabled else 'false'} in .env",
+        "message": (
+            f"Live trading {'enabled' if enabled else 'disabled'} for this session. "
+            + (
+                "Started background bar backfill. "
+                if enabled and not was_enabled else ""
+            )
+            + f"To persist, set LIVE_TRADING_ENABLED={'true' if enabled else 'false'} in .env"
+        ),
     }
