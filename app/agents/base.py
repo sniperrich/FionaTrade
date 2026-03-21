@@ -156,6 +156,22 @@ class BaseAgent(ABC):
         agent_perf = context.get("agent_performance", {})
         return agent_perf.get(self.name, "")
 
+    def _get_market_time_context(self, context: dict | None) -> str:
+        """Return market time string to prepend to system prompts.
+
+        In live mode this tells agents the current US market session so they
+        can calibrate urgency (e.g., 'last 30 min of trading' vs 'just opened').
+        Returns empty string in backtest mode (as_of set instead).
+        """
+        if not context:
+            return ""
+        if context.get("as_of"):
+            return ""  # backtest mode — do not inject live time
+        market_time = context.get("market_time", "")
+        if not market_time:
+            return ""
+        return f"[{market_time}]\n"
+
     @abstractmethod
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         """Run analysis and return a structured signal.

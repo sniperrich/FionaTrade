@@ -153,9 +153,19 @@ class AgentGraph:
                    queries are restricted to data available before this time,
                    preventing look-ahead bias.
         """
+        from app.core.market_hours import market_session_info
+
         ctx = dict(context or {})
         if as_of is not None:
             ctx["as_of"] = as_of
+        else:
+            # Live mode: inject current US market session info so agents know
+            # what time it is and whether the market is open.
+            if "market_time" not in ctx:
+                msi = market_session_info()
+                ctx["market_time"] = msi["context_string"]
+                ctx["market_session"] = msi["label"]
+                ctx["market_et_time"] = msi["et_time_str"]
         state: AgentState = {
             "ticker": ticker.upper(),
             "context": ctx,

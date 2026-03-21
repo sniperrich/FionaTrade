@@ -191,3 +191,35 @@ def agents_page(
             "agent_mode_enabled": settings.agent_mode_enabled,
         },
     )
+
+
+@router.get("/live", response_class=HTMLResponse)
+def live_trading_page(
+    request: Request,
+    ticker: str | None = None,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+):
+    from app.core.market_hours import market_session_info
+    from app.db.models import LiveTrade
+    from sqlalchemy import select, desc
+
+    msi = market_session_info()
+
+    stmt = select(LiveTrade).order_by(desc(LiveTrade.id)).limit(100)
+    if ticker:
+        stmt = stmt.where(LiveTrade.ticker == ticker.upper())
+    trades = session.execute(stmt).scalars().all()
+
+    return templates.TemplateResponse(
+        "live.html",
+        {
+            "request": request,
+            "title": "Live Trading",
+            "trades": trades,
+            "selected_ticker": ticker,
+            "live_enabled": settings.live_trading_enabled,
+            "market_session": msi,
+            "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
+        },
+    )

@@ -399,3 +399,49 @@ class AgentScore(Base):
 
     scored_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
+
+class LiveTrade(Base):
+    """Records every order placed by the live trading cycle.
+
+    One row per order. Status progresses: submitted → filled | cancelled | error.
+    The cycle_id groups all orders placed in the same trading cycle run.
+    """
+
+    __tablename__ = "live_trades"
+    __table_args__ = (
+        Index("ix_live_trades_ticker_created", "ticker", "created_at"),
+        Index("ix_live_trades_cycle_id", "cycle_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # Cycle that triggered this trade (UUID string)
+    cycle_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    ticker: Mapped[str] = mapped_column(String(16))
+
+    # Reference to the AgentRun that produced the decision
+    agent_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Decision fields
+    action: Mapped[str] = mapped_column(String(16))           # BUY | SELL | SHORT | COVER | HOLD
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    target_pct: Mapped[float] = mapped_column(Float, default=0.0)   # fraction of portfolio
+
+    # Broker fields
+    order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="submitted")
+    fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Market context at time of decision
+    et_time: Mapped[str] = mapped_column(String(48), default="")      # "09:45 ET Mon Jan 15 2026"
+    market_session: Mapped[str] = mapped_column(String(32), default="") # "market_open" | "pre_market" …
+
+    # Agent reasoning (trimmed)
+    reasoning: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+

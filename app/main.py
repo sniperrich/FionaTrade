@@ -9,6 +9,7 @@ from app.core.logging import get_app_logger, log_writeout, setup_logging
 from app.db.database import db_session, init_db
 from app.monitoring.health import HealthAuditService
 from app.services.earnings_calendar import EarningsCalendarService
+from app.services.live_trading import LiveTradingService
 from app.services.orchestrator import PipelineOrchestrator
 from app.webui.routes import router as web_router
 
@@ -74,6 +75,26 @@ def _scheduled_earnings_refresh() -> None:
         logger.exception("财报日历刷新失败: %s", exc)
 
 
+def _scheduled_live_trading() -> None:
+    """Live trading cycle — runs every N seconds during market hours."""
+    try:
+        with db_session() as session:
+            svc = LiveTradingService(settings)
+            result = svc.run_cycle(session)
+            if result.get("skipped"):
+                logger.debug("[live] 模拟盘跳过 reason=%s", result.get("reason"))
+            else:
+                logger.info(
+                    "[live] 模拟盘轮询完成 cycle=%s orders=%s/%s val=$%s",
+                    result.get("cycle_id"),
+                    result.get("orders_placed", 0),
+                    result.get("tickers_processed", 0),
+                    result.get("portfolio_value", 0),
+                )
+    except Exception as exc:
+        logger.exception("[live] 模拟盘轮询失败: %s", exc)
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     global scheduler
@@ -95,6 +116,18 @@ def startup_event() -> None:
                 "interval",
                 hours=max(1, int(settings.earnings_calendar_refresh_interval_hours)),
                 max_instances=1,
+            )
+        if settings.live_trading_enabled:
+            scheduler.add_job(
+                _scheduled_live_trading,
+                "interval",
+                seconds=max(60, settings.live_cycle_interval_seconds),
+                max_instances=1,
+            )
+            logger.info(
+                "[live] 模拟盘已启用 interval=%ss tickers=%s",
+                settings.live_cycle_interval_seconds,
+                settings.live_trading_tickers or settings.agent_tickers_override,
             )
         scheduler.start()
         logger.info(

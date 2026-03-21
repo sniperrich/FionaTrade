@@ -173,6 +173,17 @@ class Settings(BaseSettings):
     alpaca_api_secret: str = ""
     alpaca_base_url: str = "https://paper-api.alpaca.markets"  # paper trading endpoint
 
+    # ── Live Trading ──────────────────────────────────────────────────────────
+    live_trading_enabled: bool = False
+    # Tickers to trade live; falls back to agent_tickers_override if empty
+    live_trading_tickers: list[str] = []
+    # How often (seconds) the live cycle runs during market hours (default 5 min)
+    live_cycle_interval_seconds: int = 300
+    # Maximum portfolio allocation per position (0.0–1.0)
+    live_max_position_pct: float = 0.10
+    # Allow order placement during pre-market session (default: False)
+    live_allow_premarket: bool = False
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

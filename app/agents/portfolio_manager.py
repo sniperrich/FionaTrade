@@ -152,7 +152,7 @@ class PortfolioManagerAgent(BaseAgent):
                     },
                 )
 
-            raw = self._call_llm(_SYSTEM_PROMPT, user_prompt, response_format="json")
+            raw = self._call_llm(self._get_market_time_context(context) + _SYSTEM_PROMPT, user_prompt, response_format="json")
             parsed = self._parse_json_response(raw)
 
             if not parsed:

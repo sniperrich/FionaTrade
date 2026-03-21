@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Live Trading
+  {% if live_enabled %}
+    <span style="background:#2e7d32;color:#fff;font-size:0.7em;padding:2px 10px;border-radius:12px;vertical-align:middle;margin-left:8px">● ACTIVE</span>
+  {% else %}
+    <span style="background:#777;color:#fff;font-size:0.7em;padding:2px 10px;border-radius:12px;vertical-align:middle;margin-left:8px">DISABLED</span>
+  {% endif %}
+</h2>
+
+{# ── Market status bar ────────────────────────────────────────────────── #}
+<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px">
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:220px">
+    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Market Session</div>
+    {% if market_session.tradeable %}
+      <div style="font-size:1.3em;font-weight:700;color:var(--ok)">● {{ market_session.label | replace('_', ' ') | upper }}</div>
+    {% elif market_session.label == 'pre_market' %}
+      <div style="font-size:1.3em;font-weight:700;color:var(--warn)">◐ PRE-MARKET</div>
+    {% elif market_session.label == 'after_hours' %}
+      <div style="font-size:1.3em;font-weight:700;color:var(--warn)">◑ AFTER-HOURS</div>
+    {% else %}
+      <div style="font-size:1.3em;font-weight:700;color:var(--muted)">○ CLOSED</div>
+    {% endif %}
+    <div style="font-size:0.85em;color:var(--muted);margin-top:4px">{{ market_session.et_time_str }}</div>
+  </div>
+
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:180px">
+    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Cycle Interval</div>
+    <div style="font-size:1.3em;font-weight:700">{{ (settings.live_cycle_interval_seconds // 60) if settings else '5' }} min</div>
+  </div>
+
+  {% if market_session.min_until_open is not none %}
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:180px">
+    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Opens In</div>
+    <div style="font-size:1.3em;font-weight:700">{{ market_session.min_until_open }} min</div>
+  </div>
+  {% elif market_session.min_until_close is not none %}
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:180px">
+    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Closes In</div>
+    <div style="font-size:1.3em;font-weight:700;color:var(--warn)">{{ market_session.min_until_close }} min</div>
+  </div>
+  {% endif %}
+
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:220px">
+    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Trading Tickers</div>
+    <div style="font-size:0.95em;font-weight:600;word-break:break-word">
+      {% if tickers %}{{ tickers | join(', ') }}{% else %}<span style="color:var(--muted)">none configured</span>{% endif %}
+    </div>
+  </div>
+</div>
+
+{# ── Disabled banner ──────────────────────────────────────────────────── #}
+{% if not live_enabled %}
+<div style="background:#fff3cd;border:1px solid #ffc107;padding:12px 18px;border-radius:4px;margin-bottom:20px">
+  ⚠️ <strong>Live trading is disabled.</strong>
+  Set <code>LIVE_TRADING_ENABLED=true</code> and configure <code>LIVE_TRADING_TICKERS</code> in your <code>.env</code>.
+</div>
+{% endif %}
+
+{# ── Quick actions ────────────────────────────────────────────────────── #}
+<div style="margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap">
+  <form method="post" action="/api/live/cycle" onsubmit="this.querySelector('button').disabled=true">
+    <button type="submit" style="background:var(--accent);color:#fff;border:none;padding:8px 18px;border-radius:4px;cursor:pointer">
+      ▶ Trigger Cycle Now
+    </button>
+  </form>
+  <a href="/api/live/positions" target="_blank"
+     style="background:var(--panel);border:1px solid var(--line);padding:8px 18px;border-radius:4px;text-decoration:none;color:var(--ink)">
+    📊 View Alpaca Positions
+  </a>
+  <a href="/api/live/status" target="_blank"
+     style="background:var(--panel);border:1px solid var(--line);padding:8px 18px;border-radius:4px;text-decoration:none;color:var(--ink)">
+    ⚙ API Status
+  </a>
+</div>
+
+{# ── Trade filter ─────────────────────────────────────────────────────── #}
+<form method="get" style="margin-bottom:16px">
+  <label>Filter by ticker:
+    <input type="text" name="ticker" value="{{ selected_ticker or '' }}" placeholder="e.g. AAPL"
+           style="width:120px;padding:4px 8px;border:1px solid var(--line);border-radius:4px">
+  </label>
+  <button type="submit" style="padding:4px 12px;border:1px solid var(--line);border-radius:4px;background:var(--panel);cursor:pointer">Filter</button>
+  {% if selected_ticker %}<a href="/live" style="margin-left:8px">Clear</a>{% endif %}
+</form>
+
+{# ── Trade log ────────────────────────────────────────────────────────── #}
+{% if trades %}
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Cycle</th>
+      <th>Ticker</th>
+      <th>Action</th>
+      <th>Qty</th>
+      <th>Target %</th>
+      <th>Status</th>
+      <th>Order ID</th>
+      <th>Session</th>
+      <th>ET Time</th>
+      <th>Reasoning</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for t in trades %}
+    <tr>
+      <td>{{ t.id }}</td>
+      <td style="font-family:monospace;font-size:0.8em">{{ t.cycle_id or '—' }}</td>
+      <td><strong>{{ t.ticker }}</strong></td>
+      <td>
+        {% if t.action == 'BUY' %}
+          <span style="color:var(--ok);font-weight:700">▲ BUY</span>
+        {% elif t.action == 'SHORT' %}
+          <span style="color:var(--bad);font-weight:700">▼ SHORT</span>
+        {% elif t.action == 'SELL' %}
+          <span style="color:var(--warn);font-weight:700">◀ SELL</span>
+        {% elif t.action == 'COVER' %}
+          <span style="color:var(--warn);font-weight:700">▶ COVER</span>
+        {% else %}
+          <span style="color:var(--muted)">— HOLD</span>
+        {% endif %}
+      </td>
+      <td>{{ t.quantity | int if t.quantity else '—' }}</td>
+      <td>{{ "%.1f"|format(t.target_pct * 100) }}%</td>
+      <td>
+        {% if t.status == 'submitted' %}
+          <span style="color:var(--accent)">⏳ submitted</span>
+        {% elif t.status == 'filled' %}
+          <span style="color:var(--ok)">✓ filled</span>
+        {% elif t.status == 'skipped' or t.status == 'no_change' %}
+          <span style="color:var(--muted)">— {{ t.status }}</span>
+        {% elif t.status == 'error' %}
+          <span style="color:var(--bad)">✗ error</span>
+        {% else %}
+          {{ t.status }}
+        {% endif %}
+      </td>
+      <td style="font-family:monospace;font-size:0.78em">
+        {% if t.order_id %}<a href="https://app.alpaca.markets/paper/orders" target="_blank" style="color:var(--accent)">{{ t.order_id[:8] }}…</a>{% else %}—{% endif %}
+      </td>
+      <td style="font-size:0.8em">{{ t.market_session | replace('_', ' ') }}</td>
+      <td style="font-size:0.8em;white-space:nowrap">{{ t.et_time }}</td>
+      <td style="font-size:0.8em;max-width:300px;word-break:break-word">
+        {% if t.error %}
+          <span style="color:var(--bad)">⚠ {{ t.error }}</span>
+        {% else %}
+          {{ t.reasoning[:120] }}{% if t.reasoning|length > 120 %}…{% endif %}
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div style="color:var(--muted);padding:24px 0">
+  No live trades yet.
+  {% if live_enabled %}
+    The cycle runs every {{ (5) }} minutes during US market hours (Mon–Fri 09:30–16:00 ET).
+  {% endif %}
+</div>
+{% endif %}
+
+{# ── Auto-refresh every 60s ───────────────────────────────────────────── #}
+<script>
+  setTimeout(() => location.reload(), 60000);
+</script>
+{% endblock %}

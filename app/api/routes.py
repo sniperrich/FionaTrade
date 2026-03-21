@@ -459,3 +459,121 @@ def refresh_fundamentals(
     result = svc.refresh_fundamentals_batch(session, tickers)
     session.commit()
     return result
+
+
+# ── Live Trading ──────────────────────────────────────────────────────────────
+
+@router.get("/live/status")
+def live_status(
+    settings: Settings = Depends(get_app_settings),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return current live-trading status (enabled, market hours, recent cycle)."""
+    from app.core.market_hours import market_session_info
+    from app.db.models import LiveTrade
+    from sqlalchemy import select, desc
+
+    msi = market_session_info()
+
+    # Most recent cycle
+    last_trade = session.execute(
+        select(LiveTrade).order_by(desc(LiveTrade.id)).limit(1)
+    ).scalar_one_or_none()
+
+    last_cycle: dict | None = None
+    if last_trade:
+        last_cycle = {
+            "cycle_id": last_trade.cycle_id,
+            "et_time": last_trade.et_time,
+            "created_at": last_trade.created_at.isoformat() if last_trade.created_at else None,
+        }
+
+    return {
+        "enabled": settings.live_trading_enabled,
+        "market_session": msi["label"],
+        "market_tradeable": msi["tradeable"],
+        "market_time": msi["et_time_str"],
+        "market_context": msi["context_string"],
+        "cycle_interval_seconds": settings.live_cycle_interval_seconds,
+        "max_position_pct": settings.live_max_position_pct,
+        "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
+        "last_cycle": last_cycle,
+    }
+
+
+@router.post("/live/cycle")
+def trigger_live_cycle(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Manually trigger one live-trading cycle (ignores market hours gate)."""
+    from app.services.live_trading import LiveTradingService
+    svc = LiveTradingService(settings)
+    result = svc.run_cycle(session)
+    session.commit()
+    return result
+
+
+@router.get("/live/trades")
+def list_live_trades(
+    ticker: str | None = Query(default=None),
+    limit: int = Query(default=50, le=500),
+    session: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Return recent live trades, newest first."""
+    from app.db.models import LiveTrade
+    from sqlalchemy import select, desc
+
+    q = select(LiveTrade).order_by(desc(LiveTrade.id)).limit(limit)
+    if ticker:
+        q = q.where(LiveTrade.ticker == ticker.upper())
+    rows = session.execute(q).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "cycle_id": r.cycle_id,
+            "ticker": r.ticker,
+            "action": r.action,
+            "quantity": r.quantity,
+            "target_pct": r.target_pct,
+            "order_id": r.order_id,
+            "status": r.status,
+            "fill_price": r.fill_price,
+            "et_time": r.et_time,
+            "market_session": r.market_session,
+            "reasoning": r.reasoning,
+            "error": r.error,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/live/positions")
+def live_positions(
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Return current Alpaca positions and account state."""
+    from app.broker.alpaca import AlpacaBroker
+    broker = AlpacaBroker(settings)
+    try:
+        account = broker.get_account()
+        positions = broker.get_all_positions()
+        return {
+            "equity": float(account.get("equity", 0)),
+            "cash": float(account.get("cash", 0)),
+            "buying_power": float(account.get("buying_power", 0)),
+            "positions": [
+                {
+                    "ticker": p.ticker,
+                    "quantity": p.quantity,
+                    "avg_cost": p.avg_cost,
+                    "market_value": p.market_value,
+                    "unrealized_pnl": p.unrealized_pnl,
+                    "side": "long" if p.quantity > 0 else "short",
+                }
+                for p in positions
+            ],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker error: {exc}")

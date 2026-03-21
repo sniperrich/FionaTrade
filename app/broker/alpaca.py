@@ -208,3 +208,49 @@ class AlpacaBroker(AbstractBroker):
             return resp.json()
         return []
 
+    def get_latest_price(self, ticker: str) -> float | None:
+        """Return the latest trade price for a ticker.
+
+        Uses Alpaca's latest trade endpoint (works for US equities).
+        Returns None if the price cannot be fetched.
+        """
+        try:
+            # Use the market data endpoint (separate base URL for data API)
+            base = (self._settings.alpaca_base_url or "").rstrip("/")
+            # Paper and live trading both use api.alpaca.markets for market data
+            data_url = "https://data.alpaca.markets/v2"
+            resp = requests.get(
+                f"{data_url}/stocks/{ticker.upper()}/trades/latest",
+                headers=self._headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return float(resp.json()["trade"]["p"])
+        except Exception as exc:
+            logger.warning("[alpaca] Could not get latest price for %s: %s", ticker, exc)
+            return None
+
+    def get_latest_bar(self, ticker: str) -> dict | None:
+        """Return the latest 1-minute bar for a ticker (open, high, low, close, volume)."""
+        try:
+            data_url = "https://data.alpaca.markets/v2"
+            resp = requests.get(
+                f"{data_url}/stocks/{ticker.upper()}/bars/latest",
+                headers=self._headers,
+                params={"timeframe": "1Min"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            bar = resp.json().get("bar", {})
+            return {
+                "open": float(bar.get("o", 0)),
+                "high": float(bar.get("h", 0)),
+                "low":  float(bar.get("l", 0)),
+                "close": float(bar.get("c", 0)),
+                "volume": float(bar.get("v", 0)),
+            }
+        except Exception as exc:
+            logger.warning("[alpaca] Could not get latest bar for %s: %s", ticker, exc)
+            return None
+
+
