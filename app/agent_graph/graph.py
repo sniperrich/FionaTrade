@@ -16,7 +16,7 @@ from app.agents.reward import build_performance_context, compute_dynamic_weights
 from app.agents.risk_manager import RiskManagerAgent
 from app.agents.technicals import TechnicalsAgent
 from app.core.config import Settings
-from app.core.logging import get_app_logger
+from app.core.logging import get_app_logger, log_agent_run
 from app.db.models import AgentRun
 
 logger = get_app_logger()
@@ -218,5 +218,21 @@ class AgentGraph:
             )
             session.add(run)
             session.flush()
+            # Structured agent run log for monitoring / debugging
+            try:
+                log_agent_run(ticker, {
+                    "action": state.get("final_action", "HOLD"),
+                    "position_pct": state.get("final_position_pct", 0.0),
+                    "reasoning": (state.get("final_reasoning") or "")[:300],
+                    "execution_ms": int(elapsed * 1000),
+                    "status": "FAILED" if state.get("error") else "COMPLETED",
+                    "macro": (state.get("macro_analyst_result") or {}).get("signal"),
+                    "news": (state.get("news_sentiment_result") or {}).get("signal"),
+                    "fundamentals": (state.get("fundamentals_result") or {}).get("signal"),
+                    "technicals": (state.get("technicals_result") or {}).get("signal"),
+                    "risk_approved": (state.get("risk_manager_result") or {}).get("approved"),
+                })
+            except Exception:
+                pass
         except Exception as exc:
             logger.warning("[graph] Failed to persist AgentRun for %s: %s", ticker, exc)

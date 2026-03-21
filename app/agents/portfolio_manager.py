@@ -59,14 +59,16 @@ Return a JSON object with these exact fields:
 IMPORTANT RULES:
 1. If risk_manager approved=false, you MUST set action=HOLD and position_pct=0.0
 2. position_pct must not exceed max_position_pct from risk manager
-3. If risk_manager approved=true, you MUST ACT (BUY or SHORT) — do NOT return HOLD when risk approved
-4. Use SELL to close an existing long position when outlook has turned negative or neutral
-5. Weight news (45%) and macro (25%) highest for direction; fundamentals and technicals (15% each) for confirmation
-6. conviction=HIGH requires at least 2 agents aligned; MEDIUM requires 1 strong signal; LOW for mixed
-7. When 2+ agents say SHORT/SELL, you SHOULD short or sell — do not override with BUY
-8. When agents disagree (e.g., fund=BUY, tech=SHORT, news=SHORT), side with the MAJORITY
-9. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
-10. If we already hold a profitable position and agents are mixed, prefer HOLD over reversal
+3. HOLD is valid when: conviction=LOW, or fewer than 2 agents align on the same direction, or the signal is unclear/mixed
+4. BUY or SHORT requires: conviction=HIGH or MEDIUM, AND at least 2 agents clearly aligned in the same direction
+5. Use SELL to close an existing long position when outlook has turned negative or neutral
+6. Weight news (45%) and macro (25%) highest for direction; fundamentals and technicals (15% each) for confirmation
+7. conviction=HIGH requires 3+ agents aligned; MEDIUM requires 2 agents aligned; LOW for 0-1 aligned or mixed signals
+8. When 2+ agents say SHORT/SELL, you SHOULD short or sell — do not override with BUY
+9. When agents disagree (e.g., fund=BUY, tech=SHORT, news=SHORT), side with the MAJORITY; if tie, return HOLD
+10. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
+11. If we already hold a profitable position and agents are mixed, prefer HOLD over reversal
+12. It is FINE to return HOLD — do not force trades just because risk is approved
 """
 
 
