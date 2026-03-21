@@ -262,14 +262,37 @@ def get_ticker_news_summary(
     results = []
     for row in rows:
         results.append({
+            "id": row.id,
             "title": row.title,
             "source": row.source,
             "published_at": row.published_at.isoformat(),
             "body_snippet": (row.body or "")[:400],
+            "body_full": row.body or "",
             "source_tier": row.source_tier,
         })
 
     return results
+
+
+def get_articles_full_text(session: Session, item_ids: list[int]) -> dict[int, dict]:
+    """Fetch full body text for a list of RawItem IDs.
+
+    Returns a dict mapping id → {title, source, published_at, body}.
+    """
+    if not item_ids:
+        return {}
+    rows = session.execute(
+        select(RawItem).where(RawItem.id.in_(item_ids))
+    ).scalars().all()
+    return {
+        row.id: {
+            "title": row.title,
+            "source": row.source,
+            "published_at": row.published_at.isoformat(),
+            "body": row.body or "",
+        }
+        for row in rows
+    }
 
 
 def _age_label(hours: float) -> str:
@@ -294,8 +317,49 @@ def _hours_since(ts_str: str, ref_time: datetime) -> float:
         return 999.0
 
 
-def build_news_context_text(
+def build_news_screening_text(
     session: Session, ticker: str, lookback_hours: int = 336, as_of: datetime | None = None,
+) -> tuple[str, list[dict]]:
+    """Build a numbered screening list with article IDs for the pre-screening pass.
+
+    Returns (screening_text, raw_news_list) so the caller has IDs to map back.
+    Each article gets a sequential number [N] and shows the DB id for expansion.
+    """
+    ref_time = as_of or datetime.now(timezone.utc)
+    news = get_ticker_news_summary(
+        session, ticker=ticker, lookback_hours=lookback_hours, limit=25, as_of=as_of
+    )
+
+    lines: list[str] = [
+        f"=== ARTICLE SCREENING LIST FOR {ticker} ===",
+        "(Read headlines and snippets below. Return which article IDs are worth reading in full.)",
+        "(🔴=<24h  🟡=1-3d  🟢=3-7d  ⚪=7-14d  |  tier1=top source, tier3=low quality)",
+        "",
+    ]
+
+    for i, item in enumerate(news, 1):
+        age = _hours_since(item["published_at"], ref_time)
+        label = _age_label(age)
+        tier_tag = f"[tier{item['source_tier']}]"
+        snippet = (item.get("body_snippet") or "").strip().replace("\n", " ")[:180]
+        lines.append(f"[{i}] id={item['id']}  {label} {tier_tag} [{item['source']}]")
+        lines.append(f"    {item['title']}")
+        if snippet and snippet.strip() != item["title"].strip():
+            lines.append(f"    → {snippet}")
+        lines.append("")
+
+    if not news:
+        lines.append("  (no articles found)")
+
+    return "\n".join(lines), news
+
+
+def build_news_context_text(
+    session: Session,
+    ticker: str,
+    lookback_hours: int = 336,
+    as_of: datetime | None = None,
+    expanded_articles: dict[int, dict] | None = None,
 ) -> str:
     """Build a time-bucketed news context block for LLM prompts.
 
@@ -305,6 +369,10 @@ def build_news_context_text(
       🟡 RECENT    = 1–3 days
       🟢 THIS WEEK = 3–7 days
       ⚪ OLDER     = 7–14 days
+
+    Args:
+        expanded_articles: Optional dict from get_articles_full_text() — when provided,
+            these articles are injected as full-text blocks below the headline list.
     """
     ref_time = as_of or datetime.now(timezone.utc)
 
@@ -344,5 +412,16 @@ def build_news_context_text(
             lines.append(line)
     else:
         lines.append("  (none)")
+
+    # Inject full-text blocks for articles the agent requested to read in full
+    if expanded_articles:
+        lines.append("\n[FULL ARTICLE TEXT — you requested these for deeper reading]")
+        for art_id, art in expanded_articles.items():
+            pub = art["published_at"][:16]
+            full_body = (art["body"] or "").strip()[:2500]
+            lines.append(f"\n📖 [FULL] id={art_id} [{art['source']}] {art['title']} ({pub})")
+            lines.append("-" * 60)
+            lines.append(full_body)
+            lines.append("-" * 60)
 
     return "\n".join(lines)
