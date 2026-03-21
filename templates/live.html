@@ -713,7 +713,7 @@ async function triggerCycle(ev){
   try{
     const d=await apiFetch('/api/live/cycle', {method:'POST', timeout:12000});
     clearViewCache(LIVE_CACHE_PREFIX);
-    toast('Cycle done — '+(d.orders_placed||0)+' orders placed','success');
+    toast(d.message || 'Live cycle queued for worker','success');
     setTimeout(refreshAll,2000);
   } catch(e){ toast('Error: '+e.message,'error'); }
   finally{ btn.disabled=false; btn.textContent='⚡ Run Cycle'; }

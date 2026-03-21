@@ -14,6 +14,7 @@ from app.core.config import Settings
 from app.core.utils import utc_now
 from app.db.models import BacktestRun, Event, EventEvidence, PaperFill, Position, RawItem, Signal, SourceStatus
 from app.paper_engine.service import PaperEngineService
+from app.services.runtime_control import RuntimeControlService
 
 templates = Jinja2Templates(directory="templates")
 router = APIRouter(tags=["webui"])
@@ -305,6 +306,7 @@ def live_trading_page(
     if ticker:
         stmt = stmt.where(LiveTrade.ticker == ticker.upper())
     trades = session.execute(stmt).scalars().all()
+    live_enabled = RuntimeControlService().get_live_enabled(session, settings)
 
     return templates.TemplateResponse(
         "live.html",
@@ -313,7 +315,7 @@ def live_trading_page(
             "title": "Live Trading",
             "trades": trades,
             "selected_ticker": ticker,
-            "live_enabled": settings.live_trading_enabled,
+            "live_enabled": live_enabled,
             "market_session": msi,
             "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
             "default_chart_ticker": ticker or ((settings.live_trading_tickers or list(settings.agent_tickers_override or []))[:1] or ["AAPL"])[0],

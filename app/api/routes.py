@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime, timedelta, timezone
 import time
 from typing import Any
@@ -12,12 +11,18 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_app_settings, get_db
 from app.backtest_engine.service import BacktestEngineService
 from app.core.config import Settings
-from app.core.runtime_state import get_live_runtime_state, patch_live_runtime, push_live_event
 from app.core.utils import utc_now
-from app.db.models import BacktestRun, Bar1m, Event, EventEvidence, RawItem, Signal, SourceStatus
-from app.market.backfill import MarketBackfillService
+from app.db.models import BacktestRun, Event, EventEvidence, RawItem, Signal, SourceStatus
 from app.monitoring.health import HealthAuditService
+from app.services.market_data import MarketDataService
 from app.services.orchestrator import PipelineOrchestrator
+from app.services.runtime_control import RuntimeControlService
+from app.services.worker_runtime import (
+    COMMAND_REFRESH_BARS,
+    COMMAND_RUN_INGESTION,
+    COMMAND_RUN_LIVE_CYCLE,
+    WorkerRuntimeService,
+)
 
 router = APIRouter(prefix="/api", tags=["api"])
 _RUNTIME_CACHE: dict[str, tuple[float, Any]] = {}
@@ -44,201 +49,6 @@ def _cache_invalidate(prefix: str) -> None:
     for key in list(_RUNTIME_CACHE.keys()):
         if key.startswith(prefix):
             _RUNTIME_CACHE.pop(key, None)
-
-
-def _ensure_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _timeframe_to_minutes(timeframe: str) -> int:
-    mapping = {
-        "1Min": 1,
-        "5Min": 5,
-        "15Min": 15,
-        "30Min": 30,
-        "1H": 60,
-    }
-    return mapping.get(timeframe, 5)
-
-
-def _bucket_bar_ts(ts: datetime, timeframe: str) -> datetime:
-    ts = _ensure_utc(ts) or utc_now()
-    if timeframe == "1Min":
-        return ts.replace(second=0, microsecond=0)
-    minutes = _timeframe_to_minutes(timeframe)
-    if minutes < 60:
-        minute = (ts.minute // minutes) * minutes
-        return ts.replace(minute=minute, second=0, microsecond=0)
-    hours = max(1, minutes // 60)
-    hour = (ts.hour // hours) * hours
-    return ts.replace(hour=hour, minute=0, second=0, microsecond=0)
-
-
-def _aggregate_cached_bars(rows: list[Bar1m], timeframe: str, limit: int) -> list[dict[str, Any]]:
-    if not rows:
-        return []
-    if timeframe == "1Min":
-        sliced = rows[-limit:]
-        return [
-            {
-                "t": (_ensure_utc(row.ts) or utc_now()).isoformat().replace("+00:00", "Z"),
-                "o": float(row.open),
-                "h": float(row.high),
-                "l": float(row.low),
-                "c": float(row.close),
-                "v": float(row.volume),
-                "source": row.source,
-            }
-            for row in sliced
-        ]
-
-    buckets: dict[datetime, dict[str, Any]] = {}
-    for row in rows:
-        bucket_ts = _bucket_bar_ts(row.ts, timeframe)
-        bucket = buckets.get(bucket_ts)
-        if bucket is None:
-            buckets[bucket_ts] = {
-                "bucket_ts": bucket_ts,
-                "o": float(row.open),
-                "h": float(row.high),
-                "l": float(row.low),
-                "c": float(row.close),
-                "v": float(row.volume),
-                "sources": Counter([row.source]),
-            }
-        else:
-            bucket["h"] = max(bucket["h"], float(row.high))
-            bucket["l"] = min(bucket["l"], float(row.low))
-            bucket["c"] = float(row.close)
-            bucket["v"] += float(row.volume)
-            bucket["sources"].update([row.source])
-
-    aggregated = []
-    for item in sorted(buckets.values(), key=lambda x: x["bucket_ts"])[-limit:]:
-        source_counts = item.pop("sources")
-        aggregated.append(
-            {
-                "t": item["bucket_ts"].isoformat().replace("+00:00", "Z"),
-                "o": item["o"],
-                "h": item["h"],
-                "l": item["l"],
-                "c": item["c"],
-                "v": item["v"],
-                "source": source_counts.most_common(1)[0][0] if source_counts else "bars_1m",
-            }
-        )
-    return aggregated
-
-
-def _load_cached_bars(session: Session, ticker: str, timeframe: str, limit: int) -> dict[str, Any]:
-    normalized_ticker = ticker.upper()
-    minutes = _timeframe_to_minutes(timeframe)
-    row_limit = min(max(limit * max(minutes, 1) * 3, limit * 20), 25000)
-    rows = (
-        session.execute(
-            select(Bar1m)
-            .where(Bar1m.ticker == normalized_ticker)
-            .order_by(desc(Bar1m.ts))
-            .limit(row_limit)
-        )
-        .scalars()
-        .all()
-    )
-    rows = list(reversed(rows))
-    bars = _aggregate_cached_bars(rows, timeframe, limit)
-    latest_ts = _ensure_utc(rows[-1].ts) if rows else None
-    now = utc_now()
-    age_minutes = None
-    if latest_ts is not None:
-        age_minutes = round((now - latest_ts).total_seconds() / 60.0, 1)
-    source_counts = Counter(row.source for row in rows)
-    return {
-        "ticker": normalized_ticker,
-        "timeframe": timeframe,
-        "count": len(bars),
-        "bars": bars,
-        "resolved_source": "cache",
-        "cache_row_count": len(rows),
-        "cache_last_ts": latest_ts.isoformat().replace("+00:00", "Z") if latest_ts else None,
-        "cache_age_minutes": age_minutes,
-        "source_counts": dict(source_counts),
-    }
-
-
-def _build_bar_cache_status(
-    session: Session,
-    settings: Settings,
-    selected_ticker: str,
-) -> dict[str, Any]:
-    configured = [t.upper() for t in (settings.live_trading_tickers or list(settings.agent_tickers_override or []))]
-    tracked = list(configured)
-    if not tracked and selected_ticker:
-        tracked = [selected_ticker.upper()]
-    selected = selected_ticker.upper()
-    now = utc_now()
-    per_ticker: list[dict[str, Any]] = []
-    fresh_count = 0
-    latest_global_ts: datetime | None = None
-    for ticker in tracked:
-        latest_ts = session.execute(select(func.max(Bar1m.ts)).where(Bar1m.ticker == ticker)).scalar_one_or_none()
-        latest_ts = _ensure_utc(latest_ts)
-        row_count = session.execute(select(func.count(Bar1m.id)).where(Bar1m.ticker == ticker)).scalar_one()
-        age_hours = None
-        status = "empty"
-        if latest_ts:
-            age_hours = round((now - latest_ts).total_seconds() / 3600.0, 2)
-            latest_global_ts = max(latest_global_ts, latest_ts) if latest_global_ts else latest_ts
-            if age_hours <= 4:
-                status = "fresh"
-                fresh_count += 1
-            elif age_hours <= 24:
-                status = "stale"
-            else:
-                status = "very_stale"
-        per_ticker.append(
-            {
-                "ticker": ticker,
-                "row_count": int(row_count),
-                "last_ts": latest_ts.isoformat().replace("+00:00", "Z") if latest_ts else None,
-                "age_hours": age_hours,
-                "status": status,
-            }
-        )
-
-    selected_sources = (
-        session.execute(
-            select(Bar1m.source, func.count(Bar1m.id))
-            .where(Bar1m.ticker == selected)
-            .group_by(Bar1m.source)
-            .order_by(func.count(Bar1m.id).desc())
-        )
-        .all()
-    )
-    selected_summary = next((item for item in per_ticker if item["ticker"] == selected), {
-        "ticker": selected,
-        "row_count": 0,
-        "last_ts": None,
-        "age_hours": None,
-        "status": "empty",
-    })
-    return {
-        "selected_ticker": selected,
-        "configured_tickers_count": len(configured),
-        "configured_tickers": configured,
-        "using_fallback_ticker": not bool(configured),
-        "selected": {
-            **selected_summary,
-            "source_counts": {source: count for source, count in selected_sources},
-        },
-        "tracked_count": len(tracked),
-        "fresh_count": fresh_count,
-        "latest_global_ts": latest_global_ts.isoformat().replace("+00:00", "Z") if latest_global_ts else None,
-        "tickers": per_ticker,
-    }
 
 
 @router.get("/health")
@@ -272,8 +82,19 @@ def run_ingest(
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
-    orchestrator = PipelineOrchestrator(settings)
-    return orchestrator.run_ingestion_validation(session)
+    command = WorkerRuntimeService().queue_command(
+        session,
+        COMMAND_RUN_INGESTION,
+        payload={"trigger": "api"},
+        requested_by="api",
+    )
+    session.commit()
+    return {
+        "queued": True,
+        "command_id": command.id,
+        "command_type": command.command_type,
+        "message": "Ingestion job queued for worker",
+    }
 
 
 @router.get("/events")
@@ -498,19 +319,26 @@ def run_market_backfill(
     if chunk_days < 1 or chunk_days > 31:
         raise HTTPException(status_code=400, detail="chunk_days must be between 1 and 31")
 
-    service = MarketBackfillService(settings)
-    try:
-        result = service.run(
-            session,
-            start_date=str(start_date),
-            end_date=str(end_date),
-            tickers=tickers,
-            chunk_days=chunk_days,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return result.to_dict()
+    command = WorkerRuntimeService().queue_command(
+        session,
+        COMMAND_REFRESH_BARS,
+        payload={
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "tickers": tickers,
+            "chunk_days": chunk_days,
+            "sleep_seconds": float(payload.get("sleep_seconds", 0.12)),
+            "trigger": "api",
+        },
+        requested_by="api",
+    )
+    session.commit()
+    return {
+        "queued": True,
+        "command_id": command.id,
+        "command_type": command.command_type,
+        "message": "Market backfill job queued for worker",
+    }
 
 
 @router.get("/paper/portfolio")
@@ -708,30 +536,27 @@ def live_status(
 ) -> dict[str, Any]:
     """Return current live-trading status (enabled, market hours, recent cycle)."""
     from app.core.market_hours import market_session_info
-    from app.db.models import LiveTrade
-    from sqlalchemy import select, desc
-
     cached = _cache_get("live:status", ttl_seconds=5.0)
     if cached is not None:
         return cached
 
     msi = market_session_info()
-
-    # Most recent cycle
-    last_trade = session.execute(
-        select(LiveTrade).order_by(desc(LiveTrade.id)).limit(1)
-    ).scalar_one_or_none()
-
+    control = RuntimeControlService()
+    enabled = control.get_live_enabled(session, settings)
+    latest_run = WorkerRuntimeService().latest_run(session, "live_cycle")
     last_cycle: dict | None = None
-    if last_trade:
+    if latest_run:
         last_cycle = {
-            "cycle_id": last_trade.cycle_id,
-            "et_time": last_trade.et_time,
-            "created_at": last_trade.created_at.isoformat() if last_trade.created_at else None,
+            "cycle_id": latest_run.run_key,
+            "market_session": latest_run.market_session,
+            "created_at": latest_run.started_at.isoformat() if latest_run.started_at else None,
+            "updated_at": latest_run.updated_at.isoformat() if latest_run.updated_at else None,
+            "status": latest_run.status,
+            "stage": latest_run.stage,
         }
 
     return _cache_set("live:status", {
-        "enabled": settings.live_trading_enabled,
+        "enabled": enabled,
         "market_session": msi["label"],
         "market_tradeable": msi["tradeable"],
         "market_time": msi["et_time_str"],
@@ -744,8 +569,10 @@ def live_status(
 
 
 @router.get("/live/runtime")
-def live_runtime_status() -> dict[str, Any]:
-    return get_live_runtime_state()
+def live_runtime_status(
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return WorkerRuntimeService().runtime_snapshot(session)
 
 
 @router.get("/live/bar_cache")
@@ -762,7 +589,7 @@ def live_bar_cache_status(
     cached = _cache_get(cache_key, ttl_seconds=8.0)
     if cached is not None:
         return cached
-    return _cache_set(cache_key, _build_bar_cache_status(session, settings, selected_ticker))
+    return _cache_set(cache_key, MarketDataService(settings).get_bar_cache_status(session, selected_ticker))
 
 
 @router.post("/live/cycle")
@@ -770,14 +597,22 @@ def trigger_live_cycle(
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
-    """Manually trigger one live-trading cycle (ignores market hours gate)."""
-    from app.services.live_trading import LiveTradingService
-    svc = LiveTradingService(settings)
-    result = svc.run_cycle(session)
+    """Queue one live-trading cycle for the worker."""
+    command = WorkerRuntimeService().queue_command(
+        session,
+        COMMAND_RUN_LIVE_CYCLE,
+        payload={"trigger": "manual"},
+        requested_by="api",
+    )
     session.commit()
     _cache_invalidate("live:")
     _cache_invalidate("ui:")
-    return result
+    return {
+        "queued": True,
+        "command_id": command.id,
+        "command_type": command.command_type,
+        "message": "Live cycle queued for worker",
+    }
 
 
 @router.get("/live/trades")
@@ -1008,9 +843,7 @@ def get_live_bars(
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
-    """Return recent bars for UI charting from cache/broker/auto."""
-    from app.broker.alpaca import AlpacaBroker
-
+    """Return recent bars for UI charting via MarketDataService."""
     normalized_ticker = ticker.upper()
     requested_source = source.lower().strip()
     cache_key = f"live:bars:{normalized_ticker}:{timeframe}:{requested_source}:{limit}"
@@ -1018,65 +851,16 @@ def get_live_bars(
     if cached is not None:
         return cached
 
-    cached_payload = _load_cached_bars(session, normalized_ticker, timeframe, limit)
-    cache_is_fresh = (
-        cached_payload["cache_age_minutes"] is not None
-        and float(cached_payload["cache_age_minutes"]) <= 360.0
-    )
-    if requested_source == "cache":
-        return _cache_set(
-            cache_key,
-            {
-                **cached_payload,
-                "source_requested": requested_source,
-                "resolved_source": "cache",
-            },
-        )
-    if requested_source == "auto" and cached_payload["count"] and cache_is_fresh:
-        return _cache_set(
-            cache_key,
-            {
-                **cached_payload,
-                "source_requested": requested_source,
-                "resolved_source": "cache",
-            },
-        )
-
-    broker = AlpacaBroker(settings)
     try:
-        bars = broker.get_bars(normalized_ticker, timeframe=timeframe, limit=limit)
-        payload = {
-            "ticker": normalized_ticker,
-            "timeframe": timeframe,
-            "count": len(bars),
-            "source_requested": requested_source,
-            "resolved_source": "broker",
-            "cache_last_ts": cached_payload.get("cache_last_ts"),
-            "cache_age_minutes": cached_payload.get("cache_age_minutes"),
-            "bars": [
-                {
-                    "t": bar.get("t"),
-                    "o": float(bar.get("o", 0.0)),
-                    "h": float(bar.get("h", 0.0)),
-                    "l": float(bar.get("l", 0.0)),
-                    "c": float(bar.get("c", 0.0)),
-                    "v": float(bar.get("v", 0.0)),
-                }
-                for bar in bars
-            ],
-        }
+        payload = MarketDataService(settings).get_chart_bars(
+            session,
+            normalized_ticker,
+            timeframe=timeframe,
+            source=requested_source,
+            limit=limit,
+        )
         return _cache_set(cache_key, payload)
     except Exception as exc:
-        if requested_source == "auto" and cached_payload["count"]:
-            return _cache_set(
-                cache_key,
-                {
-                    **cached_payload,
-                    "source_requested": requested_source,
-                    "resolved_source": "cache_fallback",
-                    "broker_error": str(exc),
-                },
-            )
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
 
 
@@ -1263,7 +1047,7 @@ def live_snapshot(
         payload["errors"]["bar_cache"] = str(exc)
 
     try:
-        payload["runtime"] = live_runtime_status()
+        payload["runtime"] = live_runtime_status(session=session)
     except Exception as exc:
         payload["errors"]["runtime"] = str(exc)
 
@@ -1274,81 +1058,61 @@ def live_snapshot(
 @router.put("/live/set_enabled")
 def set_live_enabled(
     body: dict = Body(default={}),
+    session: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
-    """Toggle live trading on/off at runtime (resets on server restart).
-    Set LIVE_TRADING_ENABLED=true in .env for persistence.
-    """
-    import app.main as _main_module
-
-    was_enabled = bool(settings.live_trading_enabled)
+    """Toggle live trading through shared DB runtime control."""
+    control = RuntimeControlService()
+    runtime = WorkerRuntimeService()
+    was_enabled = control.get_live_enabled(session, settings)
     enabled = bool(body.get("enabled", True))
     has_tickers = bool(settings.live_trading_tickers or list(settings.agent_tickers_override or []))
-    settings.live_trading_enabled = enabled
-    patch_live_runtime("live_cycle", status="idle" if not enabled else "waiting", stage="enabled" if enabled else "disabled")
-    push_live_event("control", f"Live trading {'enabled' if enabled else 'disabled'} from WebUI", enabled=enabled)
+    control.set_live_enabled(session, settings, enabled, source="api")
+    if enabled and not was_enabled:
+        runtime.queue_command(
+            session,
+            COMMAND_RUN_INGESTION,
+            payload={"trigger": "enable_live"},
+            requested_by="api",
+        )
+        tickers = [t.upper() for t in (settings.live_trading_tickers or list(settings.agent_tickers_override or [])) if t]
+        today = utc_now().strftime("%Y-%m-%d")
+        tomorrow = (utc_now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        runtime.queue_command(
+            session,
+            COMMAND_REFRESH_BARS,
+            payload={
+                "start_date": today,
+                "end_date": tomorrow,
+                "tickers": tickers,
+                "chunk_days": 1,
+                "sleep_seconds": 0.1,
+                "trigger": "enable_live",
+            },
+            requested_by="api",
+        )
+        runtime.queue_command(
+            session,
+            COMMAND_RUN_LIVE_CYCLE,
+            payload={"trigger": "enable_live"},
+            requested_by="api",
+        )
+    session.commit()
     _cache_invalidate("live:")
     _cache_invalidate("ui:")
-
-    sched = getattr(_main_module, "scheduler", None)
-    if sched and sched.running:
-        from app.main import _scheduled_live_trading, _scheduled_bar_refresh  # type: ignore[attr-defined]
-        if enabled:
-            # Add jobs if not already present
-            job_ids = {j.id for j in sched.get_jobs()}
-            if "live_cycle" not in job_ids:
-                sched.add_job(
-                    _scheduled_live_trading,
-                    "interval",
-                    seconds=max(60, settings.live_cycle_interval_seconds),
-                    max_instances=1,
-                    id="live_cycle",
-                )
-            if "bar_refresh" not in job_ids:
-                sched.add_job(
-                    _scheduled_bar_refresh,
-                    "interval",
-                    minutes=20,
-                    max_instances=1,
-                    id="bar_refresh",
-                )
-        else:
-            for jid in ("live_cycle", "bar_refresh"):
-                try:
-                    sched.remove_job(jid)
-                except Exception:
-                    pass
-
-    if enabled and not was_enabled:
-        try:
-            import threading
-            from app.main import _scheduled_live_trading, _startup_backfill_bars  # type: ignore[attr-defined]
-
-            threading.Thread(
-                target=_startup_backfill_bars,
-                daemon=True,
-                name="live-enable-bar-backfill",
-            ).start()
-            threading.Thread(
-                target=_scheduled_live_trading,
-                daemon=True,
-                name="live-enable-immediate-cycle",
-            ).start()
-        except Exception:
-            pass
 
     return {
         "enabled": enabled,
         "message": (
-            f"Live trading {'enabled' if enabled else 'disabled'} for this session. "
+            f"Live trading {'enabled' if enabled else 'disabled'} in shared runtime control. "
             + (
-                "Started background bar backfill and an immediate live cycle. "
+                "Queued bar backfill and an immediate live cycle for worker. "
                 if enabled and not was_enabled else ""
             )
             + (
                 "No live tickers are configured yet. "
                 if enabled and not has_tickers else ""
             )
-            + f"To persist, set LIVE_TRADING_ENABLED={'true' if enabled else 'false'} in .env"
+            + "Worker must be running to execute queued jobs."
         ),
     }

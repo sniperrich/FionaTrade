@@ -234,6 +234,85 @@ Index("ix_events_event_time_confidence", Event.event_time, Event.confidence)
 Index("ix_source_status_source_name_status", SourceStatus.source_name, SourceStatus.status)
 
 
+class RuntimeControl(Base):
+    __tablename__ = "runtime_controls"
+    __table_args__ = (
+        UniqueConstraint("control_key", name="uq_runtime_control_key"),
+        Index("ix_runtime_controls_key_updated", "control_key", "updated_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    control_key: Mapped[str] = mapped_column(String(128), index=True)
+    value_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, index=True)
+
+
+class WorkerCommand(Base):
+    __tablename__ = "worker_commands"
+    __table_args__ = (
+        Index("ix_worker_commands_status_created", "status", "created_at"),
+        Index("ix_worker_commands_type_status", "command_type", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    command_type: Mapped[str] = mapped_column(String(64), index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="PENDING", index=True)
+    requested_by: Mapped[str] = mapped_column(String(64), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WorkerRun(Base):
+    __tablename__ = "worker_runs"
+    __table_args__ = (
+        UniqueConstraint("run_key", name="uq_worker_runs_run_key"),
+        Index("ix_worker_runs_type_started", "run_type", "started_at"),
+        Index("ix_worker_runs_status_updated", "status", "updated_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_key: Mapped[str] = mapped_column(String(64), index=True)
+    run_type: Mapped[str] = mapped_column(String(64), index=True)
+    trigger: Mapped[str] = mapped_column(String(32), default="scheduled", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="QUEUED", index=True)
+    stage: Mapped[str] = mapped_column(String(64), default="queued", index=True)
+    current_ticker: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    current_agent: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    market_session: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    total_tickers: Mapped[int] = mapped_column(Integer, default=0)
+    completed_tickers: Mapped[int] = mapped_column(Integer, default=0)
+    summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class WorkerRunEvent(Base):
+    __tablename__ = "worker_run_events"
+    __table_args__ = (
+        Index("ix_worker_run_events_run_created", "run_id", "created_at"),
+        Index("ix_worker_run_events_type_created", "run_type", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("worker_runs.id"), nullable=True, index=True)
+    run_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    run_type: Mapped[str] = mapped_column(String(64), index=True)
+    level: Mapped[str] = mapped_column(String(16), default="info", index=True)
+    stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ticker: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    agent: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    message: Mapped[str] = mapped_column(Text)
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
 # ── New tables for V2 multi-agent system ─────────────────────────────────────
 
 
@@ -443,5 +522,4 @@ class LiveTrade(Base):
     error: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-
 

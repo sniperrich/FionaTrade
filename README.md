@@ -15,8 +15,11 @@ pip install -e .[dev]
 cp .env.example .env
 nano .env   # 填写 FINNHUB_API_KEY / LLM_API_KEY / ALPACA_API_KEY
 
-# 启动（端口 6888）
+# Web（只负责 API + UI）
 uvicorn app.main:app --host 0.0.0.0 --port 6888 --reload
+
+# Worker（负责 scheduler / ingestion / live cycle / backfill）
+python -m app.worker.main
 
 # 访问 WebUI
 open http://localhost:6888
@@ -25,6 +28,21 @@ open http://localhost:6888
 ---
 
 ## 架构
+
+### 三层拆分（当前默认）
+
+```text
+web    -> FastAPI + Jinja UI + command/control API
+worker -> APScheduler + ingestion + live cycle + backfill + command pump
+db     -> SQLite，统一保存状态、结果、行情缓存、运行态
+```
+
+关键点：
+- `app.main` 已经变成纯 Web 入口，不再持有 scheduler
+- `app.worker.main` 持有所有后台任务
+- `Enable Live` 写入 `runtime_controls`，不再只改当前进程内存
+- live runtime 读取 `worker_runs / worker_run_events`，不再依赖进程内 runtime store
+- `MarketDataService` 统一 chart/cache/freshness/fallback/backfill
 
 ### Agent 模式（默认，`AGENT_MODE_ENABLED=true`）
 
@@ -79,6 +97,7 @@ IngestionService → NormalizationService → ValidationService
 app/
   core/          配置（config.py）、日志、market_hours、SP100 ticker 集合
   db/            SQLAlchemy 模型（models.py）+ db_session() 上下文管理器
+  worker/        Worker 入口：scheduler / command pump / live cycle / backfill
   ingestion/     数据源：finnhub_client / rss_client / sec_client / fred_client / earnings_release_client
   normalization/ RawItem → Event（聚类 + ticker 提取 + taxonomy）
   validation/    事件去重 + 冲突检测
@@ -86,7 +105,7 @@ app/
   agents/        6 个 Agent 类（继承 BaseAgent）
   agent_graph/   graph.py（AgentGraph）+ state.py（TypedDict 状态）
   broker/        alpaca.py（完整 Alpaca REST v2，777 行）+ paper.py
-  services/      live_trading.py（实盘循环）+ orchestrator.py（模式切换）
+  services/      live_trading.py + market_data.py + worker_runtime.py + runtime_control.py + orchestrator.py
   analysis/      [已弃用] legacy 分析服务，仅供回测兼容
   signal_engine/ 遗留信号引擎
   paper_engine/  模拟填单 + 持仓跟踪 + NAV
@@ -113,8 +132,9 @@ tests/           137 个 pytest 测试
 | GET | `/api/agent/runs` | **包装对象**：`{"runs": [...]}` — 每项用 `*_result` 字段名 |
 | GET | `/api/news` | **分页对象**：`{"items": [...], "mode", "latest_id", ...}` |
 | POST | `/api/agent/run` | 触发 Agent 图：`{"tickers": ["AAPL", "NVDA"]}` |
-| POST | `/api/live/set_enabled` | 运行时启用/禁用交易：`{"enabled": true}` |
-| POST | `/api/live/cycle` | 手动触发一次交易循环 |
+| POST | `/api/ingest/run` | 给 worker 排队一次 ingestion |
+| POST | `/api/live/set_enabled` | 写入共享 runtime control，并给 worker 排队 live backfill/cycle |
+| POST | `/api/live/cycle` | 给 worker 排队一次 live cycle |
 | POST | `/api/live/order` | 手动下单 |
 | GET | `/api/live/positions` | Alpaca 当前持仓 |
 | GET | `/api/live/open_orders` | Alpaca 挂单 |
@@ -137,11 +157,12 @@ tests/           137 个 pytest 测试
 > - Dashboard/Live 首屏改成 `snapshot + sessionStorage`，重新打开页面会先用上次结果秒开，再后台刷新
 > - `/api/agent/runs` 现支持 `ticker/action/limit/offset`
 > - `/api/live/trades` 现支持 `ticker/limit/offset`
-> - Live 页的 runtime 状态来自进程内状态仓库，不需要盯控制台日志
+> - Live 页的 runtime 状态现在来自数据库 `worker_runs / worker_run_events`
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
 > - 若当前是周末/美股闭市，live cycle 会显示 `analysis mode`，这是预期行为，不是失败
 > - 若 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 都为空，live cycle 会明确显示 `no live tickers configured`
 > - 模板页面脚本必须放在 `base.html` 的 `{% block scripts %}` 中，不能直接内联在 `content` 里，否则会先于全局工具函数执行
+> - `Enable Live` 现在是 DB 共享开关，worker 不运行时只会看到 queued command，不会真的执行
 
 ---
 
@@ -178,14 +199,14 @@ AgentRun.execution_ms     # int → API 返回 execution_time_ms
 curl -X POST http://localhost:6888/api/live/set_enabled \
   -H 'Content-Type: application/json' -d '{"enabled": true}'
 
-# 永久 —— 在 .env 设置：
+# 当前默认 `.env`：
 LIVE_TRADING_ENABLED=true
-LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,GOOGL,AMZN
+LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 ```
 或直接点击 `/live` 页面右上角的 **▶ Enable Live** 按钮。
 
-> Enable Live 现在会立即启动后台 `Bar1m` 补数线程，不再等下一轮调度或下一次真实交易循环才补 K 线。
-> Enable Live 现在还会立刻触发一轮 live cycle；即使盘后也会先跑 `analysis`，前端可直接看到 agent/runtime 进度。
+> Enable Live 现在不会再让 Web 进程直接起后台线程。
+> 它会写入共享 `runtime_controls`，再给 worker 排队 `refresh_bars + live_cycle`。
 
 ### 下单逻辑
 - Alpaca bracket 订单（止损 + 止盈原子提交）

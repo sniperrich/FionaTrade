@@ -8,9 +8,11 @@ import ta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Bar1m
+from app.core.config import get_settings
+from app.services.market_data import MarketDataService
 
 _NY = ZoneInfo("America/New_York")
+_MARKET_DATA_SERVICE = MarketDataService(get_settings())
 
 
 def get_bars(
@@ -32,30 +34,13 @@ def get_bars(
     # Use calendar days (not minutes) to ensure we bridge weekends/holidays
     # Fetch extra bars to compensate for RTH filtering (~62% of bars are RTH)
     fetch_bars = int(lookback_bars * 1.8) if regular_hours_only else lookback_bars
-    est_trading_days = max(1, fetch_bars // 390)
-    buffer_days = max(3, est_trading_days * 2 + 2)
-    start = end - timedelta(days=buffer_days)
-
-    rows = session.execute(
-        select(Bar1m)
-        .where(
-            Bar1m.ticker == ticker.upper(),
-            Bar1m.ts >= start,
-            Bar1m.ts <= end,
-        )
-        .order_by(Bar1m.ts.asc())
-        .limit(fetch_bars + 200)
-    ).scalars().all()
-
-    # Fallback: if no bars in recent window, fetch the most recent N bars available.
-    if not rows and end_time is None:
-        rows = session.execute(
-            select(Bar1m)
-            .where(Bar1m.ticker == ticker.upper())
-            .order_by(Bar1m.ts.desc())
-            .limit(fetch_bars + 200)
-        ).scalars().all()
-        rows = list(reversed(rows))
+    rows = _MARKET_DATA_SERVICE.load_analysis_rows(
+        session,
+        ticker=ticker,
+        lookback_bars=fetch_bars,
+        end_time=end,
+        regular_hours_only=regular_hours_only,
+    )
 
     if not rows:
         return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
@@ -71,14 +56,6 @@ def get_bars(
         }
         for r in rows
     ]
-
-    if regular_hours_only:
-        # Filter to 9:30-16:00 ET (regular trading hours)
-        data = [
-            d for d in data
-            if _is_regular_hours(d["ts"])
-        ]
-
     df = pd.DataFrame(data) if data else pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
     df = df.tail(lookback_bars).reset_index(drop=True)
     return df

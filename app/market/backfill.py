@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import logging
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta, timezone
 from io import StringIO
@@ -15,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 from app.core.config import Settings
 from app.core.logging import log_bar_refresh
-from app.core.runtime_state import patch_live_runtime, push_live_event
 from app.core.utils import ensure_utc
 from app.db.models import Bar1m, Event
 
@@ -286,6 +286,7 @@ class MarketBackfillService:
         chunk_days: int = 5,
         sleep_seconds: float = 0.12,
         runtime_mode: str | None = None,
+        progress_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> MarketBackfillResult:
         if not self.settings.finnhub_api_key and not self.settings.market_backfill_allow_stooq_fallback:
             raise ValueError("FINNHUB_API_KEY is not configured")
@@ -297,26 +298,17 @@ class MarketBackfillService:
 
         universe = self._build_ticker_universe(session, start_dt, end_dt, tickers)
 
-        if runtime_mode:
-            patch_live_runtime(
-                "bar_backfill",
-                status="running",
-                mode=runtime_mode,
-                stage="fetching",
-                current_ticker=None,
-                started_at=datetime.now(timezone.utc).isoformat(),
-                completed_tickers=0,
-                total_tickers=len(universe),
-                result=None,
-                error=None,
-            )
-            push_live_event(
-                "bar_backfill",
-                f"Started {runtime_mode} bar refresh for {len(universe)} tickers",
-                mode=runtime_mode,
-                total_tickers=len(universe),
-                start_date=start_dt.isoformat(),
-                end_date=end_dt.isoformat(),
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "fetching",
+                    "current_ticker": None,
+                    "completed_tickers": 0,
+                    "total_tickers": len(universe),
+                    "message": f"Started {(runtime_mode or 'bar')} refresh for {len(universe)} tickers",
+                    "start_date": start_dt.isoformat(),
+                    "end_date": end_dt.isoformat(),
+                }
             )
 
         inserted = 0
@@ -330,13 +322,14 @@ class MarketBackfillService:
         errors: list[str] = []
 
         for idx, ticker in enumerate(universe, start=1):
-            if runtime_mode:
-                patch_live_runtime(
-                    "bar_backfill",
-                    stage="fetching",
-                    current_ticker=ticker,
-                    completed_tickers=idx - 1,
-                    total_tickers=len(universe),
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "fetching",
+                        "current_ticker": ticker,
+                        "completed_tickers": idx - 1,
+                        "total_tickers": len(universe),
+                    }
                 )
             existing_ts = set(
                 session.execute(
@@ -473,12 +466,14 @@ class MarketBackfillService:
                                 stooq_bars_inserted += 1
 
             session.flush()
-            if runtime_mode:
-                patch_live_runtime(
-                    "bar_backfill",
-                    current_ticker=ticker,
-                    completed_tickers=idx,
-                    total_tickers=len(universe),
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "fetching",
+                        "current_ticker": ticker,
+                        "completed_tickers": idx,
+                        "total_tickers": len(universe),
+                    }
                 )
 
         result = MarketBackfillResult(
@@ -498,24 +493,15 @@ class MarketBackfillService:
             errors=errors,
         )
         log_bar_refresh("market_backfill", result.to_dict())
-        if runtime_mode:
-            patch_live_runtime(
-                "bar_backfill",
-                status="completed",
-                stage="completed",
-                current_ticker=None,
-                completed_tickers=len(universe),
-                total_tickers=len(universe),
-                result=result.to_dict(),
-                error=None,
-            )
-            push_live_event(
-                "bar_backfill",
-                f"Completed {runtime_mode} bar refresh: +{result.bars_inserted} bars",
-                mode=runtime_mode,
-                bars_inserted=result.bars_inserted,
-                alpaca_bars_inserted=result.alpaca_bars_inserted,
-                requests_ok=result.requests_ok,
-                requests_failed=result.requests_failed,
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "completed",
+                    "current_ticker": None,
+                    "completed_tickers": len(universe),
+                    "total_tickers": len(universe),
+                    "message": f"Completed {(runtime_mode or 'bar')} refresh: +{result.bars_inserted} bars",
+                    "result": result.to_dict(),
+                }
             )
         return result
