@@ -62,7 +62,7 @@ IngestionService → NormalizationService → ValidationService
 | 路径 | 功能 |
 |------|------|
 | `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot** |
-| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + portfolio curve + ticker K-line + 成交历史翻页** |
+| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + local bar cache + ticker K-line + 成交历史翻页** |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**30s 自动拉新 + 源状态/报错 + 历史翻页** |
 | `/settings` | 配置信息 |
@@ -119,9 +119,11 @@ tests/           137 个 pytest 测试
 | GET | `/api/live/positions` | Alpaca 当前持仓 |
 | GET | `/api/live/open_orders` | Alpaca 挂单 |
 | GET | `/api/live/portfolio_history` | Alpaca 权益曲线 |
-| GET | `/api/live/bars` | Alpaca K 线（供 `/live` SVG chart 使用） |
+| GET | `/api/live/bars` | K 线图接口（`source=auto/cache/broker`，默认 auto） |
+| GET | `/api/live/runtime` | 当前 live runtime 状态：cycle stage / current ticker / current agent / recent events |
+| GET | `/api/live/bar_cache` | 本地 `bars_1m` 缓存状态：最新时间 / stale 情况 / source 分布 |
 | GET | `/api/ui/dashboard_snapshot` | Dashboard 聚合快照（health/live/positions/news/runs/chart） |
-| GET | `/api/ui/live_snapshot` | Live Trading 聚合快照（market/positions/orders/trades/chart） |
+| GET | `/api/ui/live_snapshot` | Live Trading 聚合快照（market/positions/orders/trades/runtime/bar_cache/chart） |
 
 > ⚠️ **JS 开发注意：**
 > - `market_session` 是字符串，不是对象
@@ -135,6 +137,8 @@ tests/           137 个 pytest 测试
 > - Dashboard/Live 首屏改成 `snapshot + sessionStorage`，重新打开页面会先用上次结果秒开，再后台刷新
 > - `/api/agent/runs` 现支持 `ticker/action/limit/offset`
 > - `/api/live/trades` 现支持 `ticker/limit/offset`
+> - Live 页的 runtime 状态来自进程内状态仓库，不需要盯控制台日志
+> - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
 > - 模板页面脚本必须放在 `base.html` 的 `{% block scripts %}` 中，不能直接内联在 `content` 里，否则会先于全局工具函数执行
 
 ---
@@ -179,6 +183,7 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,GOOGL,AMZN
 或直接点击 `/live` 页面右上角的 **▶ Enable Live** 按钮。
 
 > Enable Live 现在会立即启动后台 `Bar1m` 补数线程，不再等下一轮调度或下一次真实交易循环才补 K 线。
+> Enable Live 现在还会立刻触发一轮 live cycle；即使盘后也会先跑 `analysis`，前端可直接看到 agent/runtime 进度。
 
 ### 下单逻辑
 - Alpaca bracket 订单（止损 + 止盈原子提交）

@@ -30,6 +30,7 @@ from app.broker.alpaca import AlpacaBroker
 from app.core.config import Settings
 from app.core.logging import get_app_logger, log_live_cycle
 from app.core.market_hours import market_session_info
+from app.core.runtime_state import patch_live_runtime, push_live_event
 from app.db.models import AgentRun, Bar1m, LiveTrade
 from app.services.orchestrator import PipelineOrchestrator
 from app.tools.news import count_new_raw_items
@@ -57,6 +58,28 @@ class LiveTradingService:
         """
         cycle_id = str(uuid.uuid4())[:8]
         msi = market_session_info()
+        tickers = self._get_tickers()
+
+        patch_live_runtime(
+            "live_cycle",
+            status="running",
+            cycle_id=cycle_id,
+            stage="starting",
+            current_ticker=None,
+            current_agent=None,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            completed_tickers=0,
+            total_tickers=len(tickers),
+            last_result=None,
+            error=None,
+        )
+        push_live_event(
+            "live_cycle",
+            f"Cycle {cycle_id} started",
+            cycle_id=cycle_id,
+            market_session=msi["label"],
+            total_tickers=len(tickers),
+        )
 
         logger.info("[live] Cycle %s started — %s", cycle_id, msi["context_string"])
 
@@ -68,31 +91,48 @@ class LiveTradingService:
         dry_run = not tradeable   # analysis-only mode when market is closed
 
         if dry_run:
+            patch_live_runtime("live_cycle", stage="analysis_only", current_agent=None)
+            push_live_event(
+                "live_cycle",
+                f"Cycle {cycle_id} running in analysis mode ({msi['label']})",
+                cycle_id=cycle_id,
+                market_session=msi["label"],
+            )
             logger.info(
                 "[live] Cycle %s market is %s — running in ANALYSIS mode (no orders)",
                 cycle_id, msi["label"],
             )
 
         # ── 1. Bar data refresh ──────────────────────────────────────────────
-        tickers = self._get_tickers()
         if not tickers:
+            patch_live_runtime(
+                "live_cycle",
+                status="error",
+                cycle_id=cycle_id,
+                stage="no_tickers",
+                error="No tickers configured for live trading",
+            )
             return {"cycle_id": cycle_id, "error": "No tickers configured for live trading"}
 
         if not dry_run:
             # Only refresh bars during market hours — saves Finnhub quota on weekends
             try:
+                patch_live_runtime("live_cycle", stage="bar_refresh", current_agent=None)
                 self._refresh_bars(session, tickers)
             except Exception as exc:
+                push_live_event("live_cycle", f"Cycle {cycle_id} bar refresh failed: {exc}", level="warn", cycle_id=cycle_id)
                 logger.warning("[live] Bar refresh failed (continuing): %s", exc)
 
         # ── 2. Fresh news ingestion ──────────────────────────────────────────
         cycle_start = datetime.now(timezone.utc)
         new_article_count = 0
         try:
+            patch_live_runtime("live_cycle", stage="ingestion", current_agent=None)
             orchestrator = PipelineOrchestrator(self.settings)
             orchestrator.run_ingestion_validation(session)
             new_article_count = count_new_raw_items(session, cycle_start)
         except Exception as exc:
+            push_live_event("live_cycle", f"Cycle {cycle_id} ingestion failed: {exc}", level="warn", cycle_id=cycle_id)
             logger.warning("[live] Ingestion failed (continuing): %s", exc)
 
         # ── Freshness gate — skip agent if no new articles AND recent run exists ──
@@ -104,6 +144,25 @@ class LiveTradingService:
                 if last_global_run else 999
             )
             if new_article_count == 0 and time_since_last < 30:
+                patch_live_runtime(
+                    "live_cycle",
+                    status="completed",
+                    cycle_id=cycle_id,
+                    stage="skipped_no_news",
+                    current_ticker=None,
+                    current_agent=None,
+                    last_result={
+                        "skipped": True,
+                        "reason": "no_new_articles",
+                        "new_articles": 0,
+                    },
+                )
+                push_live_event(
+                    "live_cycle",
+                    f"Cycle {cycle_id} skipped: no new articles",
+                    cycle_id=cycle_id,
+                    reason="no_new_articles",
+                )
                 logger.info(
                     "[live] Cycle %s: no new articles (last run %.0f min ago) — skipping agents",
                     cycle_id, time_since_last,
@@ -120,24 +179,62 @@ class LiveTradingService:
         broker = AlpacaBroker(self.settings)
         portfolio_value = 100_000.0  # fallback if broker unavailable
         try:
+            patch_live_runtime("live_cycle", stage="broker_state", current_agent=None)
             portfolio_value = broker.get_portfolio_value()
         except Exception as exc:
             if not dry_run:
+                patch_live_runtime(
+                    "live_cycle",
+                    status="error",
+                    cycle_id=cycle_id,
+                    stage="broker_error",
+                    error=f"Broker error: {exc}",
+                )
                 logger.error("[live] Cannot fetch portfolio value: %s", exc)
                 return {"cycle_id": cycle_id, "error": f"Broker error: {exc}"}
             logger.warning("[live] Broker unavailable in analysis mode: %s", exc)
 
         # ── 4. Per-ticker agent decision + order ────────────────────────────
         results = []
-        for ticker in tickers:
+        for idx, ticker in enumerate(tickers, start=1):
             try:
+                patch_live_runtime(
+                    "live_cycle",
+                    stage="processing_ticker",
+                    current_ticker=ticker,
+                    current_agent="agent_graph",
+                    completed_tickers=idx - 1,
+                    total_tickers=len(tickers),
+                )
                 result = self._process_ticker(
                     session, broker, ticker, portfolio_value, cycle_id, msi, dry_run=dry_run,
                 )
                 results.append(result)
+                push_live_event(
+                    "live_ticker",
+                    f"{ticker} -> {result.get('action', 'HOLD')}",
+                    cycle_id=cycle_id,
+                    ticker=ticker,
+                    status="ok" if not result.get("error") else "error",
+                    action=result.get("action"),
+                    order_placed=bool(result.get("order_placed")),
+                )
             except Exception as exc:
                 logger.exception("[live] Error processing %s: %s", ticker, exc)
                 results.append({"ticker": ticker, "error": str(exc)})
+                push_live_event(
+                    "live_ticker",
+                    f"{ticker} processing failed: {exc}",
+                    level="error",
+                    cycle_id=cycle_id,
+                    ticker=ticker,
+                )
+            finally:
+                patch_live_runtime(
+                    "live_cycle",
+                    completed_tickers=idx,
+                    total_tickers=len(tickers),
+                )
 
         summary = {
             "cycle_id": cycle_id,
@@ -154,6 +251,25 @@ class LiveTradingService:
             "[live] Cycle %s done — %d/%d orders placed%s",
             cycle_id, summary["orders_placed"], len(tickers),
             " (ANALYSIS MODE)" if dry_run else "",
+        )
+        patch_live_runtime(
+            "live_cycle",
+            status="completed",
+            cycle_id=cycle_id,
+            stage="completed",
+            current_ticker=None,
+            current_agent=None,
+            completed_tickers=len(tickers),
+            total_tickers=len(tickers),
+            last_result=summary,
+            error=None,
+        )
+        push_live_event(
+            "live_cycle",
+            f"Cycle {cycle_id} completed: {summary['orders_placed']} orders",
+            cycle_id=cycle_id,
+            orders_placed=summary["orders_placed"],
+            dry_run=dry_run,
         )
         try:
             log_live_cycle(cycle_id, summary)
@@ -274,17 +390,35 @@ class LiveTradingService:
         # ── Agent decision ───────────────────────────────────────────────────
         graph = self._get_agent_graph()
 
+        def progress_callback(update: dict[str, Any]) -> None:
+            patch_live_runtime(
+                "live_cycle",
+                stage=update.get("stage", "agent_graph"),
+                current_ticker=ticker,
+                current_agent=update.get("agent"),
+            )
+            if update.get("message"):
+                push_live_event(
+                    "agent_progress",
+                    str(update["message"]),
+                    cycle_id=cycle_id,
+                    ticker=ticker,
+                    agent=update.get("agent"),
+                    stage=update.get("stage"),
+                )
+
         last_run_at = self._get_last_agent_run_time(session, ticker=ticker)
         graph_context: dict[str, Any] = {"last_agent_run_at": last_run_at} if last_run_at else {}
         if dry_run:
             graph_context["dry_run"] = True
             graph_context["market_session"] = msi["label"]
 
-        state = graph.run(session, ticker, context=graph_context)
+        state = graph.run(session, ticker, context=graph_context, progress_callback=progress_callback)
 
         desired_action = (state.get("final_action") or "HOLD").upper()
         target_pct = float(state.get("final_position_pct") or 0.0)
         reasoning = (state.get("final_reasoning") or "")[:500]
+        patch_live_runtime("live_cycle", stage="decision_ready", current_ticker=ticker, current_agent="portfolio_manager")
 
         # Clamp to configured maximum
         target_pct = min(target_pct, self.settings.live_max_position_pct)
@@ -317,6 +451,7 @@ class LiveTradingService:
             return {"ticker": ticker, "action": "HOLD", "order_placed": False}
 
         # ── Current price ────────────────────────────────────────────────────
+        patch_live_runtime("live_cycle", stage="pricing", current_ticker=ticker, current_agent=None)
         current_price = broker.get_latest_price(ticker)
         if not current_price or current_price <= 0:
             logger.warning("[live] No price for %s — skipping", ticker)
@@ -339,6 +474,7 @@ class LiveTradingService:
         current_qty = float(current_pos.quantity) if current_pos else 0.0
 
         # ── Compute target quantity & required order ────────────────────────
+        patch_live_runtime("live_cycle", stage="position_sizing", current_ticker=ticker, current_agent=None)
         target_dollars = portfolio_value * target_pct
         target_qty = int(target_dollars / current_price)
         if target_qty < _MIN_SHARES:
@@ -392,6 +528,7 @@ class LiveTradingService:
             stop_price, tp_price, target_pct * 100, portfolio_value,
         )
 
+        patch_live_runtime("live_cycle", stage="placing_order", current_ticker=ticker, current_agent=None)
         result = broker.place_bracket_order(
             ticker=ticker,
             action=order_action,

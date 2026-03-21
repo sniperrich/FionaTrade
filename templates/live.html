@@ -52,6 +52,58 @@
   </div>
 </div>
 
+<div class="grid g2 mb16" style="grid-template-columns:1.35fr 1fr">
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Runtime Activity</div>
+      <span class="text-muted text-sm" id="runtime-updated">Waiting…</span>
+    </div>
+    <div class="grid g4 mb12">
+      <div class="card card-sm">
+        <div class="card-title">Cycle Stage</div>
+        <div class="card-value" id="runtime-cycle-stage">—</div>
+        <div class="card-sub" id="runtime-cycle-progress">—</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Current Ticker</div>
+        <div class="card-value" id="runtime-current-ticker">—</div>
+        <div class="card-sub" id="runtime-current-agent">—</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Bar Backfill</div>
+        <div class="card-value" id="runtime-backfill-stage">—</div>
+        <div class="card-sub" id="runtime-backfill-progress">—</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Last Cycle</div>
+        <div class="card-value" id="runtime-last-cycle">—</div>
+        <div class="card-sub" id="runtime-last-result">—</div>
+      </div>
+    </div>
+    <div id="runtime-feed" class="stack"></div>
+  </div>
+
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Local Bar Cache</div>
+      <span class="text-muted text-sm" id="bar-cache-updated">Waiting…</span>
+    </div>
+    <div class="grid g2 mb12">
+      <div class="card card-sm">
+        <div class="card-title">Selected Ticker</div>
+        <div class="card-value" id="bar-cache-selected">—</div>
+        <div class="card-sub" id="bar-cache-selected-sub">—</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Tracked Universe</div>
+        <div class="card-value" id="bar-cache-universe">—</div>
+        <div class="card-sub" id="bar-cache-universe-sub">—</div>
+      </div>
+    </div>
+    <div id="bar-cache-lines" class="stack"></div>
+  </div>
+</div>
+
 <div class="grid g2 mb16">
   <div class="card">
     <div class="section-header mb8">
@@ -96,6 +148,11 @@
           <option value="5Min" selected>5Min</option>
           <option value="15Min">15Min</option>
           <option value="1H">1H</option>
+        </select>
+        <select id="chart-source" onchange="refreshAll()" style="width:110px">
+          <option value="auto" selected>Auto</option>
+          <option value="cache">Local Cache</option>
+          <option value="broker">Broker</option>
         </select>
       </div>
     </div>
@@ -276,14 +333,16 @@ function sideBadge(s){return s==='long'?'<span class="badge badge-green">LONG</s
 function statusBadge(s){const m={submitted:'badge-blue',filled:'badge-green',error:'badge-red',skipped:'badge-grey',analysis:'badge-purple',no_change:'badge-grey',cancelled:'badge-warn'};return `<span class="badge ${m[s]||'badge-grey'}">${s}</span>`;}
 function actionBadge(a){const m={BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};return `<span class="badge ${m[a]||'badge-grey'}">${a||'—'}</span>`;}
 function safeSlice(v, n=8){return typeof v==='string'?v.slice(0,n):String(v||'').slice(0,n);}
+function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
 function liveSnapshotCacheKey(){
   const tradeTicker=(document.getElementById('hist-ticker-filter')?.value || '').toUpperCase();
   const tradeOffset=(liveTradesPage - 1) * LIVE_TRADES_PER_PAGE;
   const chartTicker=(document.getElementById('chart-ticker')?.value || '').toUpperCase();
+  const chartSource=document.getElementById('chart-source')?.value || 'auto';
   const chartTimeframe=document.getElementById('chart-timeframe')?.value || '5Min';
   const portfolioPeriod=document.getElementById('portfolio-period')?.value || '1M';
   const portfolioTimeframe=document.getElementById('portfolio-timeframe')?.value || '1D';
-  return `${LIVE_CACHE_PREFIX}${tradeTicker}:${tradeOffset}:${chartTicker}:${chartTimeframe}:${portfolioPeriod}:${portfolioTimeframe}`;
+  return `${LIVE_CACHE_PREFIX}${tradeTicker}:${tradeOffset}:${chartTicker}:${chartSource}:${chartTimeframe}:${portfolioPeriod}:${portfolioTimeframe}`;
 }
 function ensureSelectOption(selectEl, value){
   if(!selectEl || !value) return;
@@ -303,6 +362,35 @@ function setChartEmpty(id, message){
   const svg=document.getElementById(id);
   if (svg) svg.innerHTML='';
   if (empty) empty.textContent=message;
+}
+
+function fmtAgo(iso){
+  if(!iso) return '—';
+  const diffSec=Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if(diffSec < 60) return `${diffSec}s ago`;
+  if(diffSec < 3600) return `${Math.round(diffSec/60)}m ago`;
+  if(diffSec < 86400) return `${(diffSec/3600).toFixed(1)}h ago`;
+  return `${(diffSec/86400).toFixed(1)}d ago`;
+}
+
+function runtimeStatusBadge(status){
+  const cls={
+    running:'badge-accent',
+    completed:'badge-green',
+    idle:'badge-grey',
+    error:'badge-red',
+    waiting:'badge-blue',
+    fresh:'badge-green',
+    stale:'badge-warn',
+    very_stale:'badge-red',
+    empty:'badge-grey',
+  }[status] || 'badge-grey';
+  return `<span class="badge ${cls}">${status||'idle'}</span>`;
+}
+
+function runtimeStageLabel(stage){
+  if(!stage) return '—';
+  return String(stage).replaceAll('_',' ');
 }
 
 function renderLineChart(svgId, values, color='var(--accent)'){
@@ -499,6 +587,73 @@ async function loadMarketStatus(data=null){
   } catch(e){}
 }
 
+async function loadRuntimeStatus(data=null){
+  try{
+    const d=data || await apiFetch('/api/live/runtime');
+    const cycle=d.live_cycle||{};
+    const backfill=d.bar_backfill||{};
+    document.getElementById('runtime-updated').textContent='Updated '+fmtAgo(d.updated_at);
+    document.getElementById('runtime-cycle-stage').innerHTML=runtimeStatusBadge(cycle.status)+' '+runtimeStageLabel(cycle.stage);
+    document.getElementById('runtime-cycle-progress').textContent=
+      cycle.total_tickers ? `${cycle.completed_tickers||0}/${cycle.total_tickers} tickers · cycle ${cycle.cycle_id||'—'}` : (cycle.cycle_id || 'No active cycle');
+    document.getElementById('runtime-current-ticker').textContent=cycle.current_ticker||'—';
+    document.getElementById('runtime-current-agent').textContent=cycle.current_agent?`Agent: ${cycle.current_agent}`:'Waiting for agent work';
+    document.getElementById('runtime-backfill-stage').innerHTML=runtimeStatusBadge(backfill.status)+' '+runtimeStageLabel(backfill.stage);
+    document.getElementById('runtime-backfill-progress').textContent=
+      backfill.total_tickers ? `${backfill.completed_tickers||0}/${backfill.total_tickers} tickers${backfill.current_ticker?` · ${backfill.current_ticker}`:''}` : (backfill.mode || 'No backfill active');
+    document.getElementById('runtime-last-cycle').textContent=cycle.last_result?.cycle_id || cycle.cycle_id || '—';
+    document.getElementById('runtime-last-result').textContent=
+      cycle.last_result ? `${cycle.last_result.orders_placed||0} orders · ${cycle.last_result.new_articles||0} new articles` : (cycle.error || 'No completed cycle yet');
+
+    const feed=(d.recent_events||[]).slice(0,8);
+    document.getElementById('runtime-feed').innerHTML = feed.length ? feed.map(ev => {
+      const color = ev.level === 'error' ? 'var(--red)' : (ev.level === 'warn' ? 'var(--amber)' : 'var(--text)');
+      return `<div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+        <div class="flex-center gap8" style="justify-content:space-between;align-items:flex-start">
+          <div style="color:${color};font-weight:600">${escapeHtml(ev.message||ev.kind||'event')}</div>
+          <div class="text-muted text-xs">${fmtAgo(ev.ts)}</div>
+        </div>
+        <div class="text-muted text-xs mt4">${[ev.kind, ev.ticker, ev.agent, ev.stage].filter(Boolean).join(' · ') || 'runtime'}</div>
+      </div>`;
+    }).join('') : '<div class="empty-state text-muted">No runtime events yet</div>';
+  } catch(e){
+    document.getElementById('runtime-feed').innerHTML=`<div class="empty-state text-red">Runtime status unavailable: ${e.message}</div>`;
+  }
+}
+
+async function loadBarCacheStatus(data=null){
+  const ticker=(document.getElementById('chart-ticker').value||'').trim().toUpperCase() || 'AAPL';
+  try{
+    const d=data || await apiFetch(`/api/live/bar_cache?ticker=${encodeURIComponent(ticker)}`);
+    const selected=d.selected||{};
+    document.getElementById('bar-cache-updated').textContent='Updated '+fmtAgo(d.latest_global_ts || new Date().toISOString());
+    document.getElementById('bar-cache-selected').textContent=selected.ticker || ticker;
+    document.getElementById('bar-cache-selected-sub').textContent=
+      selected.last_ts ? `${selected.row_count||0} rows · ${selected.status} · ${selected.age_hours?.toFixed ? selected.age_hours.toFixed(1) : selected.age_hours}h old` : 'No cached bars yet';
+    document.getElementById('bar-cache-universe').textContent=`${d.fresh_count||0}/${d.tracked_count||0}`;
+    document.getElementById('bar-cache-universe-sub').textContent='fresh tracked tickers';
+    const lines = [];
+    const sourceCounts = selected.source_counts || {};
+    const sourceText = Object.entries(sourceCounts).slice(0,4).map(([name, count]) => `${name}: ${count}`).join(' · ');
+    lines.push(`<div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+      <div class="bold">${escapeHtml(selected.ticker || ticker)} cache sources</div>
+      <div class="text-muted text-sm mt4">${escapeHtml(sourceText || 'No cached source rows yet')}</div>
+    </div>`);
+    (d.tickers || []).slice(0,8).forEach(item => {
+      lines.push(`<div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+        <div class="flex-center gap8" style="justify-content:space-between;align-items:flex-start">
+          <div class="bold">${escapeHtml(item.ticker)}</div>
+          <div>${runtimeStatusBadge(item.status)}</div>
+        </div>
+        <div class="text-muted text-sm mt4">${item.row_count||0} rows${item.last_ts ? ` · last ${fmtAgo(item.last_ts)}` : ''}</div>
+      </div>`);
+    });
+    document.getElementById('bar-cache-lines').innerHTML = lines.join('');
+  } catch(e){
+    document.getElementById('bar-cache-lines').innerHTML=`<div class="empty-state text-red">Bar cache unavailable: ${e.message}</div>`;
+  }
+}
+
 async function toggleLiveTrading(){
   const btn=document.getElementById('toggle-live-btn');
   const currentlyEnabled=btn.dataset.enabled==='true';
@@ -509,6 +664,8 @@ async function toggleLiveTrading(){
     clearViewCache(LIVE_CACHE_PREFIX);
     toast(d.message,'success');
     setTimeout(loadMarketStatus,500);
+    setTimeout(refreshAll,1200);
+    setTimeout(refreshAll,6000);
   } catch(e){ toast('Error: '+e.message,'error'); }
   finally{ btn.disabled=false; }
 }
@@ -613,12 +770,13 @@ async function loadPortfolioHistory(data=null){
 async function loadTickerChart(data=null){
   const ticker=(document.getElementById('chart-ticker').value||'').trim().toUpperCase();
   const timeframe=document.getElementById('chart-timeframe').value;
+  const source=document.getElementById('chart-source').value;
   if(!ticker){
     setChartEmpty('ticker-chart','Select a ticker');
     return;
   }
   try{
-    const d=data || await apiFetch(`/api/live/bars?ticker=${encodeURIComponent(ticker)}&timeframe=${encodeURIComponent(timeframe)}&limit=72`, { timeout: 12000 });
+    const d=data || await apiFetch(`/api/live/bars?ticker=${encodeURIComponent(ticker)}&source=${encodeURIComponent(source)}&timeframe=${encodeURIComponent(timeframe)}&limit=72`, { timeout: 12000 });
     const bars=d.bars||[];
     if(!bars.length){
       setChartEmpty('ticker-chart',`No recent bars for ${ticker}`);
@@ -629,7 +787,7 @@ async function loadTickerChart(data=null){
     const first=bars[0].o, last=bars[bars.length-1].c;
     const changePct=first?((last-first)/first*100):0;
     document.getElementById('ticker-chart-meta').innerHTML=
-      `${ticker} · ${timeframe} · ${bars.length} bars · <span style="color:${changePct>=0?'var(--green)':'var(--red)'}">${changePct>=0?'+':''}${changePct.toFixed(2)}%</span> · Last ${fmt$(last)}`;
+      `${ticker} · ${timeframe} · ${bars.length} bars · source ${escapeHtml(d.resolved_source||source)} · <span style="color:${changePct>=0?'var(--green)':'var(--red)'}">${changePct>=0?'+':''}${changePct.toFixed(2)}%</span> · Last ${fmt$(last)}${d.cache_age_minutes!=null ? ` · cache ${d.cache_age_minutes}m old` : ''}`;
   } catch(e){
     setChartEmpty('ticker-chart',`K-line unavailable: ${e.message}`);
     document.getElementById('ticker-chart-meta').textContent='Broker bars unavailable';
@@ -674,19 +832,22 @@ function hydrateLiveSnapshot(snapshot){
   if(snapshot.market) loadMarketStatus(snapshot.market);
   if(snapshot.portfolio_history) loadPortfolioHistory(snapshot.portfolio_history);
   if(snapshot.bars) loadTickerChart(snapshot.bars);
+  if(snapshot.runtime) loadRuntimeStatus(snapshot.runtime);
+  if(snapshot.bar_cache) loadBarCacheStatus(snapshot.bar_cache);
 }
 
 async function refreshAll(){
   const tradeTicker=(document.getElementById('hist-ticker-filter').value||'').trim().toUpperCase();
   const tradeOffset=(liveTradesPage - 1) * LIVE_TRADES_PER_PAGE;
   const chartTicker=(document.getElementById('chart-ticker').value||'').trim().toUpperCase();
+  const chartSource=document.getElementById('chart-source').value;
   const chartTimeframe=document.getElementById('chart-timeframe').value;
   const portfolioPeriod=document.getElementById('portfolio-period').value;
   const portfolioTimeframe=document.getElementById('portfolio-timeframe').value;
   const cacheKey=liveSnapshotCacheKey();
   try{
     const snapshot=await apiFetch(
-      `/api/ui/live_snapshot?trade_ticker=${encodeURIComponent(tradeTicker)}&trade_offset=${encodeURIComponent(tradeOffset)}&trade_limit=${encodeURIComponent(LIVE_TRADES_PER_PAGE + 1)}&chart_ticker=${encodeURIComponent(chartTicker)}&chart_timeframe=${encodeURIComponent(chartTimeframe)}&portfolio_period=${encodeURIComponent(portfolioPeriod)}&portfolio_timeframe=${encodeURIComponent(portfolioTimeframe)}`,
+      `/api/ui/live_snapshot?trade_ticker=${encodeURIComponent(tradeTicker)}&trade_offset=${encodeURIComponent(tradeOffset)}&trade_limit=${encodeURIComponent(LIVE_TRADES_PER_PAGE + 1)}&chart_ticker=${encodeURIComponent(chartTicker)}&chart_source=${encodeURIComponent(chartSource)}&chart_timeframe=${encodeURIComponent(chartTimeframe)}&portfolio_period=${encodeURIComponent(portfolioPeriod)}&portfolio_timeframe=${encodeURIComponent(portfolioTimeframe)}`,
       { timeout: 12000 }
     );
     writeViewCache(cacheKey, snapshot);
@@ -699,6 +860,8 @@ async function refreshAll(){
       loadOpenOrders(),
       loadTradeHistory(),
       loadMarketStatus(),
+      loadRuntimeStatus(),
+      loadBarCacheStatus(),
       loadPortfolioHistory(),
       loadTickerChart(),
     ]);
@@ -708,6 +871,8 @@ async function refreshAll(){
 const initialLiveSnapshot=readViewCache(liveSnapshotCacheKey(), 10 * 60 * 1000);
 if(initialLiveSnapshot) hydrateLiveSnapshot(initialLiveSnapshot);
 refreshAll();
+setInterval(loadRuntimeStatus,5000);
+setInterval(loadBarCacheStatus,10000);
 setInterval(refreshAll,15000);
 </script>
 {% endblock %}

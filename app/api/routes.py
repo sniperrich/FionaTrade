@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 import time
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_app_settings, get_db
 from app.backtest_engine.service import BacktestEngineService
 from app.core.config import Settings
+from app.core.runtime_state import get_live_runtime_state, patch_live_runtime, push_live_event
 from app.core.utils import utc_now
-from app.db.models import BacktestRun, Event, EventEvidence, RawItem, Signal, SourceStatus
+from app.db.models import BacktestRun, Bar1m, Event, EventEvidence, RawItem, Signal, SourceStatus
 from app.market.backfill import MarketBackfillService
 from app.monitoring.health import HealthAuditService
 from app.services.orchestrator import PipelineOrchestrator
@@ -42,6 +44,197 @@ def _cache_invalidate(prefix: str) -> None:
     for key in list(_RUNTIME_CACHE.keys()):
         if key.startswith(prefix):
             _RUNTIME_CACHE.pop(key, None)
+
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _timeframe_to_minutes(timeframe: str) -> int:
+    mapping = {
+        "1Min": 1,
+        "5Min": 5,
+        "15Min": 15,
+        "30Min": 30,
+        "1H": 60,
+    }
+    return mapping.get(timeframe, 5)
+
+
+def _bucket_bar_ts(ts: datetime, timeframe: str) -> datetime:
+    ts = _ensure_utc(ts) or utc_now()
+    if timeframe == "1Min":
+        return ts.replace(second=0, microsecond=0)
+    minutes = _timeframe_to_minutes(timeframe)
+    if minutes < 60:
+        minute = (ts.minute // minutes) * minutes
+        return ts.replace(minute=minute, second=0, microsecond=0)
+    hours = max(1, minutes // 60)
+    hour = (ts.hour // hours) * hours
+    return ts.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+
+def _aggregate_cached_bars(rows: list[Bar1m], timeframe: str, limit: int) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    if timeframe == "1Min":
+        sliced = rows[-limit:]
+        return [
+            {
+                "t": (_ensure_utc(row.ts) or utc_now()).isoformat().replace("+00:00", "Z"),
+                "o": float(row.open),
+                "h": float(row.high),
+                "l": float(row.low),
+                "c": float(row.close),
+                "v": float(row.volume),
+                "source": row.source,
+            }
+            for row in sliced
+        ]
+
+    buckets: dict[datetime, dict[str, Any]] = {}
+    for row in rows:
+        bucket_ts = _bucket_bar_ts(row.ts, timeframe)
+        bucket = buckets.get(bucket_ts)
+        if bucket is None:
+            buckets[bucket_ts] = {
+                "bucket_ts": bucket_ts,
+                "o": float(row.open),
+                "h": float(row.high),
+                "l": float(row.low),
+                "c": float(row.close),
+                "v": float(row.volume),
+                "sources": Counter([row.source]),
+            }
+        else:
+            bucket["h"] = max(bucket["h"], float(row.high))
+            bucket["l"] = min(bucket["l"], float(row.low))
+            bucket["c"] = float(row.close)
+            bucket["v"] += float(row.volume)
+            bucket["sources"].update([row.source])
+
+    aggregated = []
+    for item in sorted(buckets.values(), key=lambda x: x["bucket_ts"])[-limit:]:
+        source_counts = item.pop("sources")
+        aggregated.append(
+            {
+                "t": item["bucket_ts"].isoformat().replace("+00:00", "Z"),
+                "o": item["o"],
+                "h": item["h"],
+                "l": item["l"],
+                "c": item["c"],
+                "v": item["v"],
+                "source": source_counts.most_common(1)[0][0] if source_counts else "bars_1m",
+            }
+        )
+    return aggregated
+
+
+def _load_cached_bars(session: Session, ticker: str, timeframe: str, limit: int) -> dict[str, Any]:
+    normalized_ticker = ticker.upper()
+    minutes = _timeframe_to_minutes(timeframe)
+    row_limit = min(max(limit * max(minutes, 1) * 3, limit * 20), 25000)
+    rows = (
+        session.execute(
+            select(Bar1m)
+            .where(Bar1m.ticker == normalized_ticker)
+            .order_by(desc(Bar1m.ts))
+            .limit(row_limit)
+        )
+        .scalars()
+        .all()
+    )
+    rows = list(reversed(rows))
+    bars = _aggregate_cached_bars(rows, timeframe, limit)
+    latest_ts = _ensure_utc(rows[-1].ts) if rows else None
+    now = utc_now()
+    age_minutes = None
+    if latest_ts is not None:
+        age_minutes = round((now - latest_ts).total_seconds() / 60.0, 1)
+    source_counts = Counter(row.source for row in rows)
+    return {
+        "ticker": normalized_ticker,
+        "timeframe": timeframe,
+        "count": len(bars),
+        "bars": bars,
+        "resolved_source": "cache",
+        "cache_row_count": len(rows),
+        "cache_last_ts": latest_ts.isoformat().replace("+00:00", "Z") if latest_ts else None,
+        "cache_age_minutes": age_minutes,
+        "source_counts": dict(source_counts),
+    }
+
+
+def _build_bar_cache_status(
+    session: Session,
+    settings: Settings,
+    selected_ticker: str,
+) -> dict[str, Any]:
+    tracked = [t.upper() for t in (settings.live_trading_tickers or list(settings.agent_tickers_override or []))]
+    if not tracked and selected_ticker:
+        tracked = [selected_ticker.upper()]
+    selected = selected_ticker.upper()
+    now = utc_now()
+    per_ticker: list[dict[str, Any]] = []
+    fresh_count = 0
+    latest_global_ts: datetime | None = None
+    for ticker in tracked:
+        latest_ts = session.execute(select(func.max(Bar1m.ts)).where(Bar1m.ticker == ticker)).scalar_one_or_none()
+        latest_ts = _ensure_utc(latest_ts)
+        row_count = session.execute(select(func.count(Bar1m.id)).where(Bar1m.ticker == ticker)).scalar_one()
+        age_hours = None
+        status = "empty"
+        if latest_ts:
+            age_hours = round((now - latest_ts).total_seconds() / 3600.0, 2)
+            latest_global_ts = max(latest_global_ts, latest_ts) if latest_global_ts else latest_ts
+            if age_hours <= 4:
+                status = "fresh"
+                fresh_count += 1
+            elif age_hours <= 24:
+                status = "stale"
+            else:
+                status = "very_stale"
+        per_ticker.append(
+            {
+                "ticker": ticker,
+                "row_count": int(row_count),
+                "last_ts": latest_ts.isoformat().replace("+00:00", "Z") if latest_ts else None,
+                "age_hours": age_hours,
+                "status": status,
+            }
+        )
+
+    selected_sources = (
+        session.execute(
+            select(Bar1m.source, func.count(Bar1m.id))
+            .where(Bar1m.ticker == selected)
+            .group_by(Bar1m.source)
+            .order_by(func.count(Bar1m.id).desc())
+        )
+        .all()
+    )
+    selected_summary = next((item for item in per_ticker if item["ticker"] == selected), {
+        "ticker": selected,
+        "row_count": 0,
+        "last_ts": None,
+        "age_hours": None,
+        "status": "empty",
+    })
+    return {
+        "selected_ticker": selected,
+        "selected": {
+            **selected_summary,
+            "source_counts": {source: count for source, count in selected_sources},
+        },
+        "tracked_count": len(tracked),
+        "fresh_count": fresh_count,
+        "latest_global_ts": latest_global_ts.isoformat().replace("+00:00", "Z") if latest_global_ts else None,
+        "tickers": per_ticker,
+    }
 
 
 @router.get("/health")
@@ -546,6 +739,28 @@ def live_status(
     })
 
 
+@router.get("/live/runtime")
+def live_runtime_status() -> dict[str, Any]:
+    return get_live_runtime_state()
+
+
+@router.get("/live/bar_cache")
+def live_bar_cache_status(
+    ticker: str | None = Query(default=None),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    selected_ticker = (
+        (ticker or "").upper().strip()
+        or next(iter(settings.live_trading_tickers or list(settings.agent_tickers_override or [])), "AAPL")
+    )
+    cache_key = f"live:bar_cache:{selected_ticker}"
+    cached = _cache_get(cache_key, ttl_seconds=8.0)
+    if cached is not None:
+        return cached
+    return _cache_set(cache_key, _build_bar_cache_status(session, settings, selected_ticker))
+
+
 @router.post("/live/cycle")
 def trigger_live_cycle(
     session: Session = Depends(get_db),
@@ -784,17 +999,44 @@ def get_latest_price(
 def get_live_bars(
     ticker: str = Query(...),
     timeframe: str = Query(default="5Min"),
+    source: str = Query(default="auto"),
     limit: int = Query(default=78, ge=10, le=500),
+    session: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
-    """Return recent Alpaca bars for UI charting."""
+    """Return recent bars for UI charting from cache/broker/auto."""
     from app.broker.alpaca import AlpacaBroker
 
     normalized_ticker = ticker.upper()
-    cache_key = f"live:bars:{normalized_ticker}:{timeframe}:{limit}"
+    requested_source = source.lower().strip()
+    cache_key = f"live:bars:{normalized_ticker}:{timeframe}:{requested_source}:{limit}"
     cached = _cache_get(cache_key, ttl_seconds=10.0)
     if cached is not None:
         return cached
+
+    cached_payload = _load_cached_bars(session, normalized_ticker, timeframe, limit)
+    cache_is_fresh = (
+        cached_payload["cache_age_minutes"] is not None
+        and float(cached_payload["cache_age_minutes"]) <= 360.0
+    )
+    if requested_source == "cache":
+        return _cache_set(
+            cache_key,
+            {
+                **cached_payload,
+                "source_requested": requested_source,
+                "resolved_source": "cache",
+            },
+        )
+    if requested_source == "auto" and cached_payload["count"] and cache_is_fresh:
+        return _cache_set(
+            cache_key,
+            {
+                **cached_payload,
+                "source_requested": requested_source,
+                "resolved_source": "cache",
+            },
+        )
 
     broker = AlpacaBroker(settings)
     try:
@@ -803,6 +1045,10 @@ def get_live_bars(
             "ticker": normalized_ticker,
             "timeframe": timeframe,
             "count": len(bars),
+            "source_requested": requested_source,
+            "resolved_source": "broker",
+            "cache_last_ts": cached_payload.get("cache_last_ts"),
+            "cache_age_minutes": cached_payload.get("cache_age_minutes"),
             "bars": [
                 {
                     "t": bar.get("t"),
@@ -817,6 +1063,16 @@ def get_live_bars(
         }
         return _cache_set(cache_key, payload)
     except Exception as exc:
+        if requested_source == "auto" and cached_payload["count"]:
+            return _cache_set(
+                cache_key,
+                {
+                    **cached_payload,
+                    "source_requested": requested_source,
+                    "resolved_source": "cache_fallback",
+                    "broker_error": str(exc),
+                },
+            )
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
 
 
@@ -915,6 +1171,7 @@ def live_snapshot(
     trade_offset: int = Query(default=0, ge=0),
     trade_limit: int = Query(default=20, ge=1, le=200),
     chart_ticker: str | None = Query(default=None),
+    chart_source: str = Query(default="auto"),
     chart_timeframe: str = Query(default="5Min"),
     chart_limit: int = Query(default=72, ge=10, le=500),
     portfolio_period: str = Query(default="1M"),
@@ -927,7 +1184,7 @@ def live_snapshot(
     )
     cache_key = (
         f"ui:live_snapshot:{(trade_ticker or '').upper()}:{trade_offset}:{trade_limit}:{selected_chart_ticker}:"
-        f"{chart_timeframe}:{chart_limit}:{portfolio_period}:{portfolio_timeframe}"
+        f"{chart_source}:{chart_timeframe}:{chart_limit}:{portfolio_period}:{portfolio_timeframe}"
     )
     cached = _cache_get(cache_key, ttl_seconds=6.0)
     if cached is not None:
@@ -941,6 +1198,8 @@ def live_snapshot(
         "trades": [],
         "portfolio_history": None,
         "bars": None,
+        "bar_cache": None,
+        "runtime": None,
         "errors": {},
     }
 
@@ -981,12 +1240,28 @@ def live_snapshot(
     try:
         payload["bars"] = get_live_bars(
             ticker=selected_chart_ticker,
+            source=chart_source,
             timeframe=chart_timeframe,
             limit=chart_limit,
+            session=session,
             settings=settings,
         )
     except Exception as exc:
         payload["errors"]["bars"] = getattr(exc, "detail", str(exc))
+
+    try:
+        payload["bar_cache"] = live_bar_cache_status(
+            ticker=selected_chart_ticker,
+            session=session,
+            settings=settings,
+        )
+    except Exception as exc:
+        payload["errors"]["bar_cache"] = str(exc)
+
+    try:
+        payload["runtime"] = live_runtime_status()
+    except Exception as exc:
+        payload["errors"]["runtime"] = str(exc)
 
     return _cache_set(cache_key, payload)
 
@@ -1005,6 +1280,8 @@ def set_live_enabled(
     was_enabled = bool(settings.live_trading_enabled)
     enabled = bool(body.get("enabled", True))
     settings.live_trading_enabled = enabled
+    patch_live_runtime("live_cycle", status="idle" if not enabled else "waiting", stage="enabled" if enabled else "disabled")
+    push_live_event("control", f"Live trading {'enabled' if enabled else 'disabled'} from WebUI", enabled=enabled)
     _cache_invalidate("live:")
     _cache_invalidate("ui:")
 
@@ -1040,12 +1317,17 @@ def set_live_enabled(
     if enabled and not was_enabled:
         try:
             import threading
-            from app.main import _startup_backfill_bars  # type: ignore[attr-defined]
+            from app.main import _scheduled_live_trading, _startup_backfill_bars  # type: ignore[attr-defined]
 
             threading.Thread(
                 target=_startup_backfill_bars,
                 daemon=True,
                 name="live-enable-bar-backfill",
+            ).start()
+            threading.Thread(
+                target=_scheduled_live_trading,
+                daemon=True,
+                name="live-enable-immediate-cycle",
             ).start()
         except Exception:
             pass
@@ -1055,7 +1337,7 @@ def set_live_enabled(
         "message": (
             f"Live trading {'enabled' if enabled else 'disabled'} for this session. "
             + (
-                "Started background bar backfill. "
+                "Started background bar backfill and an immediate live cycle. "
                 if enabled and not was_enabled else ""
             )
             + f"To persist, set LIVE_TRADING_ENABLED={'true' if enabled else 'false'} in .env"

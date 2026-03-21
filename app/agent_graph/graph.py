@@ -44,7 +44,12 @@ class AgentGraph:
 
     # ── Graph nodes ────────────────────────────────────────────────────────
 
-    def _run_parallel_agents(self, session: Session, state: AgentState) -> AgentState:
+    def _run_parallel_agents(
+        self,
+        session: Session,
+        state: AgentState,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AgentState:
         """Run Macro, News, Fundamentals, Technicals concurrently.
         
         Each thread gets its own DB session to avoid SQLAlchemy
@@ -87,6 +92,14 @@ class AgentGraph:
 
         def _run_agent_with_own_session(agent, result_key):
             """Run a single agent in its own DB session."""
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "parallel_agent_running",
+                        "agent": agent.name,
+                        "message": f"{ticker}: {agent.name} analyzing",
+                    }
+                )
             thread_session = make_session()
             try:
                 return result_key, agent.analyze(thread_session, ticker, context)
@@ -103,6 +116,14 @@ class AgentGraph:
                 try:
                     _, result = future.result(timeout=60)
                     state[result_key] = result.to_dict()
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "stage": "parallel_agent_completed",
+                                "agent": state[result_key].get("agent_name"),
+                                "message": f"{ticker}: {state[result_key].get('agent_name')} -> {state[result_key].get('signal')}",
+                            }
+                        )
                 except Exception as exc:
                     logger.warning("[graph] %s failed: %s", result_key, exc)
                     state[result_key] = {
@@ -112,6 +133,14 @@ class AgentGraph:
                         "reasoning": f"Agent failed: {exc}",
                         "error": str(exc),
                     }
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "stage": "parallel_agent_failed",
+                                "agent": result_key.replace("_result", ""),
+                                "message": f"{ticker}: {result_key.replace('_result', '')} failed",
+                            }
+                        )
 
         # Build aggregated signals dict for downstream agents
         state["agent_signals"] = {
@@ -122,18 +151,35 @@ class AgentGraph:
         }
         return state
 
-    def _run_risk_manager(self, session: Session, state: AgentState) -> AgentState:
+    def _run_risk_manager(
+        self,
+        session: Session,
+        state: AgentState,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AgentState:
         ticker = state["ticker"]
         context = {**(state.get("context") or {}), "agent_signals": state.get("agent_signals", {})}
+        if progress_callback:
+            progress_callback({"stage": "risk_manager_running", "agent": "risk_manager", "message": f"{ticker}: risk manager reviewing"})
         result = self.risk.analyze(session, ticker, context)
         state["risk_manager_result"] = result.to_dict()
         # Merge risk result into agent_signals for portfolio manager
         state["agent_signals"]["risk_manager"] = result.to_dict()
+        if progress_callback:
+            approved = bool((result.metadata or {}).get("approved"))
+            progress_callback({"stage": "risk_manager_completed", "agent": "risk_manager", "message": f"{ticker}: risk manager -> {'approved' if approved else 'blocked'}"})
         return state
 
-    def _run_portfolio_manager(self, session: Session, state: AgentState) -> AgentState:
+    def _run_portfolio_manager(
+        self,
+        session: Session,
+        state: AgentState,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AgentState:
         ticker = state["ticker"]
         context = {**(state.get("context") or {}), "agent_signals": state.get("agent_signals", {})}
+        if progress_callback:
+            progress_callback({"stage": "portfolio_manager_running", "agent": "portfolio_manager", "message": f"{ticker}: portfolio manager deciding"})
         result = self.portfolio.analyze(session, ticker, context)
         state["portfolio_manager_result"] = result.to_dict()
 
@@ -141,11 +187,20 @@ class AgentGraph:
         state["final_action"] = meta.get("action", result.signal)
         state["final_position_pct"] = meta.get("position_pct", 0.0)
         state["final_reasoning"] = result.reasoning
+        if progress_callback:
+            progress_callback({"stage": "portfolio_manager_completed", "agent": "portfolio_manager", "message": f"{ticker}: final {state['final_action']} {state['final_position_pct'] * 100:.1f}%"})
         return state
 
     # ── Public run method ──────────────────────────────────────────────────
 
-    def run(self, session: Session, ticker: str, context: dict | None = None, as_of: datetime | None = None) -> AgentState:
+    def run(
+        self,
+        session: Session,
+        ticker: str,
+        context: dict | None = None,
+        as_of: datetime | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AgentState:
         """Execute the full agent graph for a ticker. Returns final AgentState.
 
         Args:
@@ -174,9 +229,11 @@ class AgentGraph:
         start_time = time.perf_counter()
 
         try:
-            state = self._run_parallel_agents(session, state)
-            state = self._run_risk_manager(session, state)
-            state = self._run_portfolio_manager(session, state)
+            if progress_callback:
+                progress_callback({"stage": "parallel_start", "agent": "agent_graph", "message": f"{ticker}: starting parallel agent pass"})
+            state = self._run_parallel_agents(session, state, progress_callback=progress_callback)
+            state = self._run_risk_manager(session, state, progress_callback=progress_callback)
+            state = self._run_portfolio_manager(session, state, progress_callback=progress_callback)
         except Exception as exc:
             logger.exception("[graph] Unhandled error running agent graph for %s: %s", ticker, exc)
             state["error"] = str(exc)

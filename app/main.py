@@ -8,6 +8,7 @@ from app.api.routes import router as api_router
 from app.core.config import get_settings
 from app.core.logging import get_app_logger, log_writeout, setup_logging
 from app.core.market_hours import is_market_open
+from app.core.runtime_state import patch_live_runtime, push_live_event, reset_live_runtime_state
 from app.db.database import db_session, init_db
 from app.monitoring.health import HealthAuditService
 from app.services.earnings_calendar import EarningsCalendarService
@@ -81,6 +82,7 @@ def _scheduled_earnings_refresh() -> None:
 def _scheduled_bar_refresh() -> None:
     """Refresh Bar1m data for live-trading tickers (runs every 20 min during market hours)."""
     if not is_market_open():
+        patch_live_runtime("bar_backfill", status="idle", mode="scheduled", stage="waiting_for_market")
         return  # Skip when market is closed — saves Finnhub API quota
     try:
         from datetime import datetime, timedelta, timezone
@@ -97,9 +99,17 @@ def _scheduled_bar_refresh() -> None:
         with db_session() as session:
             svc = MarketBackfillService(settings)
             result = svc.run(session, start_date=today, end_date=tomorrow,
-                             tickers=tickers, chunk_days=1, sleep_seconds=0.1)
+                             tickers=tickers, chunk_days=1, sleep_seconds=0.1, runtime_mode="scheduled")
             logger.info("[bar_refresh] Scheduled refresh complete: %s", result)
     except Exception as exc:
+        patch_live_runtime(
+            "bar_backfill",
+            status="error",
+            mode="scheduled",
+            stage="error",
+            error=str(exc),
+        )
+        push_live_event("bar_backfill", f"Scheduled bar refresh failed: {exc}", level="error", mode="scheduled")
         logger.exception("[bar_refresh] Scheduled refresh failed: %s", exc)
 
 
@@ -115,6 +125,7 @@ def _startup_backfill_bars() -> None:
 
         tickers = list(settings.live_trading_tickers) or list(settings.agent_tickers_override or [])
         if not tickers:
+            patch_live_runtime("bar_backfill", status="idle", mode="startup", stage="no_tickers")
             return
 
         with db_session() as session:
@@ -126,6 +137,22 @@ def _startup_backfill_bars() -> None:
                 latest_ts = latest_ts.replace(tzinfo=timezone.utc)
             staleness_hours = (now_utc - latest_ts).total_seconds() / 3600
             if staleness_hours < 4:
+                patch_live_runtime(
+                    "bar_backfill",
+                    status="completed",
+                    mode="startup",
+                    stage="fresh_skip",
+                    current_ticker=None,
+                    completed_tickers=len(tickers),
+                    total_tickers=len(tickers),
+                    result={"fresh_skip": True, "staleness_hours": round(staleness_hours, 2)},
+                    error=None,
+                )
+                push_live_event(
+                    "bar_backfill",
+                    f"Skipped startup bar refresh: cache is fresh ({staleness_hours:.1f}h old)",
+                    mode="startup",
+                )
                 logger.info("[bar_refresh] Bar1m is fresh (%.1fh old) — skipping startup backfill", staleness_hours)
                 return
             logger.info(
@@ -143,9 +170,17 @@ def _startup_backfill_bars() -> None:
         with db_session() as session:
             svc = MarketBackfillService(settings)
             result = svc.run(session, start_date=start_date, end_date=end_date,
-                             tickers=tickers, chunk_days=5, sleep_seconds=0.2)
+                             tickers=tickers, chunk_days=5, sleep_seconds=0.2, runtime_mode="startup")
             logger.info("[bar_refresh] Startup backfill complete: %s", result)
     except Exception as exc:
+        patch_live_runtime(
+            "bar_backfill",
+            status="error",
+            mode="startup",
+            stage="error",
+            error=str(exc),
+        )
+        push_live_event("bar_backfill", f"Startup bar refresh failed: {exc}", level="error", mode="startup")
         logger.exception("[bar_refresh] Startup backfill failed: %s", exc)
 
 
@@ -175,6 +210,8 @@ def startup_event() -> None:
     global scheduler
 
     init_db()
+    reset_live_runtime_state()
+    push_live_event("system", "Application startup complete")
 
     # ── Startup bar backfill (async — don't block startup) ───────────────
     if settings.live_trading_enabled or settings.agent_mode_enabled:
