@@ -14,7 +14,7 @@ EnvironmentFile=/opt/fionatrade/.env
 # Main process
 ExecStart=/opt/fionatrade/.venv/bin/uvicorn app.main:app \
     --host 127.0.0.1 \
-    --port 8000 \
+    --port 6888 \
     --workers 1 \
     --log-level info \
     --no-access-log
