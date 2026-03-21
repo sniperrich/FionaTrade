@@ -230,5 +230,6 @@ def live_trading_page(
             "live_enabled": settings.live_trading_enabled,
             "market_session": msi,
             "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
+            "default_chart_ticker": ticker or ((settings.live_trading_tickers or list(settings.agent_tickers_override or []))[:1] or ["AAPL"])[0],
         },
     )

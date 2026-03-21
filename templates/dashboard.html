@@ -63,6 +63,41 @@
   </div>
 </div>
 
+<div class="grid g2 mb16">
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Portfolio Curve</div>
+      <div class="filter-bar" style="margin:0">
+        <select id="dash-portfolio-period" onchange="loadPortfolioCurve()" style="width:110px">
+          <option value="1D">1D</option>
+          <option value="1W">1W</option>
+          <option value="1M" selected>1M</option>
+          <option value="3M">3M</option>
+        </select>
+        <select id="dash-portfolio-timeframe" onchange="loadPortfolioCurve()" style="width:110px">
+          <option value="15Min">15Min</option>
+          <option value="1H">1H</option>
+          <option value="1D" selected>1D</option>
+        </select>
+      </div>
+    </div>
+    <div class="chart-shell">
+      <svg id="dash-portfolio-chart" class="chart-svg" viewBox="0 0 640 220" preserveAspectRatio="none"></svg>
+      <div id="dash-portfolio-chart-empty" class="chart-empty">Loading portfolio history…</div>
+    </div>
+    <div class="chart-meta" id="dash-portfolio-meta">—</div>
+  </div>
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Market Snapshot</div>
+      <a href="/live" class="btn btn-ghost btn-sm">Open live desk →</a>
+    </div>
+    <div id="market-context-body">
+      <div class="loading"><div class="spinner"></div> Loading market context…</div>
+    </div>
+  </div>
+</div>
+
 <!-- Recent agent runs -->
 <div class="card mt16">
   <div class="section-header mb8">
@@ -106,6 +141,9 @@
 <script>
 function fmt$(n) { return n==null?'—':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function fmtPct(n) { return n==null?'—':(n>=0?'+':'')+Number(n*100).toFixed(2)+'%'; }
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
 function actionBadge(a) {
   const map = {BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};
   return `<span class="badge ${map[a]||'badge-grey'}">${a||'—'}</span>`;
@@ -114,6 +152,35 @@ function sigBadge(s) {
   if (!s) return '<span class="text-muted">—</span>';
   const m={BUY:'text-green',SHORT:'text-red',HOLD:'text-muted',NO_SIGNAL:'text-muted'};
   return `<span class="${m[s]||''}" style="font-size:12px;font-weight:600">${s}</span>`;
+}
+function setDashChartEmpty(message) {
+  const svg = document.getElementById('dash-portfolio-chart');
+  const empty = document.getElementById('dash-portfolio-chart-empty');
+  svg.innerHTML = '';
+  empty.textContent = message;
+  empty.style.display = 'flex';
+}
+function renderDashLine(values, color='var(--accent)') {
+  const svg = document.getElementById('dash-portfolio-chart');
+  const empty = document.getElementById('dash-portfolio-chart-empty');
+  if (!values?.length) {
+    setDashChartEmpty('No portfolio history yet');
+    return;
+  }
+  empty.style.display = 'none';
+  const width=640, height=220, padX=20, padY=18;
+  const min=Math.min(...values), max=Math.max(...values);
+  const span=Math.max(max-min, 1e-6);
+  const points=values.map((v,i)=>{
+    const x=padX + (i/(Math.max(values.length-1,1)))*(width-padX*2);
+    const y=height-padY - ((v-min)/span)*(height-padY*2);
+    return `${x},${y}`;
+  }).join(' ');
+  const area=`${padX},${height-padY} ${points} ${width-padX},${height-padY}`;
+  svg.innerHTML=`
+    <polyline fill="rgba(217,119,87,0.10)" stroke="none" points="${area}" />
+    <polyline fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" points="${points}" />
+  `;
 }
 
 async function loadPortfolio() {
@@ -156,6 +223,51 @@ async function loadSystemStatus() {
   } catch(e) {}
 }
 
+async function loadPortfolioCurve() {
+  const period = document.getElementById('dash-portfolio-period').value;
+  const timeframe = document.getElementById('dash-portfolio-timeframe').value;
+  try {
+    const d = await apiFetch(`/api/live/portfolio_history?period=${encodeURIComponent(period)}&timeframe=${encodeURIComponent(timeframe)}`, { timeout: 12000 });
+    const equity = d.equity || [];
+    if (!equity.length) {
+      setDashChartEmpty('No portfolio history yet');
+      document.getElementById('dash-portfolio-meta').textContent = '—';
+      return;
+    }
+    renderDashLine(equity);
+    const first = equity[0];
+    const last = equity[equity.length - 1];
+    const changePct = first ? ((last - first) / first * 100) : 0;
+    document.getElementById('dash-portfolio-meta').innerHTML =
+      `<strong>${equity.length}</strong> points · <span style="color:${changePct>=0?'var(--green)':'var(--red)'}">${changePct>=0?'+':''}${changePct.toFixed(2)}%</span>`;
+  } catch (e) {
+    setDashChartEmpty(`Portfolio history unavailable: ${e.message}`);
+    document.getElementById('dash-portfolio-meta').textContent = 'Broker history unavailable';
+  }
+}
+
+async function loadMarketContext() {
+  try {
+    const live = await apiFetch('/api/live/status');
+    const lastCycle = live.last_cycle;
+    const rows = [
+      ['Session', `<span class="badge ${live.market_tradeable ? 'badge-green' : 'badge-grey'}">${live.market_session || 'closed'}</span>`],
+      ['Tradeable', live.market_tradeable ? '<span class="text-green">Yes</span>' : '<span class="text-muted">No</span>'],
+      ['Tickers', (live.tickers || []).length ? (live.tickers || []).join(', ') : '—'],
+      ['Cycle Interval', `${live.cycle_interval_seconds || 0}s`],
+      ['Max Position', live.max_position_pct != null ? `${(live.max_position_pct * 100).toFixed(1)}% NAV` : '—'],
+      ['Last Cycle', lastCycle?.et_time || '—'],
+    ];
+    document.getElementById('market-context-body').innerHTML = rows.map(([k,v]) =>
+      `<div class="flex-center" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border)">
+        <span class="text-muted text-sm">${k}</span><span style="text-align:right">${v}</span>
+      </div>`
+    ).join('');
+  } catch (e) {
+    document.getElementById('market-context-body').innerHTML = `<div class="empty-state text-red">Live status unavailable: ${e.message}</div>`;
+  }
+}
+
 async function loadRecentRuns() {
   try {
     const {runs} = await apiFetch('/api/agent/runs?limit=8');
@@ -190,17 +302,23 @@ async function loadLatestNews() {
       const age = n.ingested_at ? Math.round((Date.now()-new Date(n.ingested_at))/60000) : null;
       const ageStr = age!=null ? (age<60?age+'m ago':Math.round(age/60)+'h ago') : '';
       const ticker = n.metadata?.ticker ? `<span class="badge badge-accent">${n.metadata.ticker}</span>` : '';
+      const preview = n.body_preview ? `<div class="news-preview">${escapeHtml(n.body_preview)}</div>` : '';
+      const link = n.url ? `<a href="${n.url}" target="_blank" class="expand-btn" style="margin-left:auto">source ↗</a>` : '';
       return `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
-        <div style="font-size:13.5px;font-weight:500;margin-bottom:4px">${n.title||'(no title)'}</div>
-        <div class="news-meta">${ticker}<span class="badge badge-grey">${n.source||'unknown'}</span><span>${ageStr}</span></div>
+        <div style="font-size:13.5px;font-weight:500;margin-bottom:4px">${escapeHtml(n.title||'(no title)')}</div>
+        <div class="news-meta">${ticker}<span class="badge badge-grey">${n.source||'unknown'}</span><span>${ageStr}</span>${link}</div>
+        ${preview}
       </div>`;
     }).join('');
   } catch(e) {}
 }
 
-loadPortfolio(); loadSystemStatus(); loadRecentRuns(); loadLatestNews();
+loadPortfolio(); loadSystemStatus(); loadPortfolioCurve(); loadMarketContext(); loadRecentRuns(); loadLatestNews();
 setInterval(loadPortfolio, 15000);
 setInterval(loadSystemStatus, 30000);
+setInterval(loadPortfolioCurve, 30000);
+setInterval(loadMarketContext, 30000);
 setInterval(loadRecentRuns, 60000);
+setInterval(loadLatestNews, 30000);
 </script>
 {% endblock %}

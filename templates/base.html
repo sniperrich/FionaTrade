@@ -97,12 +97,22 @@ function toast(msg, type='') {
 }
 
 async function apiFetch(url, opts={}) {
+  const { timeout = 8000, ...fetchOpts } = opts;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const r = await fetch(url, opts);
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.detail || data.error || r.statusText);
+    const r = await fetch(url, { ...fetchOpts, signal: controller.signal });
+    const text = await r.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
+    if (!r.ok) throw new Error(data.detail || data.error || text || r.statusText || `HTTP ${r.status}`);
     return data;
-  } catch(e) { throw e; }
+  } catch(e) {
+    if (e?.name === 'AbortError') throw new Error('request timeout');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── Sidebar status ────────────────────────────────────────────────────────
@@ -111,11 +121,10 @@ async function updateSidebarStatus() {
     const d = await apiFetch('/api/live/status');
     const mDot = document.getElementById('market-dot');
     const mLabel = document.getElementById('market-label');
-    if (d.market_session) {
-      const open = d.market_session.tradeable;
-      mDot.className = 'dot ' + (open ? 'green pulse' : 'grey');
-      mLabel.textContent = open ? 'Market open' : ('Market ' + d.market_session.label);
-    }
+    const open = !!d.market_tradeable;
+    const label = d.market_session || 'closed';
+    mDot.className = 'dot ' + (open ? 'green pulse' : 'grey');
+    mLabel.textContent = open ? 'Market open' : ('Market ' + label);
   } catch(e) {}
   try {
     const h = await apiFetch('/api/health');

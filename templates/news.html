@@ -12,7 +12,10 @@
 
 <!-- Source status -->
 <div class="card mb16 card-sm">
-  <div class="card-title mb8">Data Sources</div>
+  <div class="section-header mb8">
+    <div class="card-title" style="margin:0">Data Sources</div>
+    <span class="text-muted text-sm">Auto-refresh every 30s</span>
+  </div>
   <div style="display:flex;flex-wrap:wrap;gap:6px" id="source-status-row">
     {% for row in source_statuses %}
     <span class="badge {% if row.status == 'ONLINE' %}badge-green{% elif row.status == 'OFFLINE' %}badge-red{% else %}badge-warn{% endif %}">
@@ -22,6 +25,11 @@
     {% if not source_statuses %}
     <span class="text-muted text-sm">No source data yet</span>
     {% endif %}
+  </div>
+  <div id="source-status-errors" class="mt8">
+    {% for row in source_statuses if row.status == 'OFFLINE' and row.error_message %}
+    <div class="text-red text-sm mt4">{{ row.display_name or row.source_name }}: {{ row.error_message }}</div>
+    {% endfor %}
   </div>
 </div>
 
@@ -44,7 +52,7 @@
 <div id="news-list">
 {% for item in news_items %}
 {% set item_ticker = item.metadata_json.get('ticker') if item.metadata_json else None %}
-<div class="news-card" data-source="{{ item.source }}" data-tickers="{{ item_ticker or '' }}" data-headline="{{ (item.title or '') | lower }}">
+<div class="news-card" data-id="{{ item.id }}" data-source="{{ item.source }}" data-tickers="{{ item_ticker or '' }}" data-headline="{{ (item.title or '') | lower }}">
   <div class="news-headline">{{ item.title or "(no title)" }}</div>
   <div class="news-meta">
     {% if item_ticker %}
@@ -72,31 +80,44 @@
 </div>
 
 <script>
+let latestNewsId = {{ latest_id or 0 }};
+
+function escapeHtml(s){
+  return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
 function toggleBody(el){
   const body=el.nextElementSibling;
   body.classList.toggle('open');
   el.textContent=body.classList.contains('open')?'▲ Collapse':'▼ Read more';
 }
 
-// Build ticker filter from news items
-const allCards=[...document.querySelectorAll('.news-card')];
-const tickerSet=new Set();
-allCards.forEach(c=>{
-  (c.dataset.tickers||'').split(',').filter(Boolean).forEach(t=>tickerSet.add(t));
-});
-const tickerSel=document.getElementById('filter-ticker');
-[...tickerSet].sort().forEach(t=>{
-  const o=document.createElement('option');
-  o.value=t; o.textContent=t;
-  tickerSel.appendChild(o);
-});
+function getNewsCards(){
+  return [...document.querySelectorAll('.news-card')];
+}
+
+function rebuildTickerFilter(){
+  const tickerSel=document.getElementById('filter-ticker');
+  const current=tickerSel.value;
+  const tickerSet=new Set();
+  getNewsCards().forEach(c=>{
+    (c.dataset.tickers||'').split(',').filter(Boolean).forEach(t=>tickerSet.add(t));
+  });
+  tickerSel.innerHTML='<option value="">All tickers</option>';
+  [...tickerSet].sort().forEach(t=>{
+    const o=document.createElement('option');
+    o.value=t; o.textContent=t;
+    tickerSel.appendChild(o);
+  });
+  tickerSel.value=[...tickerSel.options].some(o=>o.value===current) ? current : '';
+}
 
 function filterNews(){
   const text=document.getElementById('filter-text').value.toLowerCase();
   const source=document.getElementById('filter-source').value.toLowerCase();
   const ticker=document.getElementById('filter-ticker').value.toUpperCase();
   let visible=0;
-  allCards.forEach(c=>{
+  getNewsCards().forEach(c=>{
     const matchText=!text||c.dataset.headline.includes(text);
     const matchSource=!source||(c.dataset.source||'').toLowerCase()===source;
     const matchTicker=!ticker||(c.dataset.tickers||'').split(',').includes(ticker);
@@ -107,9 +128,94 @@ function filterNews(){
   document.getElementById('news-count').textContent=visible+' items';
 }
 
-async function loadNews(){
-  // Reload the page for fresh server-rendered news
-  window.location.reload();
+function renderSourceStatuses(items){
+  const row=document.getElementById('source-status-row');
+  const errors=document.getElementById('source-status-errors');
+  if(!items?.length){
+    row.innerHTML='<span class="text-muted text-sm">No source data yet</span>';
+    errors.innerHTML='';
+    return;
+  }
+  row.innerHTML=items.map(item=>{
+    const cls=item.status==='ONLINE'?'badge-green':item.status==='OFFLINE'?'badge-red':'badge-warn';
+    const title=item.error_message ? ` title="${escapeHtml(item.error_message)}"` : '';
+    return `<span class="badge ${cls}"${title}>${escapeHtml(item.display_name || item.source_name)}</span>`;
+  }).join('');
+  const offline=items.filter(item=>item.status==='OFFLINE' && item.error_message);
+  errors.innerHTML=offline.length
+    ? offline.map(item=>`<div class="text-red text-sm mt4">${escapeHtml(item.display_name || item.source_name)}: ${escapeHtml(item.error_message)}</div>`).join('')
+    : '<div class="text-muted text-sm mt4">All checked sources are healthy.</div>';
 }
+
+function renderNewsCard(item){
+  const ticker=item.metadata?.ticker || '';
+  const source=item.source || 'unknown';
+  const ingested=item.ingested_at ? new Date(item.ingested_at) : null;
+  const timeLabel=ingested ? ingested.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+  const body=item.body_preview ? `
+    <span class="news-expand" onclick="toggleBody(this)">▼ Read more</span>
+    <div class="news-body">${escapeHtml(item.body_preview)}</div>
+  ` : '';
+  return `
+    <div class="news-card" data-id="${item.id}" data-source="${escapeHtml(source)}" data-tickers="${escapeHtml(ticker)}" data-headline="${escapeHtml((item.title || '').toLowerCase())}">
+      <div class="news-headline">${escapeHtml(item.title || '(no title)')}</div>
+      <div class="news-meta">
+        ${ticker ? `<span class="badge badge-accent">${escapeHtml(ticker)}</span>` : ''}
+        <span class="badge badge-grey">${escapeHtml(source)}</span>
+        ${timeLabel ? `<span class="text-muted text-xs">${escapeHtml(timeLabel)}</span>` : ''}
+        ${item.url ? `<a href="${item.url}" target="_blank" class="text-xs" style="color:var(--accent)">↗ source</a>` : ''}
+      </div>
+      ${body}
+    </div>
+  `;
+}
+
+function prependNews(items){
+  const list=document.getElementById('news-list');
+  const seen=new Set(getNewsCards().map(card=>card.dataset.id));
+  const fresh=(items||[]).filter(item=>!seen.has(String(item.id)));
+  if(!fresh.length) return 0;
+  const empty=list.querySelector('.empty-state');
+  if(empty && !getNewsCards().length) empty.remove();
+  const html=fresh.reverse().map(renderNewsCard).join('');
+  list.insertAdjacentHTML('afterbegin', html);
+  const cards=getNewsCards();
+  cards.slice(250).forEach(card=>card.remove());
+  rebuildTickerFilter();
+  filterNews();
+  return fresh.length;
+}
+
+async function refreshSourceStatus(){
+  try{
+    const d=await apiFetch('/api/news/sources/status', { timeout: 12000 });
+    renderSourceStatuses(d.items || []);
+  } catch(e){
+    document.getElementById('source-status-errors').innerHTML=`<div class="text-red text-sm mt4">Source status unavailable: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function pollLatestNews(){
+  try{
+    const d=await apiFetch(`/api/news?since_id=${encodeURIComponent(latestNewsId)}&limit=50`, { timeout: 12000 });
+    const items=d.items || [];
+    const added=prependNews(items);
+    latestNewsId=Math.max(latestNewsId, d.latest_id || 0);
+    if(added>0){
+      toast(`Fetched ${added} new item${added===1?'':'s'}`,'success');
+    }
+  } catch(e){
+    console.warn('news poll failed', e);
+  }
+}
+
+async function loadNews(){
+  await Promise.allSettled([pollLatestNews(), refreshSourceStatus()]);
+}
+
+rebuildTickerFilter();
+filterNews();
+refreshSourceStatus();
+setInterval(loadNews, 30000);
 </script>
 {% endblock %}

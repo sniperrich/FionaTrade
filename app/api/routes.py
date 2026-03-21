@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import time
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -17,6 +18,30 @@ from app.monitoring.health import HealthAuditService
 from app.services.orchestrator import PipelineOrchestrator
 
 router = APIRouter(prefix="/api", tags=["api"])
+_RUNTIME_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _cache_get(key: str, ttl_seconds: float) -> Any | None:
+    now = time.time()
+    row = _RUNTIME_CACHE.get(key)
+    if not row:
+        return None
+    ts, value = row
+    if now - ts > ttl_seconds:
+        _RUNTIME_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(key: str, value: Any) -> Any:
+    _RUNTIME_CACHE[key] = (time.time(), value)
+    return value
+
+
+def _cache_invalidate(prefix: str) -> None:
+    for key in list(_RUNTIME_CACHE.keys()):
+        if key.startswith(prefix):
+            _RUNTIME_CACHE.pop(key, None)
 
 
 @router.get("/health")
@@ -155,6 +180,8 @@ def list_news(
                 "published_at": row.published_at,
                 "ingested_at": row.ingested_at,
                 "processed": row.processed,
+                "metadata": row.metadata_json or {},
+                "body_preview": (row.body or "")[:600],
             }
             for row in rows
         ],
@@ -518,6 +545,7 @@ def trigger_live_cycle(
     svc = LiveTradingService(settings)
     result = svc.run_cycle(session)
     session.commit()
+    _cache_invalidate("live:")
     return result
 
 
@@ -562,11 +590,16 @@ def live_positions(
 ) -> dict[str, Any]:
     """Return current Alpaca positions and account state."""
     from app.broker.alpaca import AlpacaBroker
+    cached = _cache_get("live:positions", ttl_seconds=5.0)
+    if cached is not None:
+        return cached
     broker = AlpacaBroker(settings)
     try:
         account = broker.get_account()
         positions = broker.get_all_positions()
-        return {
+        return _cache_set(
+            "live:positions",
+            {
             "equity": float(account.get("equity", 0)),
             "cash": float(account.get("cash", 0)),
             "buying_power": float(account.get("buying_power", 0)),
@@ -581,7 +614,8 @@ def live_positions(
                 }
                 for p in positions
             ],
-        }
+            },
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
 
@@ -634,6 +668,7 @@ def place_manual_order(
 
         if not result.success:
             raise HTTPException(status_code=502, detail=result.error or "Order failed")
+        _cache_invalidate("live:")
         return {"success": True, "order_id": result.order_id, "ticker": ticker, "action": action}
     except HTTPException:
         raise
@@ -648,9 +683,13 @@ def get_open_orders(
 ) -> list[dict[str, Any]]:
     """Return all currently open Alpaca orders."""
     from app.broker.alpaca import AlpacaBroker
+    cache_key = f"live:open_orders:{(ticker or '').upper()}"
+    cached = _cache_get(cache_key, ttl_seconds=5.0)
+    if cached is not None:
+        return cached
     broker = AlpacaBroker(settings)
     try:
-        return broker.get_open_orders(ticker=ticker)
+        return _cache_set(cache_key, broker.get_open_orders(ticker=ticker))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
 
@@ -665,6 +704,7 @@ def cancel_order(
     broker = AlpacaBroker(settings)
     try:
         success = broker.cancel_order(order_id)
+        _cache_invalidate("live:open_orders")
         return {"success": success, "order_id": order_id}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
@@ -680,6 +720,7 @@ def cancel_all_orders(
     broker = AlpacaBroker(settings)
     try:
         cancelled = broker.cancel_all_orders(ticker=ticker)
+        _cache_invalidate("live:open_orders")
         return {"success": True, "cancelled": cancelled}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
@@ -695,6 +736,9 @@ def close_position_endpoint(
     broker = AlpacaBroker(settings)
     try:
         result = broker.close_position(ticker.upper())
+        _cache_invalidate("live:positions")
+        _cache_invalidate("live:open_orders")
+        _cache_invalidate("live:portfolio_history")
         return {"success": True, "ticker": ticker.upper(), "result": result}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
@@ -707,10 +751,54 @@ def get_latest_price(
 ) -> dict[str, Any]:
     """Return the latest trade price for a ticker from Alpaca."""
     from app.broker.alpaca import AlpacaBroker
+    cache_key = f"live:latest_price:{ticker.upper()}"
+    cached = _cache_get(cache_key, ttl_seconds=3.0)
+    if cached is not None:
+        return cached
     broker = AlpacaBroker(settings)
     try:
         price = broker.get_latest_price(ticker.upper())
-        return {"ticker": ticker.upper(), "price": price}
+        return _cache_set(cache_key, {"ticker": ticker.upper(), "price": price})
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
+
+
+@router.get("/live/bars")
+def get_live_bars(
+    ticker: str = Query(...),
+    timeframe: str = Query(default="5Min"),
+    limit: int = Query(default=78, ge=10, le=500),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Return recent Alpaca bars for UI charting."""
+    from app.broker.alpaca import AlpacaBroker
+
+    normalized_ticker = ticker.upper()
+    cache_key = f"live:bars:{normalized_ticker}:{timeframe}:{limit}"
+    cached = _cache_get(cache_key, ttl_seconds=10.0)
+    if cached is not None:
+        return cached
+
+    broker = AlpacaBroker(settings)
+    try:
+        bars = broker.get_bars(normalized_ticker, timeframe=timeframe, limit=limit)
+        payload = {
+            "ticker": normalized_ticker,
+            "timeframe": timeframe,
+            "count": len(bars),
+            "bars": [
+                {
+                    "t": bar.get("t"),
+                    "o": float(bar.get("o", 0.0)),
+                    "h": float(bar.get("h", 0.0)),
+                    "l": float(bar.get("l", 0.0)),
+                    "c": float(bar.get("c", 0.0)),
+                    "v": float(bar.get("v", 0.0)),
+                }
+                for bar in bars
+            ],
+        }
+        return _cache_set(cache_key, payload)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
 
@@ -723,14 +811,19 @@ def portfolio_history(
 ) -> dict[str, Any]:
     """Return portfolio equity curve from Alpaca (period: 1D/1W/1M/3M/6M/1A, timeframe: 1D/1H/15Min)."""
     from app.broker.alpaca import AlpacaBroker
+    cache_key = f"live:portfolio_history:{period}:{timeframe}"
+    cached = _cache_get(cache_key, ttl_seconds=15.0)
+    if cached is not None:
+        return cached
     broker = AlpacaBroker(settings)
     try:
-        return broker.get_portfolio_history(period=period, timeframe=timeframe)
+        return _cache_set(cache_key, broker.get_portfolio_history(period=period, timeframe=timeframe))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
 
 
 @router.post("/live/set_enabled")
+@router.put("/live/set_enabled")
 def set_live_enabled(
     body: dict = Body(default={}),
     settings: Settings = Depends(get_app_settings),
@@ -742,6 +835,7 @@ def set_live_enabled(
 
     enabled = bool(body.get("enabled", True))
     settings.live_trading_enabled = enabled
+    _cache_invalidate("live:")
 
     sched = getattr(_main_module, "scheduler", None)
     if sched and sched.running:

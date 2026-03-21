@@ -183,13 +183,22 @@ def startup_event() -> None:
 
     if settings.enable_scheduler:
         scheduler = BackgroundScheduler(timezone="UTC")
-        scheduler.add_job(_scheduled_tick, "interval", seconds=settings.poll_interval_seconds, max_instances=1)
+        scheduler.add_job(
+            _scheduled_tick,
+            "interval",
+            seconds=settings.poll_interval_seconds,
+            max_instances=1,
+            id="poll_tick",
+            replace_existing=True,
+        )
         if settings.enable_health_audit:
             scheduler.add_job(
                 _scheduled_health_audit,
                 "interval",
                 seconds=settings.health_check_interval_seconds,
                 max_instances=1,
+                id="health_audit",
+                replace_existing=True,
             )
         if settings.earnings_calendar_auto_refresh:
             scheduler.add_job(
@@ -197,6 +206,8 @@ def startup_event() -> None:
                 "interval",
                 hours=max(1, int(settings.earnings_calendar_refresh_interval_hours)),
                 max_instances=1,
+                id="earnings_refresh",
+                replace_existing=True,
             )
         if settings.live_trading_enabled:
             # Live trading cycle
@@ -205,6 +216,8 @@ def startup_event() -> None:
                 "interval",
                 seconds=max(60, settings.live_cycle_interval_seconds),
                 max_instances=1,
+                id="live_cycle",
+                replace_existing=True,
             )
             # Bar refresh every 20 minutes during market hours
             scheduler.add_job(
@@ -212,6 +225,8 @@ def startup_event() -> None:
                 "interval",
                 minutes=20,
                 max_instances=1,
+                id="bar_refresh",
+                replace_existing=True,
             )
             logger.info(
                 "[live] 模拟盘已启用 interval=%ss bar_refresh=20min tickers=%s",
@@ -240,4 +255,3 @@ def shutdown_event() -> None:
     if scheduler:
         scheduler.shutdown(wait=False)
         scheduler = None
-

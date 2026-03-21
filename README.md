@@ -61,10 +61,10 @@ IngestionService → NormalizationService → ValidationService
 
 | 路径 | 功能 |
 |------|------|
-| `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻 |
-| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮** |
+| `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot** |
+| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + portfolio curve + ticker K-line** |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开 |
-| `/news` | 新闻流：全文展开、来源/ticker 过滤 |
+| `/news` | 新闻流：全文展开、来源/ticker 过滤、**30s 自动拉新 + 源状态/报错** |
 | `/settings` | 配置信息 |
 | `/signals` | 遗留信号流 |
 | `/events` | 事件流 |
@@ -119,6 +119,7 @@ tests/           137 个 pytest 测试
 | GET | `/api/live/positions` | Alpaca 当前持仓 |
 | GET | `/api/live/open_orders` | Alpaca 挂单 |
 | GET | `/api/live/portfolio_history` | Alpaca 权益曲线 |
+| GET | `/api/live/bars` | Alpaca K 线（供 `/live` SVG chart 使用） |
 
 > ⚠️ **JS 开发注意：**
 > - `market_session` 是字符串，不是对象
@@ -127,6 +128,8 @@ tests/           137 个 pytest 测试
 > - Conviction：`r.portfolio_result.metadata.conviction`
 > - Risk approved：`r.risk_result.metadata.approved`
 > - 执行时间：`r.execution_time_ms`
+> - `/api/news` 现在额外返回 `metadata` 和 `body_preview`
+> - `/api/live/set_enabled` 同时接受 `POST` 和 `PUT`
 
 ---
 

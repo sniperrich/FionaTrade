@@ -23,7 +23,7 @@
         title="{% if live_enabled %}Disable live trading{% else %}Enable live trading (Alpaca paper mode){% endif %}">
         {% if live_enabled %}⏹ Disable Live{% else %}▶ Enable Live{% endif %}
       </button>
-      <button class="btn btn-ghost btn-sm" onclick="triggerCycle()">⚡ Run Cycle</button>
+      <button class="btn btn-ghost btn-sm" onclick="triggerCycle(event)">⚡ Run Cycle</button>
     </div>
   </div>
 </div>
@@ -49,6 +49,61 @@
     <div class="card-title">Open Orders</div>
     <div class="card-value" id="orders-count">—</div>
     <div class="card-sub" id="orders-sub">pending</div>
+  </div>
+</div>
+
+<div class="grid g2 mb16">
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Portfolio Curve</div>
+      <div class="filter-bar" style="margin:0">
+        <select id="portfolio-period" onchange="loadPortfolioHistory()" style="width:110px">
+          <option value="1D">1D</option>
+          <option value="1W">1W</option>
+          <option value="1M" selected>1M</option>
+          <option value="3M">3M</option>
+          <option value="6M">6M</option>
+          <option value="1A">1A</option>
+        </select>
+        <select id="portfolio-timeframe" onchange="loadPortfolioHistory()" style="width:110px">
+          <option value="15Min">15Min</option>
+          <option value="1H">1H</option>
+          <option value="1D" selected>1D</option>
+        </select>
+      </div>
+    </div>
+    <div class="chart-shell">
+      <svg id="portfolio-chart" class="chart-svg" viewBox="0 0 640 220" preserveAspectRatio="none"></svg>
+      <div id="portfolio-chart-empty" class="chart-empty">Loading portfolio history…</div>
+    </div>
+    <div class="chart-meta" id="portfolio-chart-meta">—</div>
+  </div>
+
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Ticker K-Line</div>
+      <div class="filter-bar" style="margin:0">
+        <select id="chart-ticker" onchange="loadTickerChart()" style="width:120px">
+          {% for t in tickers %}
+          <option value="{{ t }}" {% if t == default_chart_ticker %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+          {% if not tickers %}
+          <option value="{{ default_chart_ticker }}" selected>{{ default_chart_ticker }}</option>
+          {% endif %}
+        </select>
+        <select id="chart-timeframe" onchange="loadTickerChart()" style="width:110px">
+          <option value="1Min">1Min</option>
+          <option value="5Min" selected>5Min</option>
+          <option value="15Min">15Min</option>
+          <option value="1H">1H</option>
+        </select>
+      </div>
+    </div>
+    <div class="chart-shell">
+      <svg id="ticker-chart" class="chart-svg" viewBox="0 0 640 220" preserveAspectRatio="none"></svg>
+      <div id="ticker-chart-empty" class="chart-empty">Loading recent bars…</div>
+    </div>
+    <div class="chart-meta" id="ticker-chart-meta">—</div>
   </div>
 </div>
 
@@ -206,6 +261,79 @@ function fmt$(n){return n==null?'—':'$'+Number(n).toLocaleString('en-US',{mini
 function sideBadge(s){return s==='long'?'<span class="badge badge-green">LONG</span>':'<span class="badge badge-red">SHORT</span>';}
 function statusBadge(s){const m={submitted:'badge-blue',filled:'badge-green',error:'badge-red',skipped:'badge-grey',analysis:'badge-purple',no_change:'badge-grey',cancelled:'badge-warn'};return `<span class="badge ${m[s]||'badge-grey'}">${s}</span>`;}
 function actionBadge(a){const m={BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};return `<span class="badge ${m[a]||'badge-grey'}">${a||'—'}</span>`;}
+function safeSlice(v, n=8){return typeof v==='string'?v.slice(0,n):String(v||'').slice(0,n);}
+function ensureSelectOption(selectEl, value){
+  if(!selectEl || !value) return;
+  const upper=value.toUpperCase();
+  const has=[...selectEl.options].some(opt=>opt.value.toUpperCase()===upper);
+  if(!has){
+    const opt=document.createElement('option');
+    opt.value=upper;
+    opt.textContent=upper;
+    selectEl.appendChild(opt);
+  }
+  selectEl.value=upper;
+}
+
+function setChartEmpty(id, message){
+  const empty=document.getElementById(id+'-empty');
+  const svg=document.getElementById(id);
+  if (svg) svg.innerHTML='';
+  if (empty) empty.textContent=message;
+}
+
+function renderLineChart(svgId, values, color='var(--accent)'){
+  const svg=document.getElementById(svgId);
+  const empty=document.getElementById(svgId+'-empty');
+  if(!svg || !values?.length){
+    if(empty) empty.style.display='flex';
+    return;
+  }
+  if(empty) empty.style.display='none';
+  const width=640, height=220, padX=20, padY=18;
+  const min=Math.min(...values), max=Math.max(...values);
+  const span=Math.max(max-min, 1e-6);
+  const points=values.map((v,i)=>{
+    const x=padX + (i/(Math.max(values.length-1,1)))*(width-padX*2);
+    const y=height-padY - ((v-min)/span)*(height-padY*2);
+    return `${x},${y}`;
+  }).join(' ');
+  const lastY=height-padY - ((values[values.length-1]-min)/span)*(height-padY*2);
+  const area=`${padX},${height-padY} ${points} ${width-padX},${height-padY}`;
+  svg.innerHTML=`
+    <polyline fill="rgba(217,119,87,0.10)" stroke="none" points="${area}" />
+    <polyline fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" points="${points}" />
+    <line x1="${padX}" y1="${lastY}" x2="${width-padX}" y2="${lastY}" stroke="rgba(156,152,144,0.25)" stroke-dasharray="4 4" />
+  `;
+}
+
+function renderCandles(svgId, bars){
+  const svg=document.getElementById(svgId);
+  const empty=document.getElementById(svgId+'-empty');
+  if(!svg || !bars?.length){
+    if(empty) empty.style.display='flex';
+    return;
+  }
+  if(empty) empty.style.display='none';
+  const width=640, height=220, padX=16, padY=16;
+  const highs=bars.map(b=>b.h), lows=bars.map(b=>b.l);
+  const min=Math.min(...lows), max=Math.max(...highs);
+  const span=Math.max(max-min, 1e-6);
+  const candleW=Math.max(3, Math.floor((width-padX*2)/bars.length*0.65));
+  const step=(width-padX*2)/bars.length;
+  const y=(v)=>height-padY - ((v-min)/span)*(height-padY*2);
+  const parts=[];
+  bars.forEach((b, idx)=>{
+    const x=padX + idx*step + step/2;
+    const openY=y(b.o), closeY=y(b.c), highY=y(b.h), lowY=y(b.l);
+    const top=Math.min(openY, closeY);
+    const bodyH=Math.max(Math.abs(closeY-openY), 1.5);
+    const color=b.c >= b.o ? '#1A7F5A' : '#C53030';
+    parts.push(`<line x1="${x}" y1="${highY}" x2="${x}" y2="${lowY}" stroke="${color}" stroke-width="1.2" />`);
+    parts.push(`<rect x="${x-candleW/2}" y="${top}" width="${candleW}" height="${bodyH}" fill="${color}" rx="1" />`);
+  });
+  svg.innerHTML=parts.join('');
+}
 
 async function loadPositions(){
   try{
@@ -249,11 +377,11 @@ async function loadOpenOrders(){
       document.getElementById('open-orders-body').innerHTML='<tr><td colspan="10" class="empty-state text-muted">No open orders</td></tr>';
       return;
     }
-    document.getElementById('open-orders-body').innerHTML=orders.map(o=>{
+      document.getElementById('open-orders-body').innerHTML=orders.map(o=>{
       const sub=new Date(o.submitted_at||o.created_at).toLocaleString();
       const sideBadge=o.side==='buy'?'<span class="badge badge-green">BUY</span>':'<span class="badge badge-red">SELL</span>';
       return `<tr>
-        <td class="mono text-xs">${(o.id||'').slice(0,8)}…</td>
+        <td class="mono text-xs">${safeSlice(o.id,8)}…</td>
         <td class="bold">${o.symbol}</td>
         <td>${sideBadge}</td>
         <td><span class="badge badge-grey">${o.type||'market'}</span></td>
@@ -313,6 +441,7 @@ async function loadMarketStatus(){
     if(btn){
       btn.textContent=d.enabled?'⏹ Disable Live':'▶ Enable Live';
       btn.className=d.enabled?'btn btn-ghost btn-sm':'btn btn-primary btn-sm';
+      btn.dataset.enabled=d.enabled?'true':'false';
     }
     document.getElementById('live-enable-badge').innerHTML=d.enabled?
       '<span class="badge badge-accent">Live Enabled</span>':
@@ -322,11 +451,11 @@ async function loadMarketStatus(){
 
 async function toggleLiveTrading(){
   const btn=document.getElementById('toggle-live-btn');
-  const currentlyEnabled=btn.textContent.includes('Disable');
+  const currentlyEnabled=btn.dataset.enabled==='true';
   const enable=!currentlyEnabled;
   btn.disabled=true; btn.textContent='…';
   try{
-    const d=await apiFetch('/api/live/set_enabled',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enable})});
+    const d=await apiFetch('/api/live/set_enabled',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enable}), timeout:10000});
     toast(d.message,'success');
     setTimeout(loadMarketStatus,500);
   } catch(e){ toast('Error: '+e.message,'error'); }
@@ -360,11 +489,11 @@ async function cancelAllOrders(){
   } catch(e){ toast('Error: '+e.message,'error'); }
 }
 
-async function triggerCycle(){
-  const btn=event.target;
+async function triggerCycle(ev){
+  const btn=ev?.target || document.querySelector('button[onclick^="triggerCycle"]');
   btn.disabled=true; btn.textContent='Running…';
   try{
-    const d=await apiFetch('/api/live/cycle', {method:'POST'});
+    const d=await apiFetch('/api/live/cycle', {method:'POST', timeout:12000});
     toast('Cycle done — '+(d.orders_placed||0)+' orders placed','success');
     setTimeout(refreshAll,2000);
   } catch(e){ toast('Error: '+e.message,'error'); }
@@ -399,9 +528,60 @@ async function loadPricePreview(){
 
 document.getElementById('o-ticker').addEventListener('input',()=>{
   clearTimeout(pricePreviewTimer);
+  const chartTicker=document.getElementById('chart-ticker');
+  const value=document.getElementById('o-ticker').value.trim().toUpperCase();
+  if(chartTicker && value) ensureSelectOption(chartTicker, value);
   pricePreviewTimer=setTimeout(loadPricePreview,600);
 });
 document.getElementById('o-qty').addEventListener('input',loadPricePreview);
+
+async function loadPortfolioHistory(){
+  const period=document.getElementById('portfolio-period').value;
+  const timeframe=document.getElementById('portfolio-timeframe').value;
+  try{
+    const d=await apiFetch(`/api/live/portfolio_history?period=${encodeURIComponent(period)}&timeframe=${encodeURIComponent(timeframe)}`, { timeout: 12000 });
+    const equity=d.equity||[];
+    if(!equity.length){
+      setChartEmpty('portfolio-chart','No portfolio history yet');
+      document.getElementById('portfolio-chart-meta').textContent='—';
+      return;
+    }
+    renderLineChart('portfolio-chart', equity);
+    const first=equity[0], last=equity[equity.length-1];
+    const changePct=first?((last-first)/first*100):0;
+    document.getElementById('portfolio-chart-meta').innerHTML=
+      `${equity.length} points · <span style="color:${changePct>=0?'var(--green)':'var(--red)'}">${changePct>=0?'+':''}${changePct.toFixed(2)}%</span>`;
+  } catch(e){
+    setChartEmpty('portfolio-chart',`Portfolio chart unavailable: ${e.message}`);
+    document.getElementById('portfolio-chart-meta').textContent='Broker history unavailable';
+  }
+}
+
+async function loadTickerChart(){
+  const ticker=(document.getElementById('chart-ticker').value||'').trim().toUpperCase();
+  const timeframe=document.getElementById('chart-timeframe').value;
+  if(!ticker){
+    setChartEmpty('ticker-chart','Select a ticker');
+    return;
+  }
+  try{
+    const d=await apiFetch(`/api/live/bars?ticker=${encodeURIComponent(ticker)}&timeframe=${encodeURIComponent(timeframe)}&limit=72`, { timeout: 12000 });
+    const bars=d.bars||[];
+    if(!bars.length){
+      setChartEmpty('ticker-chart',`No recent bars for ${ticker}`);
+      document.getElementById('ticker-chart-meta').textContent='—';
+      return;
+    }
+    renderCandles('ticker-chart', bars);
+    const first=bars[0].o, last=bars[bars.length-1].c;
+    const changePct=first?((last-first)/first*100):0;
+    document.getElementById('ticker-chart-meta').innerHTML=
+      `${ticker} · ${timeframe} · ${bars.length} bars · <span style="color:${changePct>=0?'var(--green)':'var(--red)'}">${changePct>=0?'+':''}${changePct.toFixed(2)}%</span> · Last ${fmt$(last)}`;
+  } catch(e){
+    setChartEmpty('ticker-chart',`K-line unavailable: ${e.message}`);
+    document.getElementById('ticker-chart-meta').textContent='Broker bars unavailable';
+  }
+}
 
 document.getElementById('order-form').addEventListener('submit', async e=>{
   e.preventDefault();
@@ -433,11 +613,13 @@ document.getElementById('order-form').addEventListener('submit', async e=>{
 });
 
 function refreshAll(){
-  loadPositions(); loadOpenOrders(); loadTradeHistory(); loadMarketStatus();
+  loadPositions(); loadOpenOrders(); loadTradeHistory(); loadMarketStatus(); loadPortfolioHistory(); loadTickerChart();
 }
 refreshAll();
 setInterval(loadPositions,15000);
 setInterval(loadOpenOrders,15000);
 setInterval(loadMarketStatus,30000);
+setInterval(loadPortfolioHistory,30000);
+setInterval(loadTickerChart,30000);
 </script>
 {% endblock %}
