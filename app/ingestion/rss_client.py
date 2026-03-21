@@ -56,6 +56,8 @@ class RssClient:
             return "wsj"
         if "ft.com" in host:
             return "ft"
+        if "nytimes" in host:
+            return "nytimes"
         if "cnbc" in host:
             return "cnbc"
         if "marketwatch" in host:

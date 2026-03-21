@@ -176,14 +176,16 @@ class FinnhubNewsClient:
     def fetch_news_sentiment(self, ticker: str) -> dict | None:
         """Fetch aggregated news sentiment scores from Finnhub /news-sentiment.
 
-        Returns a dict with keys:
-            buzz (articlesMentionedInLastWeek, weeklyAverage, buzz score 0-1),
-            sentiment (bearishPercent, bullishPercent, score -1..1),
-            companyNewsScore (0-1 overall score).
+        Returns a dict with keys: bullish_pct, bearish_pct, sentiment_score,
+        buzz_score, weekly_avg_mentions, articles_this_week, company_news_score.
 
-        Returns None if API is unavailable or key not configured.
-        NOTE: This is a live API call — not backtest-safe. Agents should only use
-        this in live/paper mode and skip it when context["as_of"] is set.
+        Returns None if:
+        - API key not configured or Finnhub disabled
+        - HTTP 403 (endpoint requires Finnhub Premium plan)
+        - Any network/parse error
+
+        NOTE: This is a live API call — not backtest-safe. Only called when
+        context["as_of"] is not set (live/paper mode only).
         """
         if not self.settings.enable_finnhub or not self.settings.finnhub_api_key:
             return None

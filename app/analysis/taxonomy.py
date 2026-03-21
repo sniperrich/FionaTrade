@@ -50,6 +50,7 @@ SOURCE_TIER = {
     "bloomberg": 1,
     "wsj": 1,
     "ft": 1,
+    "nytimes": 1,
     "cnbc": 1,
     "marketwatch": 2,
     "yahoo_finance": 2,

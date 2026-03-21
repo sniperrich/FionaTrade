@@ -114,17 +114,17 @@ class Settings(BaseSettings):
     sec_poller_limit: int = 100
     rss_sources: list[str] = Field(
         default_factory=lambda: [
-            # Tier-1 sources (reliable, no login required)
-            "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-            "https://www.cnbc.com/id/15839069/device/rss/rss.html",  # CNBC Markets
+            # CNBC — multiple topic feeds (Tier 1, verified working)
+            "https://www.cnbc.com/id/100003114/device/rss/rss.html",  # General
+            "https://www.cnbc.com/id/15839069/device/rss/rss.html",   # Markets
+            "https://www.cnbc.com/id/20910258/device/rss/rss.html",   # Economy
+            "https://www.cnbc.com/id/19854910/device/rss/rss.html",   # Tech
+            # Other Tier-1 sources (verified working 2026-03)
             "https://www.marketwatch.com/rss/topstories",
-            "https://feeds.reuters.com/reuters/businessNews",
-            "https://feeds.reuters.com/reuters/topNews",
-            "https://apnews.com/hub/financial-markets?format=rss",
-            # Tier-2 sources (good coverage, freely accessible)
+            "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+            "https://www.ft.com/markets?format=rss",
+            # Tier-2 (aggregated, reliable)
             "https://finance.yahoo.com/rss/topstories",
-            "https://www.thestreet.com/rss/public/rss-topstories.xml",
-            "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",  # Dow Jones / WSJ public feed
         ]
     )
     # Enable per-ticker Yahoo Finance RSS headlines during ingestion
