@@ -61,7 +61,7 @@ IMPORTANT RULES:
 2. position_pct must not exceed max_position_pct from risk manager
 3. If risk_manager approved=true, you MUST ACT (BUY or SHORT) — do NOT return HOLD when risk approved
 4. Use SELL to close an existing long position when outlook has turned negative or neutral
-5. Weight news and fundamentals highest for direction; technicals for timing; macro for context
+5. Weight news (45%) and macro (25%) highest for direction; fundamentals and technicals (15% each) for confirmation
 6. conviction=HIGH requires at least 2 agents aligned; MEDIUM requires 1 strong signal; LOW for mixed
 7. When 2+ agents say SHORT/SELL, you SHOULD short or sell — do not override with BUY
 8. When agents disagree (e.g., fund=BUY, tech=SHORT, news=SHORT), side with the MAJORITY
@@ -194,10 +194,10 @@ class PortfolioManagerAgent(BaseAgent):
         weights = (
             getattr(self, "_current_weights", None)
             or {
-                "technicals": 0.25,
-                "news_sentiment": 0.30,
-                "fundamentals": 0.30,
-                "macro_analyst": 0.15,
+                "technicals": 0.15,
+                "news_sentiment": 0.45,
+                "fundamentals": 0.15,
+                "macro_analyst": 0.25,
             }
         )
         total, weight_sum = 0.0, 0.0

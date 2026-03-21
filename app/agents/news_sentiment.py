@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.base import AgentSignal, BaseAgent
 from app.core.logging import get_app_logger
+from app.tools.macro import get_geopolitical_news
 from app.tools.market_data import build_market_context_text
 from app.tools.news import build_news_context_text
 
@@ -27,6 +28,7 @@ News recency labels guide how to weight information:
   ⚪ OLDER     = 7-14 days  → BACKGROUND context only
 
 {news_context}
+{geo_block}
 {sentiment_block}
 Return a JSON object with these exact fields:
 {{
@@ -47,6 +49,15 @@ Guidelines:
 - Multiple 🔴/🟡 articles in same direction → confidence 70+
 - Conflicting signals between BREAKING and OLDER → trust the newer news
 - When in doubt between HOLD and a direction, CHOOSE THE DIRECTION with lower confidence
+
+GEOPOLITICAL EVENTS — how to apply to this ticker:
+- Active war/military conflict → assess supply-chain, energy, sentiment impact on THIS stock
+- New tariffs/trade war → SHORT if this company imports heavily; assess pass-through ability
+- Sanctions/export bans → SHORT if this company's supply chain or markets are directly affected
+- Oil shock (war/OPEC) → SHORT energy-intensive cos; BUY oil majors (XOM/CVX/COP)
+- Chip export controls → SHORT semiconductor companies (NVDA/AMD/INTC/QCOM/AVGO)
+- Ceasefire/deal → relief rally; consider BUY if the company was SHORT on geopolitical risk
+- If the geo event has NO clear direct pathway to this company → treat as NOISE, lower confidence
 """
 
 
@@ -66,6 +77,20 @@ class NewsSentimentAgent(BaseAgent):
             if perf_ctx:
                 combined = f"{combined}\n\n{perf_ctx}"
 
+            # Geopolitical events block (wars, tariffs, sanctions) — affects sector/ticker
+            geo_events = get_geopolitical_news(session, lookback_hours=120, limit=8, as_of=as_of)
+            geo_block = ""
+            if geo_events:
+                lines = ["=== GEOPOLITICAL & POLICY EVENTS (last 5 days) ==="]
+                lines.append("(Assess impact on THIS ticker specifically — see prompt guidelines)")
+                for ev in geo_events[:6]:
+                    pub = ev["published_at"][:10]
+                    snippet = ev["body_snippet"][:180].replace("\n", " ")
+                    lines.append(f"  [{pub}][{ev['source']}] {ev['title']}")
+                    if snippet and snippet.strip() != ev["title"].strip():
+                        lines.append(f"    → {snippet}")
+                geo_block = "\n".join(lines) + "\n"
+
             # Finnhub news-sentiment scores (live mode only — skip when as_of is set)
             sentiment_block = ""
             if not as_of:
@@ -84,6 +109,7 @@ class NewsSentimentAgent(BaseAgent):
             user_prompt = _USER_PROMPT_TEMPLATE.format(
                 ticker=ticker,
                 news_context=combined,
+                geo_block=geo_block,
                 sentiment_block=sentiment_block,
             )
 

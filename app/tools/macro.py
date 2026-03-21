@@ -205,10 +205,15 @@ def get_geopolitical_news(
 
 
 def build_macro_context_text(session: Session, as_of: datetime | None = None) -> str:
-    """Build a compact text block describing current macro conditions for LLM prompts."""
+    """Build a compact text block describing current macro conditions for LLM prompts.
+
+    Geo/geopolitical events are now primarily processed by NewsSentimentAgent.
+    MacroAnalystAgent focuses on FRED indicators + regime classification.
+    A brief geo summary (top 3 items) is still included for regime context.
+    """
     indicators = get_latest_indicators(session, as_of=as_of)
     news = get_macro_news_summary(session, lookback_hours=72, limit=10, as_of=as_of)
-    geo = get_geopolitical_news(session, lookback_hours=120, limit=12, as_of=as_of)
+    geo = get_geopolitical_news(session, lookback_hours=120, limit=5, as_of=as_of)
 
     lines: list[str] = ["=== MACRO INDICATORS (FRED) ==="]
     for sid, data in indicators.items():
@@ -216,14 +221,10 @@ def build_macro_context_text(session: Session, as_of: datetime | None = None) ->
         lines.append(f"  {data['name']}: {val} (as of {data['date']})")
 
     if geo:
-        lines.append("\n=== GEOPOLITICAL & POLICY EVENTS ===")
-        lines.append("(wars, sanctions, tariffs, major policy shifts — direct market-shock drivers)")
-        for item in geo[:8]:
+        lines.append("\n=== TOP GEOPOLITICAL EVENTS (regime context only) ===")
+        for item in geo[:3]:
             pub = item["published_at"][:10]
-            snippet = item["body_snippet"][:200].replace("\n", " ")
             lines.append(f"  [{pub}][{item['source']}] {item['title']}")
-            if snippet and snippet != item["title"]:
-                lines.append(f"    → {snippet}")
 
     if news:
         lines.append("\n=== RECENT MACRO-ECONOMIC NEWS ===")
