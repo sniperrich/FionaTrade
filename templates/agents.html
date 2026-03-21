@@ -1,109 +1,230 @@
 {% extends "base.html" %}
-
 {% block content %}
-<h2>Agent Runs {% if selected_ticker %}— {{ selected_ticker }}{% endif %}</h2>
-
-{% if not agent_mode_enabled %}
-<div style="background:#fff3cd;border:1px solid #ffc107;padding:10px 16px;border-radius:4px;margin-bottom:16px">
-  ⚠️ <strong>Agent mode is disabled.</strong>
-  Set <code>AGENT_MODE_ENABLED=true</code> in your <code>.env</code> to enable autonomous decision-making.
+<div class="page-header">
+  <div class="page-title">AI Agents</div>
+  <div class="page-sub">6-agent LangGraph decision pipeline</div>
 </div>
-{% endif %}
 
-<form method="get" style="margin-bottom:16px">
-  <label>Filter by ticker:
-    <input type="text" name="ticker" value="{{ selected_ticker or '' }}" placeholder="e.g. AAPL" style="width:120px">
-  </label>
-  <button type="submit">Filter</button>
-  {% if selected_ticker %}<a href="/agents">Clear</a>{% endif %}
-</form>
+<!-- LLM + Agent status cards -->
+<div class="grid g3 mb16">
+  <div class="card card-sm">
+    <div class="card-title">LLM Status</div>
+    {% if not agent_mode_enabled %}
+      <span class="badge badge-warn">Agent Mode Disabled</span>
+      <div class="card-sub mt4">Set AGENT_MODE_ENABLED=true</div>
+    {% else %}
+      <div id="llm-status-body">
+        <div class="loading"><div class="spinner"></div></div>
+      </div>
+    {% endif %}
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Market Clock</div>
+    <div id="clock-body"><div class="loading"><div class="spinner"></div></div></div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Agent Weights</div>
+    <div style="font-size:12px;line-height:1.8">
+      <div class="flex-center" style="justify-content:space-between">
+        <span class="text-muted">📰 News Sentiment</span><span class="bold">25%</span>
+      </div>
+      <div class="flex-center" style="justify-content:space-between">
+        <span class="text-muted">📊 Technicals</span><span class="bold">30%</span>
+      </div>
+      <div class="flex-center" style="justify-content:space-between">
+        <span class="text-muted">📈 Fundamentals</span><span class="bold">25%</span>
+      </div>
+      <div class="flex-center" style="justify-content:space-between">
+        <span class="text-muted">🌐 Macro</span><span class="bold">20%</span>
+      </div>
+    </div>
+  </div>
+</div>
 
-{% if runs %}
-<table>
-  <thead>
-    <tr>
-      <th>ID</th>
-      <th>Ticker</th>
-      <th>Action</th>
-      <th>Position %</th>
-      <th>Macro</th>
-      <th>News</th>
-      <th>Fundamentals</th>
-      <th>Technicals</th>
-      <th>Risk</th>
-      <th>Time (ms)</th>
-      <th>Status</th>
-      <th>Created</th>
-    </tr>
-  </thead>
-  <tbody>
-  {% for r in runs %}
-  <tr>
-    <td><a href="#run-{{ r.id }}" onclick="toggleDetail('{{ r.id }}')">{{ r.id }}</a></td>
-    <td><strong>{{ r.ticker }}</strong></td>
-    <td>
-      {% if r.final_action == 'BUY' %}
-        <span style="color:#157347;font-weight:bold">BUY</span>
-      {% elif r.final_action == 'SHORT' %}
-        <span style="color:#b02a37;font-weight:bold">SHORT</span>
-      {% else %}
-        <span style="color:#6c757d">HOLD</span>
-      {% endif %}
-    </td>
-    <td>{{ "%.1f%%"|format((r.final_position_pct or 0) * 100) }}</td>
-    <td>{{ r.macro_output.get('signal','—') if r.macro_output else '—' }} ({{ r.macro_output.get('confidence','?') if r.macro_output else '?' }})</td>
-    <td>{{ r.news_output.get('signal','—') if r.news_output else '—' }} ({{ r.news_output.get('confidence','?') if r.news_output else '?' }})</td>
-    <td>{{ r.fundamentals_output.get('signal','—') if r.fundamentals_output else '—' }} ({{ r.fundamentals_output.get('confidence','?') if r.fundamentals_output else '?' }})</td>
-    <td>{{ r.technicals_output.get('signal','—') if r.technicals_output else '—' }} ({{ r.technicals_output.get('confidence','?') if r.technicals_output else '?' }})</td>
-    <td>{{ r.risk_output.get('metadata',{}).get('risk_level','—') if r.risk_output else '—' }}</td>
-    <td>{{ r.execution_ms or '—' }}</td>
-    <td>
-      {% if r.status == 'FAILED' %}
-        <span style="color:#b02a37">FAILED</span>
-      {% else %}
-        <span style="color:#157347">OK</span>
-      {% endif %}
-    </td>
-    <td>{{ r.created_at.strftime('%m-%d %H:%M') if r.created_at else '—' }}</td>
-  </tr>
-  <tr id="run-{{ r.id }}" style="display:none">
-    <td colspan="12" style="background:#f8f9fa;padding:12px">
-      <strong>Final reasoning:</strong> {{ r.final_reasoning or '—' }}<br><br>
-      {% if r.macro_output and r.macro_output.get('reasoning') %}
-        <strong>Macro:</strong> {{ r.macro_output.reasoning }}<br>
-      {% endif %}
-      {% if r.news_output and r.news_output.get('reasoning') %}
-        <strong>News:</strong> {{ r.news_output.reasoning }}<br>
-      {% endif %}
-      {% if r.fundamentals_output and r.fundamentals_output.get('reasoning') %}
-        <strong>Fundamentals:</strong> {{ r.fundamentals_output.reasoning }}<br>
-      {% endif %}
-      {% if r.technicals_output and r.technicals_output.get('reasoning') %}
-        <strong>Technicals:</strong> {{ r.technicals_output.reasoning }}<br>
-      {% endif %}
-      {% if r.risk_output and r.risk_output.get('reasoning') %}
-        <strong>Risk:</strong> {{ r.risk_output.reasoning }}<br>
-      {% endif %}
-      {% if r.error_message %}
-        <span style="color:#b02a37"><strong>Error:</strong> {{ r.error_message }}</span>
-      {% endif %}
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p>No agent runs found{% if selected_ticker %} for {{ selected_ticker }}{% endif %}.
-  {% if agent_mode_enabled %}
-    Trigger a run via <code>POST /api/agent/run</code> or wait for the next scheduled cycle.
-  {% endif %}
-</p>
-{% endif %}
+<!-- Run agent manually -->
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">Run Agent Pipeline</div>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+    <div class="form-group" style="flex:1;min-width:200px">
+      <label>Tickers (comma-separated)</label>
+      <input type="text" id="run-tickers" placeholder="AAPL,MSFT,NVDA" />
+    </div>
+    <button class="btn btn-primary" onclick="runAgents()">▶ Run Now</button>
+    <div id="run-status" class="text-muted text-sm" style="align-self:center"></div>
+  </div>
+</div>
+
+<!-- Filter -->
+<div class="filter-bar mb8">
+  <select id="ticker-filter" onchange="loadRuns()" style="width:140px">
+    <option value="">All tickers</option>
+    {% for t in tickers %}
+    <option value="{{ t }}" {% if selected_ticker == t %}selected{% endif %}>{{ t }}</option>
+    {% endfor %}
+  </select>
+  <select id="action-filter" onchange="loadRuns()" style="width:120px">
+    <option value="">All actions</option>
+    <option>BUY</option><option>SELL</option><option>SHORT</option><option>HOLD</option>
+  </select>
+  <button class="btn btn-ghost btn-sm" onclick="loadRuns()">↻ Refresh</button>
+</div>
+
+<!-- Runs table -->
+<div class="card">
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>Ticker</th>
+        <th>Action</th>
+        <th>Position</th>
+        <th>Conviction</th>
+        <th>Macro</th>
+        <th>News</th>
+        <th>Fund.</th>
+        <th>Tech.</th>
+        <th>Risk</th>
+        <th>Time (ms)</th>
+        <th>Date</th>
+        <th></th>
+      </tr></thead>
+      <tbody id="runs-body">
+        <tr><td colspan="12" class="empty-state">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
 
 <script>
-function toggleDetail(id) {
-  var row = document.getElementById('run-' + id);
-  if (row) row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+function sigBadge(s){
+  if(!s||s==='NO_SIGNAL') return '<span class="text-muted text-xs">—</span>';
+  const m={BUY:'text-green',SHORT:'text-red',SELL:'text-red',HOLD:'text-muted'};
+  return `<span class="${m[s]||''}" style="font-size:11px;font-weight:700">${s}</span>`;
 }
+function actionBadge(a){const m={BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};return `<span class="badge ${m[a]||'badge-grey'}">${a||'—'}</span>`;}
+function convBadge(c){return c==='HIGH'?'<span class="badge badge-green">HIGH</span>':c==='MEDIUM'?'<span class="badge badge-accent">MED</span>':'<span class="badge badge-grey">'+(c||'?')+'</span>';}
+
+async function loadLLMStatus(){
+  try{
+    const h=await apiFetch('/api/health');
+    const ok=h.llm_configured;
+    document.getElementById('llm-status-body').innerHTML=`
+      <div class="flex-center gap8 mb4">
+        <div class="dot ${ok?'green':'warn'}"></div>
+        <span style="font-weight:600">${ok?'Connected':'Not configured'}</span>
+      </div>
+      <div class="text-muted text-xs mt4">Model: ${h.llm_model||'—'}</div>
+      <div class="text-muted text-xs">Endpoint: ${h.llm_base_url?h.llm_base_url.replace(/\/v\d.*/,''):'—'}</div>
+    `;
+  } catch(e){
+    document.getElementById('llm-status-body').innerHTML='<span class="badge badge-red">Error</span>';
+  }
+}
+
+async function loadClock(){
+  try{
+    const d=await apiFetch('/api/live/status');
+    const msi=d.market_session||{};
+    const open=msi.tradeable;
+    document.getElementById('clock-body').innerHTML=`
+      <div class="flex-center gap8 mb4">
+        <div class="dot ${open?'green pulse':'grey'}"></div>
+        <span style="font-weight:600">${open?'Open':'Closed'}</span>
+        <span class="badge badge-grey text-xs">${msi.label||''}</span>
+      </div>
+      <div class="text-muted text-xs">${msi.et_time_str||''}</div>
+    `;
+  } catch(e){}
+}
+
+async function loadRuns(){
+  const ticker=document.getElementById('ticker-filter').value;
+  const action=document.getElementById('action-filter').value;
+  let url='/api/agent/runs?limit=50';
+  if(ticker) url+='&ticker='+ticker;
+  try{
+    let runs=await apiFetch(url);
+    if(action) runs=runs.filter(r=>r.final_action===action);
+    if(!runs.length){
+      document.getElementById('runs-body').innerHTML='<tr><td colspan="12" class="empty-state text-muted">No agent runs yet</td></tr>';
+      return;
+    }
+    document.getElementById('runs-body').innerHTML=runs.map(r=>{
+      const rid='ar-'+r.id;
+      const portfolio=r.portfolio_output||{};
+      const risk=r.risk_output||{};
+      const ts=r.created_at?new Date(r.created_at).toLocaleString():'—';
+      return `<tr onclick="document.getElementById('${rid}').classList.toggle('open')" style="cursor:pointer">
+        <td class="bold">${r.ticker}</td>
+        <td>${actionBadge(r.final_action)}</td>
+        <td class="num">${r.final_position_pct!=null?(r.final_position_pct*100).toFixed(1)+'%':'—'}</td>
+        <td>${convBadge(portfolio.conviction)}</td>
+        <td>${sigBadge(r.macro_output?.signal)}</td>
+        <td>${sigBadge(r.news_output?.signal)}</td>
+        <td>${sigBadge(r.fundamentals_output?.signal)}</td>
+        <td>${sigBadge(r.technicals_output?.signal)}</td>
+        <td>${risk.approved?'<span class="text-green bold">✓</span>':'<span class="text-red bold">✗</span>'}</td>
+        <td class="num text-muted text-xs">${r.execution_ms||'—'}</td>
+        <td class="text-muted text-xs nowrap">${ts}</td>
+        <td><span class="expand-btn text-xs">▼ reasoning</span></td>
+      </tr>
+      <tr class="expand-row"><td colspan="12"><div class="expand-content" id="${rid}">
+        <div class="grid g2 gap12" style="font-size:12.5px">
+          <div>
+            <div class="bold mb4">📰 News Sentiment</div>
+            <div class="text-muted">${r.news_output?.reasoning||'—'}</div>
+          </div>
+          <div>
+            <div class="bold mb4">🌐 Macro Analysis</div>
+            <div class="text-muted">${r.macro_output?.reasoning||'—'}</div>
+          </div>
+          <div>
+            <div class="bold mb4">📊 Technicals</div>
+            <div class="text-muted">${r.technicals_output?.reasoning||'—'}</div>
+          </div>
+          <div>
+            <div class="bold mb4">📈 Fundamentals</div>
+            <div class="text-muted">${r.fundamentals_output?.reasoning||'—'}</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+        <div class="bold mb4">⚖️ Risk Manager</div>
+        <div class="text-muted" style="font-size:12.5px">${r.risk_output?.reasoning||'—'}</div>
+        <div class="divider"></div>
+        <div class="bold mb4">💼 Portfolio Manager Decision</div>
+        <div style="font-size:12.5px">${r.final_reasoning||'—'}</div>
+        ${r.error_message?`<div class="text-red mt8 text-sm">Error: ${r.error_message}</div>`:''}
+      </div></td></tr>`;
+    }).join('');
+  } catch(e){ document.getElementById('runs-body').innerHTML=`<tr><td colspan="12" class="empty-state text-red">Error loading runs</td></tr>`; }
+}
+
+async function runAgents(){
+  const raw=document.getElementById('run-tickers').value.trim();
+  const tickers=raw?raw.split(',').map(t=>t.trim().toUpperCase()).filter(Boolean):[];
+  if(!tickers.length){ toast('Enter at least one ticker','warn'); return; }
+  document.getElementById('run-status').textContent='Running…';
+  try{
+    const d=await apiFetch('/api/agent/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tickers})});
+    toast('Agent run complete for: '+tickers.join(', '),'success');
+    document.getElementById('run-status').textContent='Done!';
+    setTimeout(loadRuns,1000);
+  } catch(e){ toast('Error: '+e.message,'error'); document.getElementById('run-status').textContent=''; }
+}
+
+// ── Get list of unique tickers for filter ────────────────────────────────
+async function populateTickerFilter(){
+  try{
+    const runs=await apiFetch('/api/agent/runs?limit=200');
+    const tickers=[...new Set(runs.map(r=>r.ticker))].sort();
+    const sel=document.getElementById('ticker-filter');
+    const cur=sel.value;
+    sel.innerHTML='<option value="">All tickers</option>'+tickers.map(t=>`<option${t===cur?' selected':''}>${t}</option>`).join('');
+  } catch(e){}
+}
+
+loadLLMStatus(); loadClock(); loadRuns(); populateTickerFilter();
+setInterval(loadClock,30000);
 </script>
 {% endblock %}

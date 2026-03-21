@@ -1,43 +1,51 @@
 {% extends "base.html" %}
-
 {% block content %}
-<h2>Event Stream</h2>
-<table>
-  <thead>
-  <tr>
-    <th>ID</th>
-    <th>Type</th>
-    <th>Tickers</th>
-    <th>Confidence</th>
-    <th>Status</th>
-    <th>Event Time</th>
-    <th>Evidence</th>
-  </tr>
-  </thead>
-  <tbody>
-  {% for e in events %}
-  <tr>
-    <td class="mono">{{ e.id }}</td>
-    <td>{{ e.event_type }}</td>
-    <td>{{ e.tickers | join(",") }}</td>
-    <td>{{ e.confidence }}</td>
-    <td>
-      {% if e.validation_status == "VALID" %}
-      <span class="tag valid">VALID</span>
-      {% elif e.validation_status == "WATCH" %}
-      <span class="tag watch">WATCH</span>
-      {% else %}
-      <span class="tag rejected">REJECTED</span>
-      {% endif %}
-    </td>
-    <td>{{ e.event_time }}</td>
-    <td>
-      {% for ev in evidence_map[e.id] %}
-      <div><a href="{{ ev.url }}" target="_blank">{{ ev.source }}</a> <span class="muted">(T{{ ev.source_tier }})</span></div>
-      {% endfor %}
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+<div class="page-header">
+  <div class="page-title">Event Stream</div>
+  <div class="page-sub">Normalized events from ingestion pipeline</div>
+</div>
+
+<div class="card">
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Tickers</th>
+          <th>Confidence</th>
+          <th>Validation</th>
+          <th>Time</th>
+          <th>Sources</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+        <tr>
+          <td class="text-sm mono">{{ e.event_type }}</td>
+          <td>
+            {% for t in e.tickers %}
+              <span class="badge badge-grey">{{ t }}</span>
+            {% endfor %}
+          </td>
+          <td>{{ e.confidence }}</td>
+          <td>
+            {% if e.validation_status == 'VALID' %}<span class="badge badge-green">VALID</span>
+            {% elif e.validation_status == 'WATCH' %}<span class="badge badge-yellow">WATCH</span>
+            {% else %}<span class="badge badge-red">{{ e.validation_status }}</span>{% endif %}
+          </td>
+          <td class="text-muted text-sm">{{ e.event_time }}</td>
+          <td class="text-sm">
+            {% for ev in evidence_map[e.id] %}
+              <div><a href="{{ ev.url }}" target="_blank" style="color:var(--accent)">{{ ev.source }}</a>
+              <span class="text-muted">(T{{ ev.source_tier }})</span></div>
+            {% endfor %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="text-muted" style="text-align:center;padding:24px">No events found</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
 {% endblock %}

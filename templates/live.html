@@ -1,169 +1,415 @@
 {% extends "base.html" %}
-
 {% block content %}
-<h2>Live Trading
-  {% if live_enabled %}
-    <span style="background:#2e7d32;color:#fff;font-size:0.7em;padding:2px 10px;border-radius:12px;vertical-align:middle;margin-left:8px">● ACTIVE</span>
-  {% else %}
-    <span style="background:#777;color:#fff;font-size:0.7em;padding:2px 10px;border-radius:12px;vertical-align:middle;margin-left:8px">DISABLED</span>
-  {% endif %}
-</h2>
-
-{# ── Market status bar ────────────────────────────────────────────────── #}
-<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px">
-  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:220px">
-    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Market Session</div>
-    {% if market_session.tradeable %}
-      <div style="font-size:1.3em;font-weight:700;color:var(--ok)">● {{ market_session.label | replace('_', ' ') | upper }}</div>
-    {% elif market_session.label == 'pre_market' %}
-      <div style="font-size:1.3em;font-weight:700;color:var(--warn)">◐ PRE-MARKET</div>
-    {% elif market_session.label == 'after_hours' %}
-      <div style="font-size:1.3em;font-weight:700;color:var(--warn)">◑ AFTER-HOURS</div>
-    {% else %}
-      <div style="font-size:1.3em;font-weight:700;color:var(--muted)">○ CLOSED</div>
-    {% endif %}
-    <div style="font-size:0.85em;color:var(--muted);margin-top:4px">{{ market_session.et_time_str }}</div>
-  </div>
-
-  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:180px">
-    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Cycle Interval</div>
-    <div style="font-size:1.3em;font-weight:700">{{ (settings.live_cycle_interval_seconds // 60) if settings else '5' }} min</div>
-  </div>
-
-  {% if market_session.min_until_open is not none %}
-  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:180px">
-    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Opens In</div>
-    <div style="font-size:1.3em;font-weight:700">{{ market_session.min_until_open }} min</div>
-  </div>
-  {% elif market_session.min_until_close is not none %}
-  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:180px">
-    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Closes In</div>
-    <div style="font-size:1.3em;font-weight:700;color:var(--warn)">{{ market_session.min_until_close }} min</div>
-  </div>
-  {% endif %}
-
-  <div style="background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 20px;min-width:220px">
-    <div style="font-size:0.75em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Trading Tickers</div>
-    <div style="font-size:0.95em;font-weight:600;word-break:break-word">
-      {% if tickers %}{{ tickers | join(', ') }}{% else %}<span style="color:var(--muted)">none configured</span>{% endif %}
+<div class="page-header">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
+    <div>
+      <div class="page-title">Live Trading</div>
+      <div class="page-sub">
+        {% if live_enabled %}
+          <span class="badge badge-accent">Live Enabled</span>
+        {% else %}
+          <span class="badge badge-grey">Live Disabled</span>
+        {% endif %}
+        &nbsp;<span id="market-status-badge"></span>
+        &nbsp;<span class="text-muted text-sm" id="live-et-time"></span>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn btn-ghost btn-sm" onclick="refreshAll()">↻ Refresh</button>
+      <button class="btn btn-primary btn-sm" onclick="triggerCycle()">▶ Run Cycle</button>
     </div>
   </div>
 </div>
 
-{# ── Disabled banner ──────────────────────────────────────────────────── #}
-{% if not live_enabled %}
-<div style="background:#fff3cd;border:1px solid #ffc107;padding:12px 18px;border-radius:4px;margin-bottom:20px">
-  ⚠️ <strong>Live trading is disabled.</strong>
-  Set <code>LIVE_TRADING_ENABLED=true</code> and configure <code>LIVE_TRADING_TICKERS</code> in your <code>.env</code>.
+<!-- Portfolio row -->
+<div class="grid g4 mb16">
+  <div class="card card-sm">
+    <div class="card-title">Equity</div>
+    <div class="card-value" id="eq-val">—</div>
+    <div class="card-sub" id="eq-sub">—</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Cash</div>
+    <div class="card-value" id="cash-val">—</div>
+    <div class="card-sub" id="cash-sub">Buying power</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Unrealized P&L</div>
+    <div class="card-value" id="upnl-val">—</div>
+    <div class="card-sub" id="upnl-sub">—</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Open Orders</div>
+    <div class="card-value" id="orders-count">—</div>
+    <div class="card-sub" id="orders-sub">pending</div>
+  </div>
 </div>
-{% endif %}
 
-{# ── Quick actions ────────────────────────────────────────────────────── #}
-<div style="margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap">
-  <form method="post" action="/api/live/cycle" onsubmit="this.querySelector('button').disabled=true">
-    <button type="submit" style="background:var(--accent);color:#fff;border:none;padding:8px 18px;border-radius:4px;cursor:pointer">
-      ▶ Trigger Cycle Now
-    </button>
-  </form>
-  <a href="/api/live/positions" target="_blank"
-     style="background:var(--panel);border:1px solid var(--line);padding:8px 18px;border-radius:4px;text-decoration:none;color:var(--ink)">
-    📊 View Alpaca Positions
-  </a>
-  <a href="/api/live/status" target="_blank"
-     style="background:var(--panel);border:1px solid var(--line);padding:8px 18px;border-radius:4px;text-decoration:none;color:var(--ink)">
-    ⚙ API Status
-  </a>
+<div class="grid g2 mb16" style="grid-template-columns:1fr 400px">
+  <!-- Positions table -->
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Positions</div>
+      <span class="text-muted text-sm" id="pos-updated">—</span>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Ticker</th><th>Side</th><th>Qty</th>
+          <th class="num">Avg Cost</th><th class="num">Mkt Value</th>
+          <th class="num">Unrealized P&L</th><th></th>
+        </tr></thead>
+        <tbody id="positions-body">
+          <tr><td colspan="7" class="empty-state">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Order form -->
+  <div class="card">
+    <div class="card-title">Place Order</div>
+    <form id="order-form" autocomplete="off">
+      <div class="form-group mb8">
+        <label>Ticker</label>
+        <input type="text" id="o-ticker" placeholder="AAPL" maxlength="8" style="text-transform:uppercase" required />
+      </div>
+      <div class="form-group mb8">
+        <label>Action</label>
+        <div class="seg-group">
+          <input type="radio" name="action" id="o-buy" value="BUY" checked>
+          <label for="o-buy" style="color:var(--green)">BUY</label>
+          <input type="radio" name="action" id="o-sell" value="SELL">
+          <label for="o-sell" style="color:var(--red)">SELL</label>
+          <input type="radio" name="action" id="o-short" value="SHORT">
+          <label for="o-short">SHORT</label>
+          <input type="radio" name="action" id="o-cover" value="COVER">
+          <label for="o-cover">COVER</label>
+        </div>
+      </div>
+      <div class="form-row mb8">
+        <div class="form-group">
+          <label>Order Type</label>
+          <select id="o-type" onchange="onTypeChange()">
+            <option value="market">Market</option>
+            <option value="limit">Limit</option>
+            <option value="stop">Stop</option>
+            <option value="bracket">Bracket (TP+SL)</option>
+            <option value="notional">Notional ($)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label id="qty-label">Quantity (shares)</label>
+          <input type="number" id="o-qty" placeholder="10" min="1" step="1" />
+        </div>
+      </div>
+      <div id="price-fields" style="display:none">
+        <div class="form-row mb8">
+          <div class="form-group" id="limit-field" style="display:none">
+            <label>Limit Price</label>
+            <input type="number" id="o-limit" placeholder="0.00" step="0.01" />
+          </div>
+          <div class="form-group" id="stop-field" style="display:none">
+            <label>Stop Price</label>
+            <input type="number" id="o-stop" placeholder="0.00" step="0.01" />
+          </div>
+        </div>
+        <div class="form-row mb8" id="bracket-fields" style="display:none">
+          <div class="form-group">
+            <label>Take-Profit Price</label>
+            <input type="number" id="o-tp" placeholder="0.00" step="0.01" />
+          </div>
+          <div class="form-group">
+            <label>Stop-Loss Price</label>
+            <input type="number" id="o-sl" placeholder="0.00" step="0.01" />
+          </div>
+        </div>
+      </div>
+      <div class="form-group mb12">
+        <label>Time in Force</label>
+        <select id="o-tif">
+          <option value="day">Day</option>
+          <option value="gtc">GTC</option>
+          <option value="ioc">IOC</option>
+        </select>
+      </div>
+      <!-- Price preview -->
+      <div id="price-preview" style="background:var(--surface2);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:12px;font-size:12.5px;display:none">
+        <div class="flex-center gap8">
+          <span class="text-muted">Last price:</span>
+          <span id="preview-price" class="bold">—</span>
+          <span class="text-muted" style="margin-left:auto">Est. value:</span>
+          <span id="preview-value" class="bold">—</span>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%">Submit Order</button>
+    </form>
+  </div>
 </div>
 
-{# ── Trade filter ─────────────────────────────────────────────────────── #}
-<form method="get" style="margin-bottom:16px">
-  <label>Filter by ticker:
-    <input type="text" name="ticker" value="{{ selected_ticker or '' }}" placeholder="e.g. AAPL"
-           style="width:120px;padding:4px 8px;border:1px solid var(--line);border-radius:4px">
-  </label>
-  <button type="submit" style="padding:4px 12px;border:1px solid var(--line);border-radius:4px;background:var(--panel);cursor:pointer">Filter</button>
-  {% if selected_ticker %}<a href="/live" style="margin-left:8px">Clear</a>{% endif %}
-</form>
-
-{# ── Trade log ────────────────────────────────────────────────────────── #}
-{% if trades %}
-<table>
-  <thead>
-    <tr>
-      <th>ID</th>
-      <th>Cycle</th>
-      <th>Ticker</th>
-      <th>Action</th>
-      <th>Qty</th>
-      <th>Target %</th>
-      <th>Status</th>
-      <th>Order ID</th>
-      <th>Session</th>
-      <th>ET Time</th>
-      <th>Reasoning</th>
-    </tr>
-  </thead>
-  <tbody>
-  {% for t in trades %}
-    <tr>
-      <td>{{ t.id }}</td>
-      <td style="font-family:monospace;font-size:0.8em">{{ t.cycle_id or '—' }}</td>
-      <td><strong>{{ t.ticker }}</strong></td>
-      <td>
-        {% if t.action == 'BUY' %}
-          <span style="color:var(--ok);font-weight:700">▲ BUY</span>
-        {% elif t.action == 'SHORT' %}
-          <span style="color:var(--bad);font-weight:700">▼ SHORT</span>
-        {% elif t.action == 'SELL' %}
-          <span style="color:var(--warn);font-weight:700">◀ SELL</span>
-        {% elif t.action == 'COVER' %}
-          <span style="color:var(--warn);font-weight:700">▶ COVER</span>
-        {% else %}
-          <span style="color:var(--muted)">— HOLD</span>
-        {% endif %}
-      </td>
-      <td>{{ t.quantity | int if t.quantity else '—' }}</td>
-      <td>{{ "%.1f"|format(t.target_pct * 100) }}%</td>
-      <td>
-        {% if t.status == 'submitted' %}
-          <span style="color:var(--accent)">⏳ submitted</span>
-        {% elif t.status == 'filled' %}
-          <span style="color:var(--ok)">✓ filled</span>
-        {% elif t.status == 'skipped' or t.status == 'no_change' %}
-          <span style="color:var(--muted)">— {{ t.status }}</span>
-        {% elif t.status == 'error' %}
-          <span style="color:var(--bad)">✗ error</span>
-        {% else %}
-          {{ t.status }}
-        {% endif %}
-      </td>
-      <td style="font-family:monospace;font-size:0.78em">
-        {% if t.order_id %}<a href="https://app.alpaca.markets/paper/orders" target="_blank" style="color:var(--accent)">{{ t.order_id[:8] }}…</a>{% else %}—{% endif %}
-      </td>
-      <td style="font-size:0.8em">{{ t.market_session | replace('_', ' ') }}</td>
-      <td style="font-size:0.8em;white-space:nowrap">{{ t.et_time }}</td>
-      <td style="font-size:0.8em;max-width:300px;word-break:break-word">
-        {% if t.error %}
-          <span style="color:var(--bad)">⚠ {{ t.error }}</span>
-        {% else %}
-          {{ t.reasoning[:120] }}{% if t.reasoning|length > 120 %}…{% endif %}
-        {% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<div style="color:var(--muted);padding:24px 0">
-  No live trades yet.
-  {% if live_enabled %}
-    The cycle runs every {{ (5) }} minutes during US market hours (Mon–Fri 09:30–16:00 ET).
-  {% endif %}
+<!-- Open orders -->
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">Open Orders</div>
+    <button class="btn btn-ghost btn-sm" onclick="cancelAllOrders()">✕ Cancel All</button>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>ID</th><th>Ticker</th><th>Side</th><th>Type</th>
+        <th class="num">Qty</th><th class="num">Limit</th><th class="num">Stop</th>
+        <th>Status</th><th>Submitted</th><th></th>
+      </tr></thead>
+      <tbody id="open-orders-body">
+        <tr><td colspan="10" class="empty-state">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
 </div>
-{% endif %}
 
-{# ── Auto-refresh every 60s ───────────────────────────────────────────── #}
+<!-- Trade history -->
+<div class="card">
+  <div class="section-header mb8">
+    <div class="section-title">Agent Trade History</div>
+    <div class="filter-bar" style="margin:0">
+      <select id="hist-ticker-filter" onchange="loadTradeHistory()" style="width:120px">
+        <option value="">All tickers</option>
+        {% for t in tickers %}
+        <option value="{{ t }}" {% if selected_ticker == t %}selected{% endif %}>{{ t }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>Cycle</th><th>Ticker</th><th>Action</th>
+        <th class="num">Qty</th><th class="num">Target %</th>
+        <th>Status</th><th>Session</th><th>Time (ET)</th><th></th>
+      </tr></thead>
+      <tbody id="trade-history-body">
+        <tr><td colspan="9" class="empty-state">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <script>
-  setTimeout(() => location.reload(), 60000);
+function fmt$(n){return n==null?'—':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
+function sideBadge(s){return s==='long'?'<span class="badge badge-green">LONG</span>':'<span class="badge badge-red">SHORT</span>';}
+function statusBadge(s){const m={submitted:'badge-blue',filled:'badge-green',error:'badge-red',skipped:'badge-grey',analysis:'badge-purple',no_change:'badge-grey',cancelled:'badge-warn'};return `<span class="badge ${m[s]||'badge-grey'}">${s}</span>`;}
+function actionBadge(a){const m={BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};return `<span class="badge ${m[a]||'badge-grey'}">${a||'—'}</span>`;}
+
+async function loadPositions(){
+  try{
+    const d = await apiFetch('/api/live/positions');
+    document.getElementById('eq-val').textContent=fmt$(d.equity);
+    document.getElementById('eq-sub').textContent='Equity';
+    document.getElementById('cash-val').textContent=fmt$(d.cash);
+    document.getElementById('cash-sub').textContent='BP: '+fmt$(d.buying_power);
+    const upnl=d.positions.reduce((s,p)=>s+p.unrealized_pnl,0);
+    const el=document.getElementById('upnl-val');
+    el.textContent=fmt$(upnl);
+    el.style.color=upnl>=0?'var(--green)':'var(--red)';
+    document.getElementById('pos-updated').textContent='Updated '+new Date().toLocaleTimeString();
+    if(!d.positions.length){
+      document.getElementById('positions-body').innerHTML='<tr><td colspan="7" class="empty-state text-muted">No open positions</td></tr>';
+    } else {
+      document.getElementById('positions-body').innerHTML=d.positions.map(p=>{
+        const pnlStyle=p.unrealized_pnl>=0?'color:var(--green)':'color:var(--red)';
+        return `<tr>
+          <td class="bold">${p.ticker}</td>
+          <td>${sideBadge(p.side)}</td>
+          <td class="num">${Math.abs(p.quantity)}</td>
+          <td class="num">${fmt$(p.avg_cost)}</td>
+          <td class="num">${fmt$(p.market_value)}</td>
+          <td class="num" style="${pnlStyle}">${fmt$(p.unrealized_pnl)}</td>
+          <td><button class="btn btn-ghost btn-xs" onclick="closePosition('${p.ticker}')">Close</button></td>
+        </tr>`;
+      }).join('');
+    }
+  } catch(e){
+    document.getElementById('positions-body').innerHTML=`<tr><td colspan="7" class="empty-state text-red">Broker unavailable: ${e.message}</td></tr>`;
+  }
+}
+
+async function loadOpenOrders(){
+  try{
+    const orders=await apiFetch('/api/live/open_orders');
+    document.getElementById('orders-count').textContent=orders.length;
+    document.getElementById('orders-sub').textContent=orders.length===1?'1 open order':(orders.length+' open orders');
+    if(!orders.length){
+      document.getElementById('open-orders-body').innerHTML='<tr><td colspan="10" class="empty-state text-muted">No open orders</td></tr>';
+      return;
+    }
+    document.getElementById('open-orders-body').innerHTML=orders.map(o=>{
+      const sub=new Date(o.submitted_at||o.created_at).toLocaleString();
+      const sideBadge=o.side==='buy'?'<span class="badge badge-green">BUY</span>':'<span class="badge badge-red">SELL</span>';
+      return `<tr>
+        <td class="mono text-xs">${(o.id||'').slice(0,8)}…</td>
+        <td class="bold">${o.symbol}</td>
+        <td>${sideBadge}</td>
+        <td><span class="badge badge-grey">${o.type||'market'}</span></td>
+        <td class="num">${o.qty||o.notional||'—'}</td>
+        <td class="num">${o.limit_price?fmt$(o.limit_price):'—'}</td>
+        <td class="num">${o.stop_price?fmt$(o.stop_price):'—'}</td>
+        <td>${statusBadge(o.status)}</td>
+        <td class="text-muted text-xs">${sub}</td>
+        <td><button class="btn btn-ghost btn-xs" onclick="cancelOrder('${o.id}','${o.symbol}')">✕</button></td>
+      </tr>`;
+    }).join('');
+  } catch(e){
+    document.getElementById('open-orders-body').innerHTML=`<tr><td colspan="10" class="empty-state text-red">Error: ${e.message}</td></tr>`;
+  }
+}
+
+async function loadTradeHistory(){
+  const ticker=document.getElementById('hist-ticker-filter').value;
+  const url='/api/live/trades?limit=50'+(ticker?'&ticker='+ticker:'');
+  try{
+    const trades=await apiFetch(url);
+    if(!trades.length){
+      document.getElementById('trade-history-body').innerHTML='<tr><td colspan="9" class="empty-state text-muted">No trade history yet</td></tr>';
+      return;
+    }
+    document.getElementById('trade-history-body').innerHTML=trades.map(t=>{
+      const rid='r-'+t.id;
+      return `<tr onclick="document.getElementById('${rid}').classList.toggle('open')" style="cursor:pointer">
+        <td class="mono text-xs">${t.cycle_id}</td>
+        <td class="bold">${t.ticker}</td>
+        <td>${actionBadge(t.action)}</td>
+        <td class="num">${t.quantity||'—'}</td>
+        <td class="num">${t.target_pct!=null?(t.target_pct*100).toFixed(1)+'%':'—'}</td>
+        <td>${statusBadge(t.status)}</td>
+        <td><span class="badge badge-grey text-xs">${t.market_session||'—'}</span></td>
+        <td class="text-muted text-xs">${t.et_time||'—'}</td>
+        <td><span class="expand-btn">▼</span></td>
+      </tr>
+      <tr class="expand-row"><td colspan="9"><div class="expand-content" id="${rid}">
+        <div class="text-muted text-sm mb4">Reasoning</div>
+        <div>${t.reasoning||'(none)'}</div>
+        ${t.error?`<div class="text-red mt8">Error: ${t.error}</div>`:''}
+        ${t.order_id?`<div class="text-muted mt4 text-xs">Order ID: ${t.order_id}</div>`:''}
+      </div></td></tr>`;
+    }).join('');
+  } catch(e){}
+}
+
+async function loadMarketStatus(){
+  try{
+    const d=await apiFetch('/api/live/status');
+    const msi=d.market_session||{};
+    const open=msi.tradeable;
+    document.getElementById('market-status-badge').innerHTML=open?'<span class="badge badge-green">Market Open</span>':'<span class="badge badge-grey">'+(msi.label||'closed')+'</span>';
+    document.getElementById('live-et-time').textContent=msi.et_time_str||'';
+  } catch(e){}
+}
+
+async function closePosition(ticker){
+  if(!confirm('Close entire '+ticker+' position?')) return;
+  try{
+    await apiFetch('/api/live/close_position?ticker='+ticker, {method:'POST'});
+    toast('Position closed: '+ticker,'success');
+    setTimeout(refreshAll,2000);
+  } catch(e){ toast('Error: '+e.message,'error'); }
+}
+
+async function cancelOrder(orderId,symbol){
+  if(!confirm('Cancel order for '+symbol+'?')) return;
+  try{
+    await apiFetch('/api/live/cancel_order/'+orderId, {method:'POST'});
+    toast('Order cancelled','success');
+    setTimeout(loadOpenOrders,1500);
+  } catch(e){ toast('Error: '+e.message,'error'); }
+}
+
+async function cancelAllOrders(){
+  if(!confirm('Cancel ALL open orders?')) return;
+  try{
+    const d=await apiFetch('/api/live/cancel_all_orders', {method:'POST'});
+    toast('Cancelled '+(d.cancelled||0)+' orders','success');
+    setTimeout(loadOpenOrders,1500);
+  } catch(e){ toast('Error: '+e.message,'error'); }
+}
+
+async function triggerCycle(){
+  const btn=event.target;
+  btn.disabled=true; btn.textContent='Running…';
+  try{
+    const d=await apiFetch('/api/live/cycle', {method:'POST'});
+    toast('Cycle done — '+(d.orders_placed||0)+' orders placed','success');
+    setTimeout(refreshAll,2000);
+  } catch(e){ toast('Error: '+e.message,'error'); }
+  finally{ btn.disabled=false; btn.textContent='▶ Run Cycle'; }
+}
+
+function onTypeChange(){
+  const t=document.getElementById('o-type').value;
+  document.getElementById('price-fields').style.display=t==='market'||t==='notional'?'none':'block';
+  document.getElementById('limit-field').style.display=(t==='limit'||t==='bracket')?'block':'none';
+  document.getElementById('stop-field').style.display=t==='stop'?'block':'none';
+  document.getElementById('bracket-fields').style.display=t==='bracket'?'flex':'none';
+  const qtyLabel=document.getElementById('qty-label');
+  qtyLabel.textContent=t==='notional'?'Dollar Amount ($)':'Quantity (shares)';
+  if(t!=='market') loadPricePreview();
+}
+
+let pricePreviewTimer=null;
+async function loadPricePreview(){
+  const ticker=document.getElementById('o-ticker').value.trim().toUpperCase();
+  if(!ticker) return;
+  const prev=document.getElementById('price-preview');
+  try{
+    const d=await apiFetch('/api/live/latest_price?ticker='+ticker);
+    const price=d.price;
+    document.getElementById('preview-price').textContent=price?'$'+price.toFixed(2):'—';
+    const qty=parseFloat(document.getElementById('o-qty').value)||0;
+    document.getElementById('preview-value').textContent=price&&qty?'$'+(price*qty).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
+    prev.style.display='block';
+  } catch(e){ prev.style.display='none'; }
+}
+
+document.getElementById('o-ticker').addEventListener('input',()=>{
+  clearTimeout(pricePreviewTimer);
+  pricePreviewTimer=setTimeout(loadPricePreview,600);
+});
+document.getElementById('o-qty').addEventListener('input',loadPricePreview);
+
+document.getElementById('order-form').addEventListener('submit', async e=>{
+  e.preventDefault();
+  const ticker=document.getElementById('o-ticker').value.trim().toUpperCase();
+  const action=document.querySelector('input[name=action]:checked').value;
+  const orderType=document.getElementById('o-type').value;
+  const qty=parseFloat(document.getElementById('o-qty').value)||0;
+  const tif=document.getElementById('o-tif').value;
+  if(!ticker||!qty){ toast('Ticker and quantity are required','warn'); return; }
+
+  const body={ticker, action, quantity: qty, order_type: orderType, time_in_force: tif};
+  if(orderType==='limit') body.limit_price=parseFloat(document.getElementById('o-limit').value)||null;
+  if(orderType==='stop') body.stop_price=parseFloat(document.getElementById('o-stop').value)||null;
+  if(orderType==='bracket'){
+    body.take_profit_price=parseFloat(document.getElementById('o-tp').value)||null;
+    body.stop_loss_price=parseFloat(document.getElementById('o-sl').value)||null;
+  }
+  if(orderType==='notional'){ body.notional=qty; delete body.quantity; }
+
+  const btn=e.target.querySelector('[type=submit]');
+  btn.disabled=true; btn.textContent='Submitting…';
+  try{
+    const r=await apiFetch('/api/live/order', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    toast(`Order submitted: ${action} ${ticker} (${r.order_id?.slice(0,8)||'?'}…)`,'success');
+    document.getElementById('order-form').reset();
+    setTimeout(refreshAll,2000);
+  } catch(err){ toast('Order failed: '+err.message,'error'); }
+  finally{ btn.disabled=false; btn.textContent='Submit Order'; }
+});
+
+function refreshAll(){
+  loadPositions(); loadOpenOrders(); loadTradeHistory(); loadMarketStatus();
+}
+refreshAll();
+setInterval(loadPositions,15000);
+setInterval(loadOpenOrders,15000);
+setInterval(loadMarketStatus,30000);
 </script>
 {% endblock %}

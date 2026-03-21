@@ -174,19 +174,25 @@ def agents_page(
     settings: Settings = Depends(get_app_settings),
 ):
     from app.db.models import AgentRun
-    from sqlalchemy import select, desc
+    from sqlalchemy import desc, distinct, select
 
     stmt = select(AgentRun).order_by(desc(AgentRun.created_at)).limit(50)
     if ticker:
         stmt = stmt.where(AgentRun.ticker == ticker.upper())
     runs = session.execute(stmt).scalars().all()
 
+    # Collect unique tickers for filter dropdown
+    all_tickers = session.execute(
+        select(distinct(AgentRun.ticker)).order_by(AgentRun.ticker)
+    ).scalars().all()
+
     return templates.TemplateResponse(
         "agents.html",
         {
             "request": request,
-            "title": "Agent Runs",
+            "title": "AI Agents",
             "runs": runs,
+            "tickers": all_tickers,
             "selected_ticker": ticker,
             "agent_mode_enabled": settings.agent_mode_enabled,
         },

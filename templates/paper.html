@@ -1,75 +1,85 @@
 {% extends "base.html" %}
-
 {% block content %}
-<h2>Paper Trading</h2>
-<div class="grid">
-  <div class="card">
-    <div class="label">NAV</div>
-    <div class="value">{{ portfolio.nav | round(2) }}</div>
+<div class="page-header">
+  <div class="page-title">Paper Portfolio</div>
+  <div class="page-sub">Simulated paper trading — no real money</div>
+</div>
+
+<!-- Stats row -->
+<div class="grid g4 mb16">
+  <div class="card card-sm">
+    <div class="card-title">NAV</div>
+    <div class="card-value">${{ portfolio.nav | round(2) }}</div>
   </div>
-  <div class="card">
-    <div class="label">Realized PnL</div>
-    <div class="value">{{ portfolio.realized_pnl | round(2) }}</div>
+  <div class="card card-sm">
+    <div class="card-title">Realized P&L</div>
+    <div class="card-value {% if portfolio.realized_pnl >= 0 %}text-green{% else %}text-red{% endif %}">
+      ${{ portfolio.realized_pnl | round(2) }}
+    </div>
   </div>
-  <div class="card">
-    <div class="label">Unrealized PnL</div>
-    <div class="value">{{ portfolio.unrealized_pnl | round(2) }}</div>
+  <div class="card card-sm">
+    <div class="card-title">Unrealized P&L</div>
+    <div class="card-value {% if portfolio.unrealized_pnl >= 0 %}text-green{% else %}text-red{% endif %}">
+      ${{ portfolio.unrealized_pnl | round(2) }}
+    </div>
   </div>
-  <div class="card">
-    <div class="label">Open Positions</div>
-    <div class="value">{{ positions | length }}</div>
+  <div class="card card-sm">
+    <div class="card-title">Open Positions</div>
+    <div class="card-value">{{ positions | length }}</div>
   </div>
 </div>
 
-<h3>Positions</h3>
-<table>
-  <thead>
-  <tr>
-    <th>Ticker</th>
-    <th>Qty</th>
-    <th>Avg</th>
-    <th>Last</th>
-    <th>Realized</th>
-    <th>Unrealized</th>
-  </tr>
-  </thead>
-  <tbody>
-  {% for p in positions %}
-  <tr>
-    <td>{{ p.ticker }}</td>
-    <td>{{ p.qty }}</td>
-    <td>{{ p.avg_price }}</td>
-    <td>{{ p.last_price }}</td>
-    <td>{{ p.realized_pnl }}</td>
-    <td>{{ p.unrealized_pnl }}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+<!-- Positions -->
+<div class="card mb16">
+  <div class="card-title" style="margin-bottom:12px">Positions</div>
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead>
+        <tr><th>Ticker</th><th>Qty</th><th>Avg Entry</th><th>Last Price</th><th>Realized</th><th>Unrealized</th></tr>
+      </thead>
+      <tbody>
+        {% for p in positions %}
+        <tr>
+          <td><span class="badge badge-grey">{{ p.ticker }}</span></td>
+          <td>{{ p.qty }}</td>
+          <td>${{ p.avg_price | round(2) }}</td>
+          <td>${{ p.last_price | round(2) }}</td>
+          <td class="{% if p.realized_pnl >= 0 %}text-green{% else %}text-red{% endif %}">${{ p.realized_pnl | round(2) }}</td>
+          <td class="{% if p.unrealized_pnl >= 0 %}text-green{% else %}text-red{% endif %}">${{ p.unrealized_pnl | round(2) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="text-muted" style="text-align:center;padding:24px">No open positions</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
 
-<h3>Recent Fills</h3>
-<table>
-  <thead>
-  <tr>
-    <th>ID</th>
-    <th>Ticker</th>
-    <th>Side</th>
-    <th>Qty</th>
-    <th>Price</th>
-    <th>Time</th>
-  </tr>
-  </thead>
-  <tbody>
-  {% for f in fills %}
-  <tr>
-    <td class="mono">{{ f.id }}</td>
-    <td>{{ f.ticker }}</td>
-    <td>{{ f.side }}</td>
-    <td>{{ f.qty }}</td>
-    <td>{{ f.fill_price }}</td>
-    <td>{{ f.filled_at }}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+<!-- Recent Fills -->
+<div class="card">
+  <div class="card-title" style="margin-bottom:12px">Recent Fills</div>
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead>
+        <tr><th>Ticker</th><th>Side</th><th>Qty</th><th>Price</th><th>Time</th></tr>
+      </thead>
+      <tbody>
+        {% for f in fills %}
+        <tr>
+          <td><span class="badge badge-grey">{{ f.ticker }}</span></td>
+          <td>
+            {% if f.side == 'buy' %}<span class="badge badge-green">BUY</span>
+            {% else %}<span class="badge badge-red">SELL</span>{% endif %}
+          </td>
+          <td>{{ f.qty }}</td>
+          <td>${{ f.fill_price | round(2) }}</td>
+          <td class="text-muted text-sm">{{ f.filled_at }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="text-muted" style="text-align:center;padding:24px">No fills yet</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
 {% endblock %}

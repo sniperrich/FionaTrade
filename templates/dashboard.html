@@ -1,35 +1,204 @@
 {% extends "base.html" %}
-
 {% block content %}
-<h2>System Dashboard</h2>
-<div class="grid">
-  <div class="card">
-    <div class="label">Events (24h)</div>
-    <div class="value">{{ events_24h }}</div>
+<div class="page-header">
+  <div class="page-title">Dashboard</div>
+  <div class="page-sub" id="dash-time">Loading market status…</div>
+</div>
+
+<!-- Portfolio stats (live from Alpaca) -->
+<div class="grid g4 mb16" id="portfolio-stats">
+  <div class="card card-sm">
+    <div class="card-title">Portfolio Value</div>
+    <div class="card-value" id="stat-equity">—</div>
+    <div class="card-sub" id="stat-equity-sub">Loading…</div>
   </div>
-  <div class="card">
-    <div class="label">Signals (24h)</div>
-    <div class="value">{{ signals_24h }}</div>
+  <div class="card card-sm">
+    <div class="card-title">Cash Available</div>
+    <div class="card-value" id="stat-cash">—</div>
+    <div class="card-sub" id="stat-bp-sub">—</div>
   </div>
-  <div class="card">
-    <div class="label">Active Signals</div>
-    <div class="value">{{ valid_signals }}</div>
+  <div class="card card-sm">
+    <div class="card-title">Open Positions</div>
+    <div class="card-value" id="stat-positions">—</div>
+    <div class="card-sub" id="stat-pos-sub">—</div>
   </div>
-  <div class="card">
-    <div class="label">Source Latency (sec)</div>
-    <div class="value">{{ source_latency_sec }}</div>
-  </div>
-  <div class="card">
-    <div class="label">Paper NAV</div>
-    <div class="value">{{ paper_nav }}</div>
-  </div>
-  <div class="card">
-    <div class="label">Paper PnL (R/U)</div>
-    <div class="value">{{ paper_realized }} / {{ paper_unrealized }}</div>
+  <div class="card card-sm">
+    <div class="card-title">Unrealized P&L</div>
+    <div class="card-value" id="stat-pnl">—</div>
+    <div class="card-sub" id="stat-pnl-sub">—</div>
   </div>
 </div>
 
-<p class="muted" style="margin-top:16px;">
-  定时任务按 1 分钟轮询：ingestion -> validation -> signals -> paper execution。
-</p>
+<div class="grid g2 mb16">
+  <!-- Market & system status -->
+  <div class="card">
+    <div class="card-title">System Status</div>
+    <div id="system-status-body">
+      <div class="loading"><div class="spinner"></div> Loading…</div>
+    </div>
+  </div>
+  <!-- Pipeline stats -->
+  <div class="card">
+    <div class="card-title">Pipeline (24h)</div>
+    <div class="grid g2 mt8">
+      <div>
+        <div class="text-muted text-sm">Events ingested</div>
+        <div style="font-size:22px;font-weight:700;margin-top:2px">{{ events_24h }}</div>
+      </div>
+      <div>
+        <div class="text-muted text-sm">Signals generated</div>
+        <div style="font-size:22px;font-weight:700;margin-top:2px">{{ signals_24h }}</div>
+      </div>
+      <div>
+        <div class="text-muted text-sm">Active signals</div>
+        <div style="font-size:22px;font-weight:700;margin-top:2px;color:var(--green)">{{ valid_signals }}</div>
+      </div>
+      <div>
+        <div class="text-muted text-sm">Source latency</div>
+        <div style="font-size:22px;font-weight:700;margin-top:2px;color:{% if source_latency_sec > 600 %}var(--red){% elif source_latency_sec > 180 %}var(--warn){% else %}var(--green){% endif %}">
+          {{ source_latency_sec }}s
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Recent agent runs -->
+<div class="card mt16">
+  <div class="section-header mb8">
+    <div class="section-title">Recent Agent Decisions</div>
+    <a href="/agents" class="btn btn-ghost btn-sm">View all →</a>
+  </div>
+  <div class="tbl-wrap">
+    <table id="recent-runs-table">
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Action</th>
+          <th>Conviction</th>
+          <th>Position %</th>
+          <th>Macro</th>
+          <th>News</th>
+          <th>Tech</th>
+          <th>Risk</th>
+          <th>Time</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="recent-runs-body">
+        <tr><td colspan="10" class="empty-state">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Latest news -->
+<div class="card mt16">
+  <div class="section-header mb8">
+    <div class="section-title">Latest News</div>
+    <a href="/news" class="btn btn-ghost btn-sm">View all →</a>
+  </div>
+  <div id="latest-news-body">
+    <div class="loading"><div class="spinner"></div> Loading…</div>
+  </div>
+</div>
+
+<script>
+function fmt$(n) { return n==null?'—':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtPct(n) { return n==null?'—':(n>=0?'+':'')+Number(n*100).toFixed(2)+'%'; }
+function actionBadge(a) {
+  const map = {BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};
+  return `<span class="badge ${map[a]||'badge-grey'}">${a||'—'}</span>`;
+}
+function sigBadge(s) {
+  if (!s) return '<span class="text-muted">—</span>';
+  const m={BUY:'text-green',SHORT:'text-red',HOLD:'text-muted',NO_SIGNAL:'text-muted'};
+  return `<span class="${m[s]||''}" style="font-size:12px;font-weight:600">${s}</span>`;
+}
+
+async function loadPortfolio() {
+  try {
+    const d = await apiFetch('/api/live/positions');
+    document.getElementById('stat-equity').textContent = fmt$(d.equity);
+    document.getElementById('stat-equity-sub').textContent = 'Buying power: '+fmt$(d.buying_power);
+    document.getElementById('stat-cash').textContent = fmt$(d.cash);
+    document.getElementById('stat-bp-sub').textContent = 'Available cash';
+    document.getElementById('stat-positions').textContent = d.positions.length;
+    document.getElementById('stat-pos-sub').textContent = d.positions.length===1?'1 open position':(d.positions.length+' open positions');
+    const totalPnl = d.positions.reduce((s,p)=>s+p.unrealized_pnl,0);
+    const pnlEl = document.getElementById('stat-pnl');
+    pnlEl.textContent = fmt$(totalPnl);
+    pnlEl.style.color = totalPnl>=0?'var(--green)':'var(--red)';
+    document.getElementById('stat-pnl-sub').textContent = 'Unrealized P&L';
+  } catch(e) {
+    ['stat-equity','stat-cash','stat-positions','stat-pnl'].forEach(id=>{
+      document.getElementById(id).textContent = 'N/A';
+    });
+  }
+}
+
+async function loadSystemStatus() {
+  try {
+    const [h, live] = await Promise.all([apiFetch('/api/health'), apiFetch('/api/live/status')]);
+    const rows = [
+      ['Market', live.market_session?.tradeable ? '<span class="badge badge-green">Open</span>' : `<span class="badge badge-grey">${live.market_session?.label||'closed'}</span>`],
+      ['Live Trading', live.live_trading_enabled ? '<span class="badge badge-accent">Enabled</span>' : '<span class="badge badge-grey">Disabled</span>'],
+      ['LLM', h.llm_configured ? `<span class="badge badge-green">${h.llm_model||'configured'}</span>` : '<span class="badge badge-warn">Not configured</span>'],
+      ['Sources', `<span class="badge badge-blue">${h.sources_online||0} online</span>`],
+      ['Last ingest', h.last_ingest_age_s!=null ? (h.last_ingest_age_s<120?'<span class="badge badge-green">'+Math.round(h.last_ingest_age_s)+'s ago</span>':'<span class="badge badge-warn">'+Math.round(h.last_ingest_age_s/60)+'m ago</span>') : '—'],
+    ];
+    document.getElementById('system-status-body').innerHTML = rows.map(([k,v])=>
+      `<div class="flex-center" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border)">
+        <span class="text-muted text-sm">${k}</span><span>${v}</span>
+       </div>`
+    ).join('');
+    document.getElementById('dash-time').textContent = live.market_session?.et_time_str || '';
+  } catch(e) {}
+}
+
+async function loadRecentRuns() {
+  try {
+    const runs = await apiFetch('/api/agent/runs?limit=8');
+    if (!runs.length) { document.getElementById('recent-runs-body').innerHTML = '<tr><td colspan="10" class="empty-state text-muted">No agent runs yet</td></tr>'; return; }
+    document.getElementById('recent-runs-body').innerHTML = runs.map(r => {
+      const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString() : '—';
+      const conv = r.portfolio_output?.conviction||'';
+      const convBadge = conv==='HIGH'?'<span class="badge badge-green">HIGH</span>':conv==='MEDIUM'?'<span class="badge badge-accent">MED</span>':'<span class="badge badge-grey">LOW</span>';
+      return `<tr>
+        <td class="bold">${r.ticker}</td>
+        <td>${actionBadge(r.final_action)}</td>
+        <td>${convBadge}</td>
+        <td class="num">${r.final_position_pct!=null?(r.final_position_pct*100).toFixed(1)+'%':'—'}</td>
+        <td>${sigBadge(r.macro_output?.signal)}</td>
+        <td>${sigBadge(r.news_output?.signal)}</td>
+        <td>${sigBadge(r.technicals_output?.signal)}</td>
+        <td>${r.risk_output?.approved?'<span class="text-green text-sm">✓</span>':'<span class="text-red text-sm">✗</span>'}</td>
+        <td class="text-muted text-xs">${ts}</td>
+        <td><a href="/agents?ticker=${r.ticker}" class="expand-btn">details</a></td>
+      </tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function loadLatestNews() {
+  try {
+    const items = await apiFetch('/api/news?limit=6');
+    if (!items.length) { document.getElementById('latest-news-body').innerHTML = '<div class="empty-state text-muted">No recent news</div>'; return; }
+    document.getElementById('latest-news-body').innerHTML = items.map(n=>{
+      const age = n.ingested_at ? Math.round((Date.now()-new Date(n.ingested_at))/60000) : null;
+      const ageStr = age!=null ? (age<60?age+'m ago':Math.round(age/60)+'h ago') : '';
+      const ticker = (n.tickers||[]).slice(0,3).map(t=>`<span class="badge badge-accent">${t}</span>`).join('');
+      return `<div style="padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="font-size:13.5px;font-weight:500;margin-bottom:4px">${n.headline||n.title||'(no title)'}</div>
+        <div class="news-meta">${ticker}<span class="badge badge-grey">${n.source||'unknown'}</span><span>${ageStr}</span></div>
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+loadPortfolio(); loadSystemStatus(); loadRecentRuns(); loadLatestNews();
+setInterval(loadPortfolio, 15000);
+setInterval(loadSystemStatus, 30000);
+setInterval(loadRecentRuns, 60000);
+</script>
 {% endblock %}
