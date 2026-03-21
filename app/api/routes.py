@@ -883,12 +883,19 @@ def dashboard_snapshot(
         payload["errors"]["portfolio_history"] = getattr(exc, "detail", str(exc))
 
     try:
-        payload["agent_runs"] = list_agent_runs(limit=8, session=session, settings=settings)
+        payload["agent_runs"] = list_agent_runs(ticker=None, limit=8, session=session, settings=settings)
     except Exception as exc:
         payload["errors"]["agent_runs"] = str(exc)
 
     try:
-        payload["news"] = list_news(session=session, limit=6)
+        payload["news"] = list_news(
+            session=session,
+            limit=6,
+            since_id=None,
+            before_id=None,
+            source=None,
+            q=None,
+        )
     except Exception as exc:
         payload["errors"]["news"] = str(exc)
 
