@@ -655,6 +655,14 @@ async function refreshAll(){
   } catch(e){
     const cached=readViewCache(cacheKey, 10 * 60 * 1000);
     if(cached) hydrateLiveSnapshot(cached);
+    await Promise.allSettled([
+      loadPositions(),
+      loadOpenOrders(),
+      loadTradeHistory(),
+      loadMarketStatus(),
+      loadPortfolioHistory(),
+      loadTickerChart(),
+    ]);
   }
 }
 
