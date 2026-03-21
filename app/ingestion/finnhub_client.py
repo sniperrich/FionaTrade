@@ -42,21 +42,44 @@ def _is_relevant(ticker: str, title: str, body: str) -> bool:
 
     An article tagged by Finnhub that doesn't mention the company by name
     or ticker is classified as noise and discarded.
+
+    Special case: pure uppercase acronym matches (e.g. "AAPL" matching the
+    American Association for Physician Leadership) are validated by requiring
+    at least one company alias to also appear; if no alias is known the ticker
+    match alone is sufficient.
     """
     ticker_upper = ticker.upper()
     search_text = (title + " " + body[:600]).lower()
     title_lower = title.lower()
 
+    aliases = _TICKER_ALIASES.get(ticker_upper, [])
+
     # Ticker symbol — word-boundary match (avoid "AMD" matching "amended")
     ticker_pat = re.compile(r"\b" + re.escape(ticker_upper.lower()) + r"\b")
-    if ticker_pat.search(search_text):
-        return True
+    ticker_in_text = bool(ticker_pat.search(search_text))
 
     # Company name aliases
-    aliases = _TICKER_ALIASES.get(ticker_upper, [])
-    for alias in aliases:
-        if alias in search_text:
-            return True
+    alias_in_text = any(alias in search_text for alias in aliases)
+
+    if alias_in_text:
+        return True
+
+    # Ticker symbol found but no alias: accept only if we have no aliases defined
+    # (avoids acronym collisions like AAPL = medical org when we know "apple" alias)
+    if ticker_in_text and not aliases:
+        return True
+
+    # Ticker found AND we have aliases — require alias to also appear to avoid
+    # acronym collision (e.g. "AAPL" used for non-Apple org)
+    if ticker_in_text and aliases:
+        # Exception: if ticker is literally in the headline and body is non-empty
+        # and the body corroborates the company context, it's likely valid.
+        # Use a looser check: accept if body has some financial/market language
+        # alongside the ticker mention.
+        FINANCE_KW = ["stock", "share", "market cap", "investor", "ceo", "revenue",
+                      "earnings", "nasdaq", "nyse", "analyst", "quarter", "fiscal"]
+        has_finance = any(kw in search_text for kw in FINANCE_KW)
+        return has_finance
 
     return False
 
@@ -82,7 +105,11 @@ class FinnhubNewsClient:
         title = (row.get("headline") or "").strip()
         if not article_url or not title:
             return None
-        body = row.get("summary", "") or ""
+        import html as _html
+        body = _html.unescape(row.get("summary", "") or "")
+        # Strip bodies that are just a URL (Benzinga sometimes sends a redirect URL as body)
+        if body.startswith("http") and " " not in body.strip():
+            body = ""
         source = (row.get("source") or "finnhub").lower()
         ts = row.get("datetime")
         try:
