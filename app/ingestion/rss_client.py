@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import html as _html_module
 import logging
 import re
+from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 import feedparser
@@ -14,6 +16,34 @@ from app.ingestion.types import SourceCheck
 from app.schemas.types import RawNewsItem
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# HTML stripping — used for sources like Axios that return full HTML bodies
+# ---------------------------------------------------------------------------
+class _TagStripper(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._chunks: list[str] = []
+
+    def handle_data(self, data: str) -> None:  # type: ignore[override]
+        self._chunks.append(data)
+
+    def get_text(self) -> str:
+        return " ".join(self._chunks)
+
+
+def _strip_html(text: str) -> str:
+    """Strip HTML tags and unescape entities. Returns plain text."""
+    if not text or "<" not in text:
+        return _html_module.unescape(text or "")
+    s = _TagStripper()
+    s.feed(_html_module.unescape(text))
+    return re.sub(r"\s+", " ", s.get_text()).strip()
+
+
+# Geo/world-news sources whose bodies need HTML-stripping (Axios returns full HTML)
+_HTML_BODY_SOURCES = {"axios.com", "api.axios.com"}
 
 # ---------------------------------------------------------------------------
 # Ticker relevance: pre-compiled lookup structures built from company_names.py
@@ -68,6 +98,14 @@ class RssClient:
             return "thestreet"
         if "seekingalpha" in host:
             return "seekingalpha"
+        if "bbc" in host:
+            return "bbc"
+        if "aljazeera" in host:
+            return "aljazeera"
+        if "axios" in host:
+            return "axios"
+        if "npr" in host:
+            return "npr"
         return "rss"
 
     def _feed_status_key(self, feed_url: str) -> tuple[str, str, str]:
@@ -160,10 +198,13 @@ class RssClient:
                 continue
 
             feed_items = 0
+            feed_host = urlparse(feed_url).netloc.lower()
+            needs_html_strip = any(h in feed_host for h in _HTML_BODY_SOURCES)
             for entry in feed.entries[:60]:
                 url = entry.get("link")
                 title = entry.get("title", "").strip()
-                body = entry.get("summary", "") or entry.get("description", "")
+                raw_body = entry.get("summary", "") or entry.get("description", "")
+                body = _strip_html(raw_body) if needs_html_strip else raw_body
                 if not url or not title:
                     continue
 
@@ -183,6 +224,8 @@ class RssClient:
                 item_metadata: dict = {"feed": feed_url, "source_quality_tier": tier}
                 if matched_tickers:
                     item_metadata["matched_tickers"] = matched_tickers
+                if source_name in {"bbc", "aljazeera", "axios", "npr"}:
+                    item_metadata["category"] = "geopolitical"
                 items.append(
                     RawNewsItem(
                         source=source_name,

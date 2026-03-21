@@ -125,6 +125,11 @@ class Settings(BaseSettings):
             "https://www.ft.com/markets?format=rss",
             # Tier-2 (aggregated, reliable)
             "https://finance.yahoo.com/rss/topstories",
+            # Geopolitical / world events — feed the MacroAnalystAgent
+            "https://feeds.bbci.co.uk/news/world/rss.xml",            # BBC World
+            "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml",  # BBC US policy
+            "https://www.aljazeera.com/xml/rss/all.xml",               # Al Jazeera
+            "https://api.axios.com/feed/",                             # Axios (full articles)
         ]
     )
     # Enable per-ticker Yahoo Finance RSS headlines during ingestion

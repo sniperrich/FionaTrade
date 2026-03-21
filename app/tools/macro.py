@@ -29,6 +29,22 @@ _MACRO_KEYWORDS = [
     "tariff", "trade war", "sanctions", "debt ceiling",
 ]
 
+# Keywords that flag a RawItem as geopolitical / macro-shock relevant
+_GEO_KEYWORDS = [
+    "war", "conflict", "military", "strike", "attack", "invasion", "ceasefire",
+    "iran", "russia", "china", "ukraine", "nato", "strait", "hormuz",
+    "tariff", "trade deal", "sanction", "embargo", "export control",
+    "opec", "oil price", "energy crisis", "supply chain",
+    "executive order", "white house", "congress", "senate", "legislation",
+    "trump", "president", "policy", "election",
+    "geopolit", "g7", "g20", "imf", "world bank",
+    "nuclear", "missile", "drone", "terrorist",
+    "inflation shock", "rate decision", "fed rate",
+]
+
+# Sources dedicated to world/geopolitical news
+_GEO_SOURCES = {"bbc", "aljazeera", "axios", "npr"}
+
 
 def get_latest_indicators(
     session: Session, series_ids: list[str] | None = None, as_of: datetime | None = None,
@@ -120,18 +136,97 @@ def get_macro_news_summary(
     return macro_items
 
 
+def get_geopolitical_news(
+    session: Session, lookback_hours: int = 120, limit: int = 20, as_of: datetime | None = None,
+) -> list[dict]:
+    """Return recent geopolitical / macro-shock news from dedicated world-news sources.
+
+    Queries geo sources (BBC, Al Jazeera, Axios, NPR) directly, then falls back to
+    keyword-matching any source for articles that contain geo keywords.
+    Returns most-recent-first, capped at `limit`.
+    """
+    ref_time = as_of or datetime.now(timezone.utc)
+    since = ref_time - timedelta(hours=lookback_hours)
+
+    stmt = (
+        select(RawItem)
+        .where(RawItem.published_at >= since)
+        .where(RawItem.source.in_(_GEO_SOURCES))
+    )
+    if as_of:
+        stmt = stmt.where(RawItem.published_at <= ref_time)
+    geo_rows = session.execute(
+        stmt.order_by(RawItem.published_at.desc()).limit(500)
+    ).scalars().all()
+
+    # Filter to only geo-keyword-relevant articles from those sources
+    results: list[dict] = []
+    for row in geo_rows:
+        text = (row.title + " " + row.body[:400]).lower()
+        if any(kw in text for kw in _GEO_KEYWORDS):
+            results.append({
+                "title": row.title,
+                "source": row.source,
+                "published_at": row.published_at.isoformat(),
+                "body_snippet": row.body[:400],
+            })
+        if len(results) >= limit:
+            break
+
+    # If too few geo-source results, supplement with keyword matches from any source
+    if len(results) < limit // 2:
+        stmt2 = (
+            select(RawItem)
+            .where(RawItem.published_at >= since)
+            .where(RawItem.source.notin_(_GEO_SOURCES))
+        )
+        if as_of:
+            stmt2 = stmt2.where(RawItem.published_at <= ref_time)
+        other_rows = session.execute(
+            stmt2.order_by(RawItem.published_at.desc()).limit(300)
+        ).scalars().all()
+        seen_urls = {r["title"] for r in results}
+        for row in other_rows:
+            text = (row.title + " " + row.body[:400]).lower()
+            kw_count = sum(1 for kw in _GEO_KEYWORDS if kw in text)
+            if kw_count >= 2 and row.title not in seen_urls:
+                results.append({
+                    "title": row.title,
+                    "source": row.source,
+                    "published_at": row.published_at.isoformat(),
+                    "body_snippet": row.body[:400],
+                })
+                seen_urls.add(row.title)
+            if len(results) >= limit:
+                break
+
+    results.sort(key=lambda x: x["published_at"], reverse=True)
+    return results[:limit]
+
+
 def build_macro_context_text(session: Session, as_of: datetime | None = None) -> str:
     """Build a compact text block describing current macro conditions for LLM prompts."""
     indicators = get_latest_indicators(session, as_of=as_of)
     news = get_macro_news_summary(session, lookback_hours=72, limit=10, as_of=as_of)
+    geo = get_geopolitical_news(session, lookback_hours=120, limit=12, as_of=as_of)
 
     lines: list[str] = ["=== MACRO INDICATORS (FRED) ==="]
     for sid, data in indicators.items():
         val = f"{data['value']:.2f}" if data["value"] is not None else "N/A"
         lines.append(f"  {data['name']}: {val} (as of {data['date']})")
 
+    if geo:
+        lines.append("\n=== GEOPOLITICAL & POLICY EVENTS ===")
+        lines.append("(wars, sanctions, tariffs, major policy shifts — direct market-shock drivers)")
+        for item in geo[:8]:
+            pub = item["published_at"][:10]
+            snippet = item["body_snippet"][:200].replace("\n", " ")
+            lines.append(f"  [{pub}][{item['source']}] {item['title']}")
+            if snippet and snippet != item["title"]:
+                lines.append(f"    → {snippet}")
+
     if news:
-        lines.append("\n=== RECENT MACRO NEWS ===")
+        lines.append("\n=== RECENT MACRO-ECONOMIC NEWS ===")
         for item in news[:5]:
             lines.append(f"  [{item['source']}] {item['title']}")
 

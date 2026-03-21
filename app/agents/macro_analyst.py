@@ -45,6 +45,15 @@ Guidelines:
 - VIX < 20 = NEUTRAL (normal market conditions, do NOT treat as bearish); VIX 20-25 = lean SHORT; VIX > 25 = strong SHORT; VIX < 12 = lean BUY
 - If recent price action is DOWN despite good fundamentals, consider HOLD rather than reflexively going SHORT
 - confidence: 60-100 = clear, 35-60 = moderate lean, 0-35 = weak lean
+
+GEOPOLITICAL EVENTS — how to factor them in:
+- Active military conflict (war, strikes, invasion) → RISK_OFF, lean SHORT; severity scales with oil/supply-chain exposure
+- New tariffs or trade war escalation → SHORT for import-dependent sectors; magnitude matters (10% vs 50%)
+- Sanctions / export controls → SHORT for affected supply chains (e.g. chip sanctions = SHORT semis)
+- Ceasefire / peace deal → flip to BUY if energy/risk-premium unwind likely
+- Major policy shock (executive order, emergency legislation) → assess direction of impact before deciding
+- Geopolitical noise with no direct economic pathway → do NOT over-weight; stay closer to NEUTRAL
+- If GEOPOLITICAL section is empty or absent, ignore this dimension and rely on FRED + economic news
 """
 
 
