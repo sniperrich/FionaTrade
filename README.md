@@ -1,10 +1,222 @@
-# FionaTrade V1
+# FionaTrade v0.2.0
 
-事件驱动研究与纸面交易系统（采集 -> 事件分析 -> 信号 -> paper execution -> 回测 -> WebUI）。
+> 自主多 Agent 交易系统 + 量化研究平台  
+> Python 3.11 · FastAPI · SQLAlchemy · APScheduler · LangGraph · Alpaca
+
+---
 
 ## 快速启动
 
 ```bash
+# 安装
+pip install -e .[dev]
+
+# 复制并填写配置
+cp .env.example .env
+nano .env   # 至少填写 FINNHUB_API_KEY / LLM_API_KEY / ALPACA_API_KEY
+
+# 启动（默认端口 6888）
+uvicorn app.main:app --host 0.0.0.0 --port 6888 --reload
+
+# 访问 WebUI
+open http://localhost:6888
+```
+
+---
+
+## 架构概览
+
+### Agent 模式（默认，`AGENT_MODE_ENABLED=true`）
+
+```
+IngestionService（新闻 + FRED + 基本面）
+        ↓
+AgentGraph（app/agent_graph/graph.py）
+  ├─ [并行] MacroAnalystAgent   → FRED + 宏观新闻 → LLM
+  ├─ [并行] NewsSentimentAgent  → RawItem/Event DB  → LLM
+  ├─ [并行] FundamentalsAgent   → FundamentalsSnapshot + AnalystRating → LLM
+  ├─ [并行] TechnicalsAgent     → Bar1m → ta 库 → 纯规则（无 LLM）
+  ├─ [串行] RiskManagerAgent    → 持仓状态 + Position 表 → LLM
+  └─ [串行] PortfolioManagerAgent → 汇总以上 → LLM → BUY/SHORT/HOLD
+        ↓
+AgentRun 写入 DB
+        ↓
+LiveTradingService → AlpacaBroker（bracket orders）
+```
+
+### Legacy 模式（`AGENT_MODE_ENABLED=false`）
+
+```
+IngestionService → NormalizationService → ValidationService
+    → SignalEngineService（AnalysisService + SignalValidator）
+    → PaperEngineService
+```
+
+---
+
+## 目录结构
+
+| 路径 | 作用 |
+|------|------|
+| `app/core/config.py` | 所有配置（pydantic-settings），`get_settings()` 获取单例 |
+| `app/db/models.py` | SQLAlchemy 数据模型 |
+| `app/db/database.py` | `db_session()` 上下文管理器，`init_db()` |
+| `app/ingestion/` | 数据源客户端：Finnhub / RSS / SEC / FRED / EarningsRelease |
+| `app/normalization/` | RawItem → Event（聚类 + ticker 提取 + taxonomy） |
+| `app/tools/` | Agent 专用 DB 只读工具（market_data / fundamentals / news / macro） |
+| `app/agents/` | 6 个 Agent 类（继承 BaseAgent） |
+| `app/agent_graph/` | `graph.py` 运行 AgentGraph，`state.py` TypedDict |
+| `app/broker/` | `alpaca.py` 完整 Alpaca REST v2 客户端 |
+| `app/services/live_trading.py` | 实盘/模拟盘交易循环（bracket orders + ATR stops） |
+| `app/services/orchestrator.py` | Pipeline 调度器（agent 模式 / legacy 模式切换） |
+| `app/api/routes.py` | 所有 REST API 端点 |
+| `app/webui/routes.py` | Jinja2 WebUI 页面路由 |
+| `templates/` | HTML 模板（Claude 风格 UI） |
+| `static/ft.css` | Claude 风格 CSS 设计系统 |
+| `scripts/` | 独立工具脚本（回测、补历史数据等） |
+| `tests/` | pytest 测试（137 个） |
+
+---
+
+## 数据模型
+
+**Agent 流**: `MacroIndicator` + `FundamentalsSnapshot` + `AnalystRating` + `Bar1m` → `AgentRun`
+
+**Legacy 流**: `RawItem` → `Event` + `EventEvidence` → `Signal` → `PaperOrder` + `PaperFill` → `Position`
+
+**其他**: `EarningsCalendar`, `BacktestRun`, `BacktestTrade`, `IngestionCursor`, `SourceStatus`, `LiveTrade`
+
+---
+
+## 关键配置（`.env`）
+
+```bash
+# LLM（OpenAI-compatible）
+LLM_BASE_URL=https://api.duojie.games
+LLM_API_KEY=<your_key>
+LLM_MODEL=gemini-3-flash          # 或 claude-sonnet-4-5
+
+# 数据源
+FINNHUB_API_KEY=<your_key>
+FRED_API_KEY=<your_key>           # 免费：fred.stlouisfed.org
+
+# Alpaca 模拟盘
+ALPACA_API_KEY=<your_key>
+ALPACA_API_SECRET=<your_secret>
+ALPACA_BASE_URL=https://paper-api.alpaca.markets
+
+# 交易
+LIVE_TRADING_ENABLED=false        # 改 true 启动自动交易（或在 WebUI 点 Enable Live）
+LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,GOOGL,AMZN,META,TSLA
+AGENT_MODE_ENABLED=true
+AGENT_TICKERS_OVERRIDE=AAPL,NVDA,MSFT,GOOGL
+```
+
+---
+
+## WebUI 页面
+
+| 路径 | 功能 |
+|------|------|
+| `/` | 仪表盘：投资组合快照 + 系统状态 + 近期 Agent 决策 + 最新新闻 |
+| `/live` | 实盘：持仓 / 下单 / 挂单管理 / 交易历史 / **Enable Live 按钮** |
+| `/agents` | AI Agents：LLM 状态 / 市场时钟 / Agent 运行记录 + 展开推理 |
+| `/news` | 新闻流：来源健康状态 / 全文展开 / 按 ticker 或来源过滤 |
+| `/settings` | 配置查看：LLM / 数据源 / 风控参数 / Alpaca |
+| `/signals` | Legacy 信号列表 |
+| `/events` | 事件流（Legacy） |
+| `/backtests` | 回测历史 |
+| `/paper` | Paper trading 持仓（Legacy） |
+
+---
+
+## API 端点（主要）
+
+```
+GET  /api/health                    系统健康检查（含 LLM/数据源状态）
+GET  /api/live/status               市场时钟 + live trading 状态
+POST /api/live/set_enabled          运行时启用/禁用自动交易（{"enabled": true}）
+POST /api/live/cycle                手动触发一次交易循环
+GET  /api/live/positions            当前 Alpaca 持仓
+POST /api/live/order                手动下单（支持 market/limit/bracket/notional）
+POST /api/live/cancel_order/{id}    撤单
+POST /api/live/close_position       平仓
+GET  /api/live/open_orders          挂单列表
+GET  /api/live/trades               交易历史
+GET  /api/live/portfolio_history    净值曲线（来自 Alpaca）
+POST /api/agent/run                 手动触发 AgentGraph（{"tickers": ["AAPL"]}）
+GET  /api/agent/runs                AgentRun 列表（?ticker=AAPL&limit=20）
+GET  /api/agent/runs/{id}           单次 AgentRun 详情
+POST /api/agent/macro/refresh       手动刷新 FRED 宏观指标
+POST /api/agent/fundamentals/refresh 手动刷新基本面数据
+GET  /api/news                      新闻列表（分页，?limit=50&before_id=...）
+```
+
+---
+
+## 开发命令
+
+```bash
+# 运行测试
+pytest tests/
+
+# 带覆盖率
+pytest tests/ --cov=app --cov-report=html
+
+# 手动补 K 线
+python scripts/audit_bar_coverage.py
+
+# 手动回测
+python scripts/run_backtest.py
+```
+
+---
+
+## 部署（Debian + systemd + nginx）
+
+```bash
+# 1. 把项目文件 rsync 到服务器
+rsync -avz --exclude='.git' --exclude='*.db' \
+  ./ root@服务器IP:/opt/fionatrade/
+
+# 2. 服务器上一键安装
+bash /opt/fionatrade/deploy.sh
+
+# 3. 填写 .env（API keys）
+nano /opt/fionatrade/.env
+
+# 4. 重启服务
+systemctl restart fionatrade
+journalctl -u fionatrade -f     # 查看日志
+```
+
+`fionatrade.service`、`nginx.conf.example`、`deploy.sh` 均已包含在项目根目录。默认监听 `127.0.0.1:6888`，nginx 反向代理到 `80`。
+
+---
+
+## Agent 权重
+
+| Agent | 权重 |
+|-------|------|
+| TechnicalsAgent（纯规则，无 LLM） | 30% |
+| NewsSentimentAgent | 25% |
+| FundamentalsAgent | 25% |
+| MacroAnalystAgent | 20% |
+
+**风控硬限制（RiskManagerAgent）：**
+- 最大单仓：20%（`_MAX_POSITION_PCT`）
+- 最大日亏损：3% NAV（`_MAX_DAILY_LOSS_PCT`）
+- 最小共识：2 个 actionable 信号
+- HOLD 条件：conviction=LOW 或 <2 agent 对齐
+
+---
+
+## 测试约定
+
+- `conftest.py` 提供 `settings`（关闭所有外部源，内存 SQLite，无调度器）和 `session`（`StaticPool` 内存 SQLite，完整 schema）
+- `StaticPool` 必须用，因为 AgentGraph 用 `ThreadPoolExecutor`
+- 测试不触碰真实 API：mock `agent._call_llm`，插入 `Bar1m`（用 `datetime.utcnow() - timedelta(minutes=N)` 保证在 lookback 窗口内）
+h
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
