@@ -68,13 +68,13 @@
     <div class="section-header mb8">
       <div class="section-title">Portfolio Curve</div>
       <div class="filter-bar" style="margin:0">
-        <select id="dash-portfolio-period" onchange="loadPortfolioCurve()" style="width:110px">
+        <select id="dash-portfolio-period" onchange="refreshDashboardSnapshot()" style="width:110px">
           <option value="1D">1D</option>
           <option value="1W">1W</option>
           <option value="1M" selected>1M</option>
           <option value="3M">3M</option>
         </select>
-        <select id="dash-portfolio-timeframe" onchange="loadPortfolioCurve()" style="width:110px">
+        <select id="dash-portfolio-timeframe" onchange="refreshDashboardSnapshot()" style="width:110px">
           <option value="15Min">15Min</option>
           <option value="1H">1H</option>
           <option value="1D" selected>1D</option>
@@ -139,10 +139,17 @@
 </div>
 
 <script>
+const DASHBOARD_CACHE_PREFIX = 'ui:dashboard_snapshot:v2:';
+
 function fmt$(n) { return n==null?'—':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function fmtPct(n) { return n==null?'—':(n>=0?'+':'')+Number(n*100).toFixed(2)+'%'; }
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function dashboardCacheKey() {
+  const period = document.getElementById('dash-portfolio-period').value;
+  const timeframe = document.getElementById('dash-portfolio-timeframe').value;
+  return `${DASHBOARD_CACHE_PREFIX}${period}:${timeframe}`;
 }
 function actionBadge(a) {
   const map = {BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};
@@ -183,9 +190,9 @@ function renderDashLine(values, color='var(--accent)') {
   `;
 }
 
-async function loadPortfolio() {
+async function loadPortfolio(data=null) {
   try {
-    const d = await apiFetch('/api/live/positions');
+    const d = data || await apiFetch('/api/live/positions');
     document.getElementById('stat-equity').textContent = fmt$(d.equity);
     document.getElementById('stat-equity-sub').textContent = 'Buying power: '+fmt$(d.buying_power);
     document.getElementById('stat-cash').textContent = fmt$(d.cash);
@@ -204,9 +211,11 @@ async function loadPortfolio() {
   }
 }
 
-async function loadSystemStatus() {
+async function loadSystemStatus(healthData=null, liveData=null) {
   try {
-    const [h, live] = await Promise.all([apiFetch('/api/health'), apiFetch('/api/live/status')]);
+    const [h, live] = healthData && liveData
+      ? [healthData, liveData]
+      : await Promise.all([apiFetch('/api/health'), apiFetch('/api/live/status')]);
     const rows = [
       ['Market', live.market_tradeable ? '<span class="badge badge-green">Open</span>' : `<span class="badge badge-grey">${live.market_session||'closed'}</span>`],
       ['Live Trading', live.enabled ? '<span class="badge badge-accent">Enabled</span>' : '<span class="badge badge-grey">Disabled</span>'],
@@ -223,11 +232,9 @@ async function loadSystemStatus() {
   } catch(e) {}
 }
 
-async function loadPortfolioCurve() {
-  const period = document.getElementById('dash-portfolio-period').value;
-  const timeframe = document.getElementById('dash-portfolio-timeframe').value;
+async function loadPortfolioCurve(data=null) {
   try {
-    const d = await apiFetch(`/api/live/portfolio_history?period=${encodeURIComponent(period)}&timeframe=${encodeURIComponent(timeframe)}`, { timeout: 12000 });
+    const d = data || await apiFetch(`/api/live/portfolio_history?period=${encodeURIComponent(document.getElementById('dash-portfolio-period').value)}&timeframe=${encodeURIComponent(document.getElementById('dash-portfolio-timeframe').value)}`, { timeout: 12000 });
     const equity = d.equity || [];
     if (!equity.length) {
       setDashChartEmpty('No portfolio history yet');
@@ -246,9 +253,9 @@ async function loadPortfolioCurve() {
   }
 }
 
-async function loadMarketContext() {
+async function loadMarketContext(liveData=null) {
   try {
-    const live = await apiFetch('/api/live/status');
+    const live = liveData || await apiFetch('/api/live/status');
     const lastCycle = live.last_cycle;
     const rows = [
       ['Session', `<span class="badge ${live.market_tradeable ? 'badge-green' : 'badge-grey'}">${live.market_session || 'closed'}</span>`],
@@ -268,9 +275,9 @@ async function loadMarketContext() {
   }
 }
 
-async function loadRecentRuns() {
+async function loadRecentRuns(data=null) {
   try {
-    const {runs} = await apiFetch('/api/agent/runs?limit=8');
+    const {runs} = data || await apiFetch('/api/agent/runs?limit=8');
     const list = runs || [];
     if (!list.length) { document.getElementById('recent-runs-body').innerHTML = '<tr><td colspan="10" class="empty-state text-muted">No agent runs yet</td></tr>'; return; }
     document.getElementById('recent-runs-body').innerHTML = list.map(r => {
@@ -293,9 +300,9 @@ async function loadRecentRuns() {
   } catch(e) {}
 }
 
-async function loadLatestNews() {
+async function loadLatestNews(data=null) {
   try {
-    const d = await apiFetch('/api/news?limit=6');
+    const d = data || await apiFetch('/api/news?limit=6');
     const items = d.items || [];
     if (!items.length) { document.getElementById('latest-news-body').innerHTML = '<div class="empty-state text-muted">No recent news</div>'; return; }
     document.getElementById('latest-news-body').innerHTML = items.map(n=>{
@@ -313,12 +320,33 @@ async function loadLatestNews() {
   } catch(e) {}
 }
 
-loadPortfolio(); loadSystemStatus(); loadPortfolioCurve(); loadMarketContext(); loadRecentRuns(); loadLatestNews();
-setInterval(loadPortfolio, 15000);
-setInterval(loadSystemStatus, 30000);
-setInterval(loadPortfolioCurve, 30000);
-setInterval(loadMarketContext, 30000);
-setInterval(loadRecentRuns, 60000);
-setInterval(loadLatestNews, 30000);
+function hydrateDashboard(snapshot) {
+  if (!snapshot) return;
+  if (snapshot.positions) loadPortfolio(snapshot.positions);
+  if (snapshot.health || snapshot.live) loadSystemStatus(snapshot.health, snapshot.live);
+  if (snapshot.portfolio_history) loadPortfolioCurve(snapshot.portfolio_history);
+  if (snapshot.live) loadMarketContext(snapshot.live);
+  if (snapshot.agent_runs) loadRecentRuns(snapshot.agent_runs);
+  if (snapshot.news) loadLatestNews(snapshot.news);
+}
+
+async function refreshDashboardSnapshot() {
+  const period = document.getElementById('dash-portfolio-period').value;
+  const timeframe = document.getElementById('dash-portfolio-timeframe').value;
+  const cacheKey = dashboardCacheKey();
+  try {
+    const snapshot = await apiFetch(`/api/ui/dashboard_snapshot?portfolio_period=${encodeURIComponent(period)}&portfolio_timeframe=${encodeURIComponent(timeframe)}`, { timeout: 12000 });
+    writeViewCache(cacheKey, snapshot);
+    hydrateDashboard(snapshot);
+  } catch (e) {
+    const cached = readViewCache(cacheKey, 10 * 60 * 1000);
+    if (cached) hydrateDashboard(cached);
+  }
+}
+
+const initialDashboardSnapshot = readViewCache(dashboardCacheKey(), 10 * 60 * 1000);
+if (initialDashboardSnapshot) hydrateDashboard(initialDashboardSnapshot);
+refreshDashboardSnapshot();
+setInterval(refreshDashboardSnapshot, 15000);
 </script>
 {% endblock %}

@@ -49,11 +49,14 @@ def health(
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
+    cached = _cache_get("health:snapshot", ttl_seconds=5.0)
+    if cached is not None:
+        return cached
     audit = HealthAuditService(settings).snapshot(session)
     llm_configured = bool(settings.llm_base_url and settings.llm_model)
     sources_online = sum(1 for s in (audit.get("sources") or {}).values() if s.get("status") == "ONLINE")
     last_ingest = audit.get("last_ingest_age_s")
-    return {
+    return _cache_set("health:snapshot", {
         "status": audit["status"],
         "app": settings.app_name,
         "time": utc_now(),
@@ -64,7 +67,7 @@ def health(
         "last_ingest_age_s": last_ingest,
         "analysis_mode": "llm" if llm_configured else "rules_fallback",
         "audit": audit,
-    }
+    })
 
 
 @router.post("/ingest/run")
@@ -507,6 +510,10 @@ def live_status(
     from app.db.models import LiveTrade
     from sqlalchemy import select, desc
 
+    cached = _cache_get("live:status", ttl_seconds=5.0)
+    if cached is not None:
+        return cached
+
     msi = market_session_info()
 
     # Most recent cycle
@@ -522,7 +529,7 @@ def live_status(
             "created_at": last_trade.created_at.isoformat() if last_trade.created_at else None,
         }
 
-    return {
+    return _cache_set("live:status", {
         "enabled": settings.live_trading_enabled,
         "market_session": msi["label"],
         "market_tradeable": msi["tradeable"],
@@ -532,7 +539,7 @@ def live_status(
         "max_position_pct": settings.live_max_position_pct,
         "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
         "last_cycle": last_cycle,
-    }
+    })
 
 
 @router.post("/live/cycle")
@@ -546,6 +553,7 @@ def trigger_live_cycle(
     result = svc.run_cycle(session)
     session.commit()
     _cache_invalidate("live:")
+    _cache_invalidate("ui:")
     return result
 
 
@@ -669,6 +677,7 @@ def place_manual_order(
         if not result.success:
             raise HTTPException(status_code=502, detail=result.error or "Order failed")
         _cache_invalidate("live:")
+        _cache_invalidate("ui:")
         return {"success": True, "order_id": result.order_id, "ticker": ticker, "action": action}
     except HTTPException:
         raise
@@ -705,6 +714,7 @@ def cancel_order(
     try:
         success = broker.cancel_order(order_id)
         _cache_invalidate("live:open_orders")
+        _cache_invalidate("ui:")
         return {"success": success, "order_id": order_id}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
@@ -721,6 +731,7 @@ def cancel_all_orders(
     try:
         cancelled = broker.cancel_all_orders(ticker=ticker)
         _cache_invalidate("live:open_orders")
+        _cache_invalidate("ui:")
         return {"success": True, "cancelled": cancelled}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
@@ -739,6 +750,7 @@ def close_position_endpoint(
         _cache_invalidate("live:positions")
         _cache_invalidate("live:open_orders")
         _cache_invalidate("live:portfolio_history")
+        _cache_invalidate("ui:")
         return {"success": True, "ticker": ticker.upper(), "result": result}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
@@ -822,6 +834,144 @@ def portfolio_history(
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
 
 
+@router.get("/ui/dashboard_snapshot")
+def dashboard_snapshot(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    portfolio_period: str = Query(default="1M"),
+    portfolio_timeframe: str = Query(default="1D"),
+) -> dict[str, Any]:
+    """Aggregate dashboard data into one request to reduce WebUI waterfall latency."""
+    cache_key = f"ui:dashboard_snapshot:{portfolio_period}:{portfolio_timeframe}"
+    cached = _cache_get(cache_key, ttl_seconds=8.0)
+    if cached is not None:
+        return cached
+
+    payload: dict[str, Any] = {
+        "generated_at": utc_now(),
+        "health": None,
+        "live": None,
+        "positions": None,
+        "portfolio_history": None,
+        "agent_runs": {"runs": []},
+        "news": {"items": []},
+        "errors": {},
+    }
+
+    try:
+        payload["health"] = health(session=session, settings=settings)
+    except Exception as exc:
+        payload["errors"]["health"] = str(exc)
+
+    try:
+        payload["live"] = live_status(settings=settings, session=session)
+    except Exception as exc:
+        payload["errors"]["live"] = str(exc)
+
+    try:
+        payload["positions"] = live_positions(settings=settings)
+    except Exception as exc:
+        payload["errors"]["positions"] = getattr(exc, "detail", str(exc))
+
+    try:
+        payload["portfolio_history"] = portfolio_history(
+            period=portfolio_period,
+            timeframe=portfolio_timeframe,
+            settings=settings,
+        )
+    except Exception as exc:
+        payload["errors"]["portfolio_history"] = getattr(exc, "detail", str(exc))
+
+    try:
+        payload["agent_runs"] = list_agent_runs(limit=8, session=session, settings=settings)
+    except Exception as exc:
+        payload["errors"]["agent_runs"] = str(exc)
+
+    try:
+        payload["news"] = list_news(session=session, limit=6)
+    except Exception as exc:
+        payload["errors"]["news"] = str(exc)
+
+    return _cache_set(cache_key, payload)
+
+
+@router.get("/ui/live_snapshot")
+def live_snapshot(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+    trade_ticker: str | None = Query(default=None),
+    chart_ticker: str | None = Query(default=None),
+    chart_timeframe: str = Query(default="5Min"),
+    chart_limit: int = Query(default=72, ge=10, le=500),
+    portfolio_period: str = Query(default="1M"),
+    portfolio_timeframe: str = Query(default="1D"),
+) -> dict[str, Any]:
+    """Aggregate live-trading data into one request for fast page hydration."""
+    selected_chart_ticker = (
+        (chart_ticker or "").upper().strip()
+        or next(iter(settings.live_trading_tickers or list(settings.agent_tickers_override or [])), "AAPL")
+    )
+    cache_key = (
+        f"ui:live_snapshot:{(trade_ticker or '').upper()}:{selected_chart_ticker}:"
+        f"{chart_timeframe}:{chart_limit}:{portfolio_period}:{portfolio_timeframe}"
+    )
+    cached = _cache_get(cache_key, ttl_seconds=6.0)
+    if cached is not None:
+        return cached
+
+    payload: dict[str, Any] = {
+        "generated_at": utc_now(),
+        "market": None,
+        "positions": None,
+        "orders": [],
+        "trades": [],
+        "portfolio_history": None,
+        "bars": None,
+        "errors": {},
+    }
+
+    try:
+        payload["market"] = live_status(settings=settings, session=session)
+    except Exception as exc:
+        payload["errors"]["market"] = str(exc)
+
+    try:
+        payload["positions"] = live_positions(settings=settings)
+    except Exception as exc:
+        payload["errors"]["positions"] = getattr(exc, "detail", str(exc))
+
+    try:
+        payload["orders"] = get_open_orders(ticker=None, settings=settings)
+    except Exception as exc:
+        payload["errors"]["orders"] = getattr(exc, "detail", str(exc))
+
+    try:
+        payload["trades"] = list_live_trades(ticker=trade_ticker, limit=50, session=session)
+    except Exception as exc:
+        payload["errors"]["trades"] = str(exc)
+
+    try:
+        payload["portfolio_history"] = portfolio_history(
+            period=portfolio_period,
+            timeframe=portfolio_timeframe,
+            settings=settings,
+        )
+    except Exception as exc:
+        payload["errors"]["portfolio_history"] = getattr(exc, "detail", str(exc))
+
+    try:
+        payload["bars"] = get_live_bars(
+            ticker=selected_chart_ticker,
+            timeframe=chart_timeframe,
+            limit=chart_limit,
+            settings=settings,
+        )
+    except Exception as exc:
+        payload["errors"]["bars"] = getattr(exc, "detail", str(exc))
+
+    return _cache_set(cache_key, payload)
+
+
 @router.post("/live/set_enabled")
 @router.put("/live/set_enabled")
 def set_live_enabled(
@@ -836,6 +986,7 @@ def set_live_enabled(
     enabled = bool(body.get("enabled", True))
     settings.live_trading_enabled = enabled
     _cache_invalidate("live:")
+    _cache_invalidate("ui:")
 
     sched = getattr(_main_module, "scheduler", None)
     if sched and sched.running:

@@ -57,7 +57,7 @@
     <div class="section-header mb8">
       <div class="section-title">Portfolio Curve</div>
       <div class="filter-bar" style="margin:0">
-        <select id="portfolio-period" onchange="loadPortfolioHistory()" style="width:110px">
+        <select id="portfolio-period" onchange="refreshAll()" style="width:110px">
           <option value="1D">1D</option>
           <option value="1W">1W</option>
           <option value="1M" selected>1M</option>
@@ -65,7 +65,7 @@
           <option value="6M">6M</option>
           <option value="1A">1A</option>
         </select>
-        <select id="portfolio-timeframe" onchange="loadPortfolioHistory()" style="width:110px">
+        <select id="portfolio-timeframe" onchange="refreshAll()" style="width:110px">
           <option value="15Min">15Min</option>
           <option value="1H">1H</option>
           <option value="1D" selected>1D</option>
@@ -83,7 +83,7 @@
     <div class="section-header mb8">
       <div class="section-title">Ticker K-Line</div>
       <div class="filter-bar" style="margin:0">
-        <select id="chart-ticker" onchange="loadTickerChart()" style="width:120px">
+        <select id="chart-ticker" onchange="refreshAll()" style="width:120px">
           {% for t in tickers %}
           <option value="{{ t }}" {% if t == default_chart_ticker %}selected{% endif %}>{{ t }}</option>
           {% endfor %}
@@ -91,7 +91,7 @@
           <option value="{{ default_chart_ticker }}" selected>{{ default_chart_ticker }}</option>
           {% endif %}
         </select>
-        <select id="chart-timeframe" onchange="loadTickerChart()" style="width:110px">
+        <select id="chart-timeframe" onchange="refreshAll()" style="width:110px">
           <option value="1Min">1Min</option>
           <option value="5Min" selected>5Min</option>
           <option value="15Min">15Min</option>
@@ -234,7 +234,7 @@
   <div class="section-header mb8">
     <div class="section-title">Agent Trade History</div>
     <div class="filter-bar" style="margin:0">
-      <select id="hist-ticker-filter" onchange="loadTradeHistory()" style="width:120px">
+      <select id="hist-ticker-filter" onchange="refreshAll()" style="width:120px">
         <option value="">All tickers</option>
         {% for t in tickers %}
         <option value="{{ t }}" {% if selected_ticker == t %}selected{% endif %}>{{ t }}</option>
@@ -257,11 +257,21 @@
 </div>
 
 <script>
+const LIVE_CACHE_PREFIX = 'ui:live_snapshot:v2:';
+
 function fmt$(n){return n==null?'—':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function sideBadge(s){return s==='long'?'<span class="badge badge-green">LONG</span>':'<span class="badge badge-red">SHORT</span>';}
 function statusBadge(s){const m={submitted:'badge-blue',filled:'badge-green',error:'badge-red',skipped:'badge-grey',analysis:'badge-purple',no_change:'badge-grey',cancelled:'badge-warn'};return `<span class="badge ${m[s]||'badge-grey'}">${s}</span>`;}
 function actionBadge(a){const m={BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};return `<span class="badge ${m[a]||'badge-grey'}">${a||'—'}</span>`;}
 function safeSlice(v, n=8){return typeof v==='string'?v.slice(0,n):String(v||'').slice(0,n);}
+function liveSnapshotCacheKey(){
+  const tradeTicker=(document.getElementById('hist-ticker-filter')?.value || '').toUpperCase();
+  const chartTicker=(document.getElementById('chart-ticker')?.value || '').toUpperCase();
+  const chartTimeframe=document.getElementById('chart-timeframe')?.value || '5Min';
+  const portfolioPeriod=document.getElementById('portfolio-period')?.value || '1M';
+  const portfolioTimeframe=document.getElementById('portfolio-timeframe')?.value || '1D';
+  return `${LIVE_CACHE_PREFIX}${tradeTicker}:${chartTicker}:${chartTimeframe}:${portfolioPeriod}:${portfolioTimeframe}`;
+}
 function ensureSelectOption(selectEl, value){
   if(!selectEl || !value) return;
   const upper=value.toUpperCase();
@@ -335,9 +345,9 @@ function renderCandles(svgId, bars){
   svg.innerHTML=parts.join('');
 }
 
-async function loadPositions(){
+async function loadPositions(data=null){
   try{
-    const d = await apiFetch('/api/live/positions');
+    const d = data || await apiFetch('/api/live/positions');
     document.getElementById('eq-val').textContent=fmt$(d.equity);
     document.getElementById('eq-sub').textContent='Equity';
     document.getElementById('cash-val').textContent=fmt$(d.cash);
@@ -368,9 +378,9 @@ async function loadPositions(){
   }
 }
 
-async function loadOpenOrders(){
+async function loadOpenOrders(data=null){
   try{
-    const orders=await apiFetch('/api/live/open_orders');
+    const orders=data || await apiFetch('/api/live/open_orders');
     document.getElementById('orders-count').textContent=orders.length;
     document.getElementById('orders-sub').textContent=orders.length===1?'1 open order':(orders.length+' open orders');
     if(!orders.length){
@@ -398,11 +408,11 @@ async function loadOpenOrders(){
   }
 }
 
-async function loadTradeHistory(){
+async function loadTradeHistory(data=null){
   const ticker=document.getElementById('hist-ticker-filter').value;
   const url='/api/live/trades?limit=50'+(ticker?'&ticker='+ticker:'');
   try{
-    const trades=await apiFetch(url);
+    const trades=data || await apiFetch(url);
     if(!trades.length){
       document.getElementById('trade-history-body').innerHTML='<tr><td colspan="9" class="empty-state text-muted">No trade history yet</td></tr>';
       return;
@@ -430,9 +440,9 @@ async function loadTradeHistory(){
   } catch(e){}
 }
 
-async function loadMarketStatus(){
+async function loadMarketStatus(data=null){
   try{
-    const d=await apiFetch('/api/live/status');
+    const d=data || await apiFetch('/api/live/status');
     const open=d.market_tradeable;
     document.getElementById('market-status-badge').innerHTML=open?'<span class="badge badge-green">Market Open</span>':'<span class="badge badge-grey">'+(d.market_session||'closed')+'</span>';
     document.getElementById('live-et-time').textContent=d.market_time||'';
@@ -456,6 +466,7 @@ async function toggleLiveTrading(){
   btn.disabled=true; btn.textContent='…';
   try{
     const d=await apiFetch('/api/live/set_enabled',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enable}), timeout:10000});
+    clearViewCache(LIVE_CACHE_PREFIX);
     toast(d.message,'success');
     setTimeout(loadMarketStatus,500);
   } catch(e){ toast('Error: '+e.message,'error'); }
@@ -466,6 +477,7 @@ async function closePosition(ticker){
   if(!confirm('Close entire '+ticker+' position?')) return;
   try{
     await apiFetch('/api/live/close_position?ticker='+ticker, {method:'POST'});
+    clearViewCache(LIVE_CACHE_PREFIX);
     toast('Position closed: '+ticker,'success');
     setTimeout(refreshAll,2000);
   } catch(e){ toast('Error: '+e.message,'error'); }
@@ -475,6 +487,7 @@ async function cancelOrder(orderId,symbol){
   if(!confirm('Cancel order for '+symbol+'?')) return;
   try{
     await apiFetch('/api/live/cancel_order/'+orderId, {method:'POST'});
+    clearViewCache(LIVE_CACHE_PREFIX);
     toast('Order cancelled','success');
     setTimeout(loadOpenOrders,1500);
   } catch(e){ toast('Error: '+e.message,'error'); }
@@ -484,6 +497,7 @@ async function cancelAllOrders(){
   if(!confirm('Cancel ALL open orders?')) return;
   try{
     const d=await apiFetch('/api/live/cancel_all_orders', {method:'POST'});
+    clearViewCache(LIVE_CACHE_PREFIX);
     toast('Cancelled '+(d.cancelled||0)+' orders','success');
     setTimeout(loadOpenOrders,1500);
   } catch(e){ toast('Error: '+e.message,'error'); }
@@ -494,6 +508,7 @@ async function triggerCycle(ev){
   btn.disabled=true; btn.textContent='Running…';
   try{
     const d=await apiFetch('/api/live/cycle', {method:'POST', timeout:12000});
+    clearViewCache(LIVE_CACHE_PREFIX);
     toast('Cycle done — '+(d.orders_placed||0)+' orders placed','success');
     setTimeout(refreshAll,2000);
   } catch(e){ toast('Error: '+e.message,'error'); }
@@ -535,11 +550,9 @@ document.getElementById('o-ticker').addEventListener('input',()=>{
 });
 document.getElementById('o-qty').addEventListener('input',loadPricePreview);
 
-async function loadPortfolioHistory(){
-  const period=document.getElementById('portfolio-period').value;
-  const timeframe=document.getElementById('portfolio-timeframe').value;
+async function loadPortfolioHistory(data=null){
   try{
-    const d=await apiFetch(`/api/live/portfolio_history?period=${encodeURIComponent(period)}&timeframe=${encodeURIComponent(timeframe)}`, { timeout: 12000 });
+    const d=data || await apiFetch(`/api/live/portfolio_history?period=${encodeURIComponent(document.getElementById('portfolio-period').value)}&timeframe=${encodeURIComponent(document.getElementById('portfolio-timeframe').value)}`, { timeout: 12000 });
     const equity=d.equity||[];
     if(!equity.length){
       setChartEmpty('portfolio-chart','No portfolio history yet');
@@ -557,7 +570,7 @@ async function loadPortfolioHistory(){
   }
 }
 
-async function loadTickerChart(){
+async function loadTickerChart(data=null){
   const ticker=(document.getElementById('chart-ticker').value||'').trim().toUpperCase();
   const timeframe=document.getElementById('chart-timeframe').value;
   if(!ticker){
@@ -565,7 +578,7 @@ async function loadTickerChart(){
     return;
   }
   try{
-    const d=await apiFetch(`/api/live/bars?ticker=${encodeURIComponent(ticker)}&timeframe=${encodeURIComponent(timeframe)}&limit=72`, { timeout: 12000 });
+    const d=data || await apiFetch(`/api/live/bars?ticker=${encodeURIComponent(ticker)}&timeframe=${encodeURIComponent(timeframe)}&limit=72`, { timeout: 12000 });
     const bars=d.bars||[];
     if(!bars.length){
       setChartEmpty('ticker-chart',`No recent bars for ${ticker}`);
@@ -605,6 +618,7 @@ document.getElementById('order-form').addEventListener('submit', async e=>{
   btn.disabled=true; btn.textContent='Submitting…';
   try{
     const r=await apiFetch('/api/live/order', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    clearViewCache(LIVE_CACHE_PREFIX);
     toast(`Order submitted: ${action} ${ticker} (${r.order_id?.slice(0,8)||'?'}…)`,'success');
     document.getElementById('order-form').reset();
     setTimeout(refreshAll,2000);
@@ -612,14 +626,39 @@ document.getElementById('order-form').addEventListener('submit', async e=>{
   finally{ btn.disabled=false; btn.textContent='Submit Order'; }
 });
 
-function refreshAll(){
-  loadPositions(); loadOpenOrders(); loadTradeHistory(); loadMarketStatus(); loadPortfolioHistory(); loadTickerChart();
+function hydrateLiveSnapshot(snapshot){
+  if(!snapshot) return;
+  if(snapshot.positions) loadPositions(snapshot.positions);
+  if(snapshot.orders) loadOpenOrders(snapshot.orders);
+  if(snapshot.trades) loadTradeHistory(snapshot.trades);
+  if(snapshot.market) loadMarketStatus(snapshot.market);
+  if(snapshot.portfolio_history) loadPortfolioHistory(snapshot.portfolio_history);
+  if(snapshot.bars) loadTickerChart(snapshot.bars);
 }
+
+async function refreshAll(){
+  const tradeTicker=(document.getElementById('hist-ticker-filter').value||'').trim().toUpperCase();
+  const chartTicker=(document.getElementById('chart-ticker').value||'').trim().toUpperCase();
+  const chartTimeframe=document.getElementById('chart-timeframe').value;
+  const portfolioPeriod=document.getElementById('portfolio-period').value;
+  const portfolioTimeframe=document.getElementById('portfolio-timeframe').value;
+  const cacheKey=liveSnapshotCacheKey();
+  try{
+    const snapshot=await apiFetch(
+      `/api/ui/live_snapshot?trade_ticker=${encodeURIComponent(tradeTicker)}&chart_ticker=${encodeURIComponent(chartTicker)}&chart_timeframe=${encodeURIComponent(chartTimeframe)}&portfolio_period=${encodeURIComponent(portfolioPeriod)}&portfolio_timeframe=${encodeURIComponent(portfolioTimeframe)}`,
+      { timeout: 12000 }
+    );
+    writeViewCache(cacheKey, snapshot);
+    hydrateLiveSnapshot(snapshot);
+  } catch(e){
+    const cached=readViewCache(cacheKey, 10 * 60 * 1000);
+    if(cached) hydrateLiveSnapshot(cached);
+  }
+}
+
+const initialLiveSnapshot=readViewCache(liveSnapshotCacheKey(), 10 * 60 * 1000);
+if(initialLiveSnapshot) hydrateLiveSnapshot(initialLiveSnapshot);
 refreshAll();
-setInterval(loadPositions,15000);
-setInterval(loadOpenOrders,15000);
-setInterval(loadMarketStatus,30000);
-setInterval(loadPortfolioHistory,30000);
-setInterval(loadTickerChart,30000);
+setInterval(refreshAll,15000);
 </script>
 {% endblock %}

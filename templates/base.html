@@ -96,6 +96,34 @@ function toast(msg, type='') {
   setTimeout(() => el.remove(), 4000);
 }
 
+function readViewCache(key, maxAgeMs=60000) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!parsed.ts || (Date.now() - parsed.ts > maxAgeMs)) return null;
+    return parsed.data;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeViewCache(key, data) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
+  } catch (_) {}
+}
+
+function clearViewCache(prefix) {
+  try {
+    for (let i = sessionStorage.length - 1; i >= 0; i -= 1) {
+      const key = sessionStorage.key(i);
+      if (key && key.startsWith(prefix)) sessionStorage.removeItem(key);
+    }
+  } catch (_) {}
+}
+
 async function apiFetch(url, opts={}) {
   const { timeout = 8000, ...fetchOpts } = opts;
   const controller = new AbortController();
@@ -116,24 +144,38 @@ async function apiFetch(url, opts={}) {
 }
 
 // ── Sidebar status ────────────────────────────────────────────────────────
-async function updateSidebarStatus() {
-  try {
-    const d = await apiFetch('/api/live/status');
+function renderSidebarStatus(live, health) {
+  if (live) {
     const mDot = document.getElementById('market-dot');
     const mLabel = document.getElementById('market-label');
-    const open = !!d.market_tradeable;
-    const label = d.market_session || 'closed';
+    const open = !!live.market_tradeable;
+    const label = live.market_session || 'closed';
     mDot.className = 'dot ' + (open ? 'green pulse' : 'grey');
     mLabel.textContent = open ? 'Market open' : ('Market ' + label);
-  } catch(e) {}
-  try {
-    const h = await apiFetch('/api/health');
+  }
+  if (health) {
     const lDot = document.getElementById('llm-dot');
     const lLabel = document.getElementById('llm-label');
-    const llmOk = h.llm_configured;
+    const llmOk = health.llm_configured;
     lDot.className = 'dot ' + (llmOk ? 'green' : 'warn');
     lLabel.textContent = llmOk ? 'LLM connected' : 'LLM not configured';
-  } catch(e) {}
+  }
+}
+
+async function updateSidebarStatus() {
+  const cacheKey = 'ui:sidebar_status:v1';
+  const cached = readViewCache(cacheKey, 10 * 60 * 1000);
+  if (cached) renderSidebarStatus(cached.live, cached.health);
+  try {
+    const [liveResult, healthResult] = await Promise.allSettled([
+      apiFetch('/api/live/status'),
+      apiFetch('/api/health'),
+    ]);
+    const live = liveResult.status === 'fulfilled' ? liveResult.value : cached?.live;
+    const health = healthResult.status === 'fulfilled' ? healthResult.value : cached?.health;
+    renderSidebarStatus(live, health);
+    if (live || health) writeViewCache(cacheKey, { live, health });
+  } catch (_) {}
 }
 updateSidebarStatus();
 setInterval(updateSidebarStatus, 30000);

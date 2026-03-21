@@ -120,6 +120,8 @@ tests/           137 个 pytest 测试
 | GET | `/api/live/open_orders` | Alpaca 挂单 |
 | GET | `/api/live/portfolio_history` | Alpaca 权益曲线 |
 | GET | `/api/live/bars` | Alpaca K 线（供 `/live` SVG chart 使用） |
+| GET | `/api/ui/dashboard_snapshot` | Dashboard 聚合快照（health/live/positions/news/runs/chart） |
+| GET | `/api/ui/live_snapshot` | Live Trading 聚合快照（market/positions/orders/trades/chart） |
 
 > ⚠️ **JS 开发注意：**
 > - `market_session` 是字符串，不是对象
@@ -130,6 +132,7 @@ tests/           137 个 pytest 测试
 > - 执行时间：`r.execution_time_ms`
 > - `/api/news` 现在额外返回 `metadata` 和 `body_preview`
 > - `/api/live/set_enabled` 同时接受 `POST` 和 `PUT`
+> - Dashboard/Live 首屏改成 `snapshot + sessionStorage`，重新打开页面会先用上次结果秒开，再后台刷新
 
 ---
 
