@@ -131,7 +131,7 @@
         <th>Date Range</th>
         <th>Mode</th>
         <th>Sources</th>
-        <th class="num">Events</th>
+        <th>Progress</th>
         <th class="num">Trades</th>
         <th class="num">Win Rate</th>
         <th class="num">Return</th>
@@ -167,6 +167,21 @@ function fmtPct(v, digits=2){
 function fmtUsd(v){
   if(v == null || Number.isNaN(Number(v))) return '—';
   return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function progressBar(current, total, pct){
+  const normalizedTotal = Number(total || 0);
+  const normalizedCurrent = Number(current || 0);
+  const normalizedPct = Math.max(0, Math.min(100, Number(pct || 0)));
+  const label = normalizedTotal ? `${normalizedCurrent}/${normalizedTotal}` : 'queued';
+  return `
+    <div>
+      <div class="text-xs text-muted">${label}</div>
+      <div style="height:6px;border-radius:999px;background:rgba(156,152,144,0.18);overflow:hidden;margin-top:4px">
+        <div style="height:100%;width:${normalizedPct}%;background:var(--accent)"></div>
+      </div>
+    </div>
+  `;
 }
 
 function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
@@ -242,8 +257,8 @@ async function loadBacktestRuns(){
       <td>${escapeHtml(row.start_date || '—')} → ${escapeHtml(row.end_date || '—')}</td>
       <td><span class="badge ${row.use_llm ? 'badge-accent' : 'badge-grey'}">${row.use_llm ? 'LLM' : 'RULES'}</span></td>
       <td class="text-xs">${escapeHtml(sources)}</td>
-      <td class="num">${row.metrics?.events_considered ?? 0}</td>
-      <td class="num">${row.metrics?.trades ?? 0}</td>
+      <td>${progressBar(row.metrics?.progress_current, row.metrics?.progress_total, row.metrics?.progress_pct)}</td>
+      <td class="num">${row.metrics?.trades ?? row.metrics?.trades_so_far ?? 0}</td>
       <td class="num">${fmtPct(row.metrics?.win_rate || 0)}</td>
       <td class="num">${fmtPct(row.metrics?.total_return || 0)}</td>
       <td><button class="btn btn-ghost btn-xs" onclick="selectBacktestRun(${row.id})">Inspect</button></td>
@@ -287,15 +302,18 @@ async function selectBacktestRun(runId){
         <div class="card-sub">Win rate ${fmtPct(metrics.win_rate || 0)}</div>
       </div>
       <div class="card card-sm">
-        <div class="card-title">Events</div>
-        <div class="card-value">${metrics.events_considered ?? 0}</div>
-        <div class="card-sub">Profile filtered ${metrics.profile_filtered ?? 0}</div>
+        <div class="card-title">Progress</div>
+        <div class="card-value">${metrics.progress_total ? `${metrics.progress_current ?? 0}/${metrics.progress_total}` : 'queued'}</div>
+        <div class="card-sub">${fmtPct((metrics.progress_pct || 0) / 100, 1)} complete</div>
       </div>
       <div class="card card-sm">
         <div class="card-title">Filters</div>
         <div class="card-value">${(data.sources || []).length ? data.sources.length : 'All'}</div>
         <div class="card-sub">${escapeHtml((data.sources || []).join(', ') || 'All sources')}</div>
       </div>
+    </div>
+    <div class="mt12">
+      ${progressBar(metrics.progress_current, metrics.progress_total, metrics.progress_pct)}
     </div>
     <div class="mt12 text-sm text-muted">
       Range ${escapeHtml(data.start_date || '—')} → ${escapeHtml(data.end_date || '—')} ·

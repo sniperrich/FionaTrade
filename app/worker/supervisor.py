@@ -8,6 +8,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import OperationalError
+
 from app.core.config import get_settings
 from app.core.logging import get_app_logger, setup_logging
 from app.db.database import db_session, init_db
@@ -30,22 +32,25 @@ def _handle_shutdown(signum: int, frame: object | None) -> None:
 
 
 def _touch_supervisor(*, child: subprocess.Popen[str] | None, restart_count: int, last_exit_code: int | None, backoff_seconds: float) -> None:
-    with db_session() as session:
-        runtime_control.touch_supervisor_heartbeat(
-            session,
-            pid=os.getpid(),
-            started_at=_SUPERVISOR_STARTED_AT,
-            source="worker_supervisor",
-            scheduler_running=True,
-            extra={
-                "host": _HOST,
-                "child_pid": child.pid if child else None,
-                "child_running": bool(child and child.poll() is None),
-                "restart_count": restart_count,
-                "last_exit_code": last_exit_code,
-                "backoff_seconds": backoff_seconds,
-            },
-        )
+    try:
+        with db_session() as session:
+            runtime_control.touch_supervisor_heartbeat(
+                session,
+                pid=os.getpid(),
+                started_at=_SUPERVISOR_STARTED_AT,
+                source="worker_supervisor",
+                scheduler_running=True,
+                extra={
+                    "host": _HOST,
+                    "child_pid": child.pid if child else None,
+                    "child_running": bool(child and child.poll() is None),
+                    "restart_count": restart_count,
+                    "last_exit_code": last_exit_code,
+                    "backoff_seconds": backoff_seconds,
+                },
+            )
+    except OperationalError as exc:
+        logger.warning("[supervisor] heartbeat skipped due to database lock: %s", exc)
 
 
 def _spawn_worker() -> subprocess.Popen[str]:
@@ -122,13 +127,16 @@ def main() -> None:
             time.sleep(1)
     finally:
         _stop_child(child)
-        with db_session() as session:
-            runtime_control.mark_supervisor_offline(
-                session,
-                pid=os.getpid(),
-                source="worker_supervisor",
-                reason="shutdown",
-            )
+        try:
+            with db_session() as session:
+                runtime_control.mark_supervisor_offline(
+                    session,
+                    pid=os.getpid(),
+                    source="worker_supervisor",
+                    reason="shutdown",
+                )
+        except OperationalError as exc:
+            logger.warning("[supervisor] offline mark skipped due to database lock: %s", exc)
 
 
 if __name__ == "__main__":

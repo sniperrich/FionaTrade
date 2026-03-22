@@ -678,6 +678,59 @@ class BacktestEngineService:
             earnings_window_dedup_dropped = max(0, len(same_day_events) - len(events))
         dedup_dropped = same_day_dedup_dropped + earnings_window_dedup_dropped
         started = time.perf_counter()
+        total_events = len(events)
+        equity = self.settings.initial_nav
+        equity_curve = [{"ts": utc_now().isoformat(), "equity": equity}]
+        pnl_list: list[float] = []
+        trade_log: list[dict] = []
+        event_type_attr: dict[str, float] = {}
+        source_attr: dict[str, float] = {}
+        llm_signals = 0
+        llm_fallback_signals = 0
+        validation_blocked = 0
+        exit_reason_counts: dict[str, int] = {}
+        regime_trade_counts: dict[str, int] = {}
+        daily_halts = 0
+        halted_events_skipped = 0
+        routine_filing_skipped = 0
+        tradeability_filtered = 0
+        quality_filtered = 0
+        quality_filter_errors = 0
+        entry_late_skipped = 0
+        next_session_entry_used = 0
+        tradeability_reason_counts: dict[str, int] = {}
+
+        current_day: date | None = None
+        day_start_equity = equity
+        day_halted = False
+
+        def persist_run_progress(
+            *,
+            processed: int,
+            progress_pct: float,
+            trades: int,
+            force_commit: bool = False,
+        ) -> None:
+            partial_metrics = dict(run.metrics or {})
+            partial_metrics.update(
+                {
+                    "progress_current": processed,
+                    "progress_total": total_events,
+                    "progress_pct": progress_pct,
+                    "trades_so_far": trades,
+                    "llm_signals_so_far": llm_signals,
+                    "equity_so_far": equity,
+                    "selected_sources": selected_sources,
+                    "event_profile": event_profile,
+                }
+            )
+            run.status = "RUNNING"
+            run.metrics = partial_metrics
+            session.flush()
+            if force_commit:
+                session.commit()
+
+        persist_run_progress(processed=0, progress_pct=0.0, trades=0, force_commit=True)
 
         self.logger.info(
             "回测开始 run_id=%s events=%s dedup_dropped=%s use_llm=%s min_conf=%s horizon=%s entry_window=%s start=%s end=%s",
@@ -731,38 +784,17 @@ class BacktestEngineService:
             },
         )
 
-        equity = self.settings.initial_nav
-        equity_curve = [{"ts": utc_now().isoformat(), "equity": equity}]
-        pnl_list: list[float] = []
-        trade_log: list[dict] = []
-        event_type_attr: dict[str, float] = {}
-        source_attr: dict[str, float] = {}
-        llm_signals = 0
-        llm_fallback_signals = 0
-        validation_blocked = 0
-        exit_reason_counts: dict[str, int] = {}
-        regime_trade_counts: dict[str, int] = {}
-        daily_halts = 0
-        halted_events_skipped = 0
-        routine_filing_skipped = 0
-        tradeability_filtered = 0
-        quality_filtered = 0
-        quality_filter_errors = 0
-        entry_late_skipped = 0
-        next_session_entry_used = 0
-        tradeability_reason_counts: dict[str, int] = {}
-
-        current_day: date | None = None
-        day_start_equity = equity
-        day_halted = False
-
-        total_events = len(events)
-
         def emit_progress(idx: int) -> None:
             if idx % progress_every != 0 and idx != total_events:
                 return
             elapsed = time.perf_counter() - started
             progress_pct = (idx / total_events * 100.0) if total_events else 100.0
+            persist_run_progress(
+                processed=idx,
+                progress_pct=progress_pct,
+                trades=len(pnl_list),
+                force_commit=True,
+            )
             self.logger.info(
                 "回测进度 run_id=%s %.1f%%(%s/%s) trades=%s llm_signals=%s fallback=%s equity=%.2f elapsed=%.1fs",
                 run.id,
@@ -1289,12 +1321,17 @@ class BacktestEngineService:
         metrics["conviction_position_floor"] = self.settings.backtest_conviction_position_floor
         metrics["entry_late_skipped"] = entry_late_skipped
         metrics["next_session_entry_used"] = next_session_entry_used
+        metrics["progress_current"] = total_events
+        metrics["progress_total"] = total_events
+        metrics["progress_pct"] = 100.0
 
         run.metrics = metrics
         run.equity_curve = equity_curve
         run.trade_log = trade_log
         run.status = "DONE"
         run.finished_at = utc_now()
+        session.flush()
+        session.commit()
 
         elapsed = time.perf_counter() - started
         self.logger.info(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from app.core.config import get_settings
@@ -20,6 +20,18 @@ if settings.database_url.startswith("sqlite"):
     engine_kwargs["pool_size"] = 10
     engine_kwargs["max_overflow"] = 20
 engine = create_engine(settings.database_url, **engine_kwargs)
+
+if settings.database_url.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _configure_sqlite(dbapi_connection, connection_record) -> None:  # type: ignore[no-redef]
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute(f"PRAGMA busy_timeout={int(settings.sqlite_busy_timeout_seconds * 1000)}")
+        finally:
+            cursor.close()
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 
 

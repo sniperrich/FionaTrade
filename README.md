@@ -47,6 +47,7 @@ db     -> SQLite，统一保存状态、结果、行情缓存、运行态
 - live runtime 读取 `worker_runs / worker_run_events`，不再依赖进程内 runtime store
 - `MarketDataService` 统一 chart/cache/freshness/fallback/backfill
 - 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
+- SQLite 现在默认启用 `WAL + busy_timeout`，降低 worker/supervisor/backtest 并发写锁冲突
 
 ### Agent 模式（默认，`AGENT_MODE_ENABLED=true`）
 
@@ -220,11 +221,13 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
   - 选择 `rules / llm`
   - 选择 `event_profile`
   - 选择 `source filter`
-  - 查看最近 runs、metrics、trade log
+  - 查看最近 runs、metrics、trade log、事件进度条
 - Worker 负责：
   - 消费 `run_backtest` command
   - 创建/更新 `BacktestRun`
   - 在后台执行回测，不依赖浏览器存活
+- Backtest 运行中会持续把 `progress_current / progress_total / progress_pct` 写回 `BacktestRun.metrics`
+- Supervisor heartbeat 遇到短时 SQLite lock 会跳过本次写入并继续守护，不会再因为 heartbeat 写失败把 worker 一起带崩
 
 当前支持的 source filter 语义：
 - 若选择 `sources`，只纳入至少有一条 `event_evidence.source` 命中的事件

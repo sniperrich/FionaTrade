@@ -89,6 +89,10 @@ def _serialize_backtest_run(run: BacktestRun, include_detail: bool = False) -> d
             "profile_filtered": metrics.get("profile_filtered", 0),
             "tradeability_filtered": metrics.get("tradeability_filtered", 0),
             "validation_blocked": metrics.get("validation_blocked", 0),
+            "progress_current": metrics.get("progress_current", 0),
+            "progress_total": metrics.get("progress_total", 0),
+            "progress_pct": metrics.get("progress_pct", 0.0),
+            "trades_so_far": metrics.get("trades_so_far", 0),
         },
     }
     if include_detail:
