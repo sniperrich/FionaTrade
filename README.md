@@ -49,6 +49,8 @@ db     -> SQLite，统一保存状态、结果、行情缓存、运行态
 - 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
 - SQLite 现在默认启用 `WAL + busy_timeout`，降低 worker/supervisor/backtest 并发写锁冲突
 - worker 启动时会自动清算遗留的 `RUNNING` 命令/运行/回测，避免重启后旧任务永久显示运行中
+- `CNBC / Yahoo` 现在统一视为 **secondary confirmation sources**：可做 corroboration，但不会再作为单独 primary trigger 使用
+- 回测默认已打开 **同 ticker + 同有效事件类型 + 同日去重**（`backtest_dedup_same_day_event=true`）
 
 ### Agent 模式（默认，`AGENT_MODE_ENABLED=true`）
 
@@ -234,8 +236,14 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 - Worker 重启时会把上次异常中断留下的 `RUNNING` backtest / worker command / worker run 统一标记为 `FAILED`
 
 当前支持的 source filter 语义：
-- 若选择 `sources`，只纳入至少有一条 `event_evidence.source` 命中的事件
+- 若选择 `sources`，会按 **规范化后的 source 名称** 过滤（例如 `yahoo` 会归一为 `yahoo_finance`）
+- 当旧事件缺少 `event_evidence` 时，analysis/backtest 会从同 ticker 的历史 `raw_items` 做 fallback 匹配，并补写 evidence lineage
 - 若不选，默认使用全部 source
+
+当前事件质量/来源规则补充：
+- `CNBC / Yahoo / Yahoo Finance RSS` 会被降成二级确认源；`Reuters/Bloomberg/SEC/company` 这类仍可作为 primary evidence
+- `trade tracker / why stock is up / top movers / market chatter / recap / commentary` 这类 follow-up/commentary 标题会被降级或直接过滤
+- 纯 secondary-only 的事件不会通过 validation 成为可交易 primary event，也会在 tradeability gate 被挡掉
 
 当前实现仍然是事件回测，不是 AgentGraph 全链回测。
 

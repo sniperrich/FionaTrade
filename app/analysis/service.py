@@ -17,7 +17,12 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.analysis.rules_fallback import fallback_action
-from app.analysis.taxonomy import resolve_event_type_for_text
+from app.analysis.taxonomy import (
+    is_follow_up_commentary,
+    is_secondary_confirmation_source,
+    normalize_source_name,
+    resolve_event_type_for_text,
+)
 from app.core.config import Settings
 from app.core.utils import ensure_utc, utc_now
 from app.db.models import Bar1m, EarningsCalendar, Event, EventEvidence, RawItem
@@ -259,6 +264,136 @@ class AnalysisService:
         "zacks",
         "barchart",
     }
+    _EVIDENCE_STOPWORDS = {
+        "the", "a", "an", "and", "or", "for", "with", "from", "that", "this",
+        "after", "before", "amid", "into", "onto", "about", "under", "over",
+        "said", "says", "will", "would", "could", "should", "shares", "stock",
+        "company", "report", "reported", "reports", "news", "today",
+    }
+
+    @classmethod
+    def _token_set(cls, text: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]{4,}", (text or "").lower())
+            if token not in cls._EVIDENCE_STOPWORDS
+        }
+
+    @staticmethod
+    def _mention_count(text: str, ticker: str, entities: list[str]) -> int:
+        lowered = (text or "").lower()
+        count = 0
+        if ticker:
+            count += lowered.count(ticker.lower())
+        for entity in entities[:3]:
+            entity_lower = entity.lower().strip()
+            if len(entity_lower) >= 4:
+                count += lowered.count(entity_lower)
+        return count
+
+    def _fallback_evidence_rows(self, session: Session | None, event: Event, limit: int = 8) -> list[dict[str, Any]]:
+        if session is None or event.id is None or event.event_time is None:
+            return []
+
+        event_ts = ensure_utc(event.event_time)
+        window_start = event_ts - timedelta(hours=36)
+        ticker = str(event.tickers[0]).upper() if event.tickers else ""
+        entities = [str(entity) for entity in (event.entities or []) if entity]
+        summary = event.summary or ""
+        summary_lower = summary.lower()
+        summary_tokens = self._token_set(summary)
+        existing_raw_ids = {
+            int(raw_item_id)
+            for raw_item_id in session.execute(
+                select(EventEvidence.raw_item_id).where(EventEvidence.event_id == event.id)
+            ).scalars()
+        }
+
+        candidate_rows = session.execute(
+            select(RawItem)
+            .where(and_(RawItem.published_at >= window_start, RawItem.published_at <= event_ts))
+            .order_by(RawItem.source_tier.asc(), RawItem.published_at.desc())
+            .limit(400)
+        ).scalars().all()
+
+        ranked: list[tuple[int, datetime, RawItem]] = []
+        for raw in candidate_rows:
+            title = raw.title or ""
+            body = raw.body or ""
+            combined = f"{title}\n{body}"
+            mention_count = self._mention_count(combined, ticker, entities)
+            if mention_count <= 0:
+                metadata_ticker = str((raw.metadata_json or {}).get("ticker") or "").upper().strip()
+                if not ticker or metadata_ticker != ticker:
+                    continue
+                mention_count = 1
+
+            raw_tokens = self._token_set(f"{title} {body[:1000]}")
+            overlap = len(summary_tokens & raw_tokens) if summary_tokens else 0
+            title_lower = title.lower()
+            title_match = bool(summary_lower) and (
+                title_lower in summary_lower or summary_lower in title_lower
+            )
+            hard_event = bool(self._HARD_EVENT_PATTERNS.search(combined))
+
+            if not title_match and overlap < 2 and not hard_event:
+                continue
+
+            source = normalize_source_name(raw.source)
+            normalized_tier = max(int(raw.source_tier or 9), 2) if is_secondary_confirmation_source(source) else int(raw.source_tier or 9)
+            if normalized_tier > 3:
+                normalized_tier = 9
+            minutes_delta = max(0.0, (event_ts - ensure_utc(raw.published_at)).total_seconds() / 60.0)
+            recency_bonus = max(0, 180 - int(minutes_delta // 10))
+            score = (45 if title_match else 0) + overlap * 8 + min(mention_count, 4) * 6 + recency_bonus
+            if hard_event:
+                score += 15
+            if is_follow_up_commentary(combined):
+                score -= 20
+            score -= normalized_tier * 3
+            ranked.append((score, ensure_utc(raw.published_at), raw))
+
+        ranked.sort(key=lambda item: (item[0], item[1].timestamp()), reverse=True)
+        selected_raws = [raw for score, _, raw in ranked if score > 0][:limit]
+        if not selected_raws:
+            return []
+
+        new_evidence_added = False
+        for raw in selected_raws:
+            if raw.id in existing_raw_ids:
+                continue
+            source = normalize_source_name(raw.source)
+            source_tier = max(int(raw.source_tier or 9), 2) if is_secondary_confirmation_source(source) else int(raw.source_tier or 9)
+            session.add(
+                EventEvidence(
+                    event_id=event.id,
+                    raw_item_id=raw.id,
+                    url=raw.url,
+                    source=source,
+                    source_tier=source_tier,
+                    summary=(raw.title or "")[:280],
+                )
+            )
+            existing_raw_ids.add(int(raw.id))
+            new_evidence_added = True
+        if new_evidence_added:
+            session.flush()
+
+        items: list[dict[str, Any]] = []
+        for raw in selected_raws:
+            source = normalize_source_name(raw.source)
+            source_tier = max(int(raw.source_tier or 9), 2) if is_secondary_confirmation_source(source) else int(raw.source_tier or 9)
+            items.append(
+                {
+                    "source": source,
+                    "source_tier": source_tier,
+                    "url": raw.url,
+                    "published_at": ensure_utc(raw.published_at).isoformat() if raw.published_at else None,
+                    "title": raw.title or "",
+                    "full_text": (raw.body or raw.title or "").strip(),
+                }
+            )
+        return items
 
     def _evidence_rows(self, session: Session | None, event: Event, limit: int = 8) -> list[dict[str, Any]]:
         if session is None or event.id is None:
@@ -283,17 +418,23 @@ class AnalysisService:
             if raw and raw.published_at and event.event_time:
                 if ensure_utc(raw.published_at) > ensure_utc(event.event_time):
                     continue
+            source = normalize_source_name(evidence.source or (raw.source if raw else ""))
+            source_tier = self._normalize_source_tier(evidence.source_tier)
+            if is_secondary_confirmation_source(source):
+                source_tier = max(source_tier, 2)
             items.append(
                 {
-                    "source": evidence.source,
-                    "source_tier": evidence.source_tier,
+                    "source": source,
+                    "source_tier": source_tier,
                     "url": evidence.url,
                     "published_at": published_at,
                     "title": title,
                     "full_text": full_text,
                 }
             )
-        return items
+        if items:
+            return items
+        return self._fallback_evidence_rows(session, event, limit=limit)
 
     def _build_evidence_payload(self, session: Session | None, event: Event) -> list[dict[str, Any]]:
         max_chars_per_item = 20_000
@@ -317,6 +458,8 @@ class AnalysisService:
                 continue
             # Skip opinion / valuation / technical-commentary content.
             if title and self._WEAK_OPINION_PATTERNS.search(title):
+                continue
+            if is_follow_up_commentary(title) or is_follow_up_commentary(full_text):
                 continue
 
             original_len = len(full_text)
@@ -386,12 +529,30 @@ class AnalysisService:
         entities = [str(x).lower() for x in (event.entities or []) if x]
 
         opinion_hits = 0
+        follow_up_hits = 0
         price_action_hits = 0
         hard_event_hits = 0
         ticker_specific_hits = 0
-        unique_sources = {str(item.get("source") or "").strip().lower() for item in candidates if item.get("source")}
-        strong_sources = sum(1 for item in candidates if self._normalize_source_tier(item.get("source_tier")) <= 1)
+        unique_sources = {
+            normalize_source_name(str(item.get("source") or "").strip().lower())
+            for item in candidates
+            if item.get("source")
+        }
+        strong_sources = sum(
+            1
+            for item in candidates
+            if (
+                self._normalize_source_tier(item.get("source_tier")) == 0
+                or (
+                    self._normalize_source_tier(item.get("source_tier")) <= 1
+                    and not is_secondary_confirmation_source(str(item.get("source") or ""))
+                )
+            )
+        )
         weak_source_only = bool(unique_sources) and all(source in self._WEAK_OPINION_SOURCES for source in unique_sources)
+        secondary_confirmation_only = bool(unique_sources) and all(
+            is_secondary_confirmation_source(source) for source in unique_sources
+        )
 
         for item in candidates:
             title = str(item.get("title") or "")
@@ -399,6 +560,8 @@ class AnalysisService:
             title_lower = title.lower()
             if self._WEAK_OPINION_PATTERNS.search(title) or self._WEAK_OPINION_PATTERNS.search(text):
                 opinion_hits += 1
+            if is_follow_up_commentary(title) or is_follow_up_commentary(text):
+                follow_up_hits += 1
             if self._PRICE_ACTION_ONLY_PATTERNS.search(title_lower) and not self._HARD_EVENT_PATTERNS.search(text):
                 price_action_hits += 1
             if self._HARD_EVENT_PATTERNS.search(text):
@@ -427,6 +590,10 @@ class AnalysisService:
             score += 6
         if weak_source_only:
             score -= 18
+        if secondary_confirmation_only:
+            score -= 15
+        if follow_up_hits:
+            score -= 28
         if price_action_hits:
             score -= 22
         if opinion_hits:
@@ -451,7 +618,13 @@ class AnalysisService:
         reason = "tradeable"
         tradeable = True
 
-        if opinion_hits and not hard_event_hits:
+        if follow_up_hits and not hard_event_hits:
+            tradeable = False
+            reason = "follow_up_or_commentary"
+        elif secondary_confirmation_only and strong_sources == 0:
+            tradeable = False
+            reason = "secondary_confirmation_only"
+        elif opinion_hits and not hard_event_hits:
             tradeable = False
             reason = "opinion_or_technical_commentary"
         elif price_action_hits and not hard_event_hits:
@@ -475,12 +648,14 @@ class AnalysisService:
             "score": score,
             "reason": reason,
             "opinion_hits": opinion_hits,
+            "follow_up_hits": follow_up_hits,
             "price_action_hits": price_action_hits,
             "hard_event_hits": hard_event_hits,
             "ticker_specific_hits": ticker_specific_hits,
             "unique_sources": len(unique_sources),
             "strong_sources": strong_sources,
             "weak_source_only": weak_source_only,
+            "secondary_confirmation_only": secondary_confirmation_only,
             "earnings_review": earnings_review,
         }
         self._tradeability_cache[cache_key] = dict(result)

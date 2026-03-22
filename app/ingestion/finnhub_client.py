@@ -10,6 +10,7 @@ from dateutil import parser as dt_parser
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.analysis.taxonomy import is_secondary_confirmation_source, normalize_source_name
 from app.core.config import Settings
 from app.core.utils import make_hash, utc_now
 from app.db.models import AnalystRating, EarningsCalendar, FundamentalsSnapshot
@@ -110,7 +111,7 @@ class FinnhubNewsClient:
         # Strip bodies that are just a URL (Benzinga sometimes sends a redirect URL as body)
         if body.startswith("http") and " " not in body.strip():
             body = ""
-        source = (row.get("source") or "finnhub").lower()
+        source = normalize_source_name((row.get("source") or "finnhub").lower())
         ts = row.get("datetime")
         try:
             if isinstance(ts, (int, float)):
@@ -130,6 +131,10 @@ class FinnhubNewsClient:
         if ticker:
             meta["ticker"] = ticker
 
+        source_tier = 1
+        if is_secondary_confirmation_source(source):
+            source_tier = 2
+
         return RawNewsItem(
             source=source,
             url=article_url,
@@ -138,7 +143,7 @@ class FinnhubNewsClient:
             published_at=published,
             ingested_at=utc_now(),
             hash=make_hash(source, article_url, title),
-            source_tier=1,  # ticker-specific news → tier 1
+            source_tier=source_tier,
             metadata=meta,
         )
 

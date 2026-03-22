@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     backtest_regime_risk_adjust: bool = True
     backtest_regime_bull_risk_multiplier: float = 1.20
     backtest_regime_bear_risk_multiplier: float = 0.80
-    backtest_dedup_same_day_event: bool = False
+    backtest_dedup_same_day_event: bool = True
     backtest_use_event_quality_filter: bool = False
     backtest_event_quality_min_score: int = 70
     backtest_event_quality_fail_open: bool = True

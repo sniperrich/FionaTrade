@@ -257,3 +257,101 @@ def test_tradeability_counts_tier0_source_as_strong(session, settings):
     tradeability = svc.assess_tradeability(event, session=session)
     assert tradeability["strong_sources"] == 1
     assert tradeability["tradeable"] is True
+
+
+def test_evidence_rows_fallback_backfills_missing_lineage(session, settings):
+    svc = AnalysisService(settings)
+    event_ts = datetime(2026, 2, 23, 12, 30, tzinfo=timezone.utc)
+    event = Event(
+        event_type="merger_acquisition",
+        tickers=["PYPL"],
+        entities=["PayPal"],
+        severity=75,
+        confidence=80,
+        validation_status="VALID",
+        summary="PayPal attracts takeover interest after stock slump",
+        event_time=event_ts,
+    )
+    session.add(event)
+    session.flush()
+
+    matching_raw = RawItem(
+        source="benzinga",
+        source_tier=1,
+        url="https://example.com/pypl-takeover",
+        title="PayPal Attracts Takeover Interest After Stock Slump",
+        body="Bloomberg reports PayPal attracted takeover interest after the stock slump.",
+        published_at=event_ts - timedelta(minutes=2),
+        ingested_at=event_ts - timedelta(minutes=2),
+        item_hash="analysis-fallback-lineage",
+        metadata_json={"ticker": "PYPL"},
+        processed=True,
+    )
+    future_raw = RawItem(
+        source="yahoo",
+        source_tier=2,
+        url="https://example.com/pypl-followup",
+        title="Why PayPal stock is up today after takeover chatter",
+        body="This follow-up article was published after the event timestamp.",
+        published_at=event_ts + timedelta(minutes=10),
+        ingested_at=event_ts + timedelta(minutes=10),
+        item_hash="analysis-fallback-future",
+        metadata_json={"ticker": "PYPL"},
+        processed=True,
+    )
+    session.add_all([matching_raw, future_raw])
+    session.flush()
+
+    rows = svc._evidence_rows(session, event)
+    assert len(rows) == 1
+    assert rows[0]["url"] == matching_raw.url
+    evidence = session.query(EventEvidence).filter_by(event_id=event.id).all()
+    assert len(evidence) == 1
+    assert evidence[0].raw_item_id == matching_raw.id
+
+
+def test_tradeability_blocks_secondary_confirmation_only_source(session, settings):
+    svc = AnalysisService(settings)
+    event_ts = datetime(2026, 2, 23, 12, 30, tzinfo=timezone.utc)
+    event = Event(
+        event_type="merger_acquisition",
+        tickers=["PYPL"],
+        entities=["PayPal"],
+        severity=72,
+        confidence=82,
+        validation_status="VALID",
+        summary="PayPal attracts takeover interest after stock slump",
+        event_time=event_ts,
+    )
+    session.add(event)
+    session.flush()
+
+    raw = RawItem(
+        source="cnbc",
+        source_tier=1,
+        url="https://example.com/cnbc-pypl",
+        title="PayPal shares jump after report of takeover interest",
+        body="CNBC reports PayPal shares jump after report of takeover interest.",
+        published_at=event_ts,
+        ingested_at=event_ts,
+        item_hash="analysis-secondary-only",
+        metadata_json={"ticker": "PYPL"},
+        processed=True,
+    )
+    session.add(raw)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=raw.source,
+            source_tier=raw.source_tier,
+            summary=raw.title,
+        )
+    )
+    session.flush()
+
+    tradeability = svc.assess_tradeability(event, session=session)
+    assert tradeability["tradeable"] is False
+    assert tradeability["reason"] == "secondary_confirmation_only"

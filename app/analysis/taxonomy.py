@@ -41,6 +41,12 @@ NEGATIVE_EVENTS = {
 # guidance_cut: keyword "warned" too loose; catches unrelated warnings; body usually too short to trade
 EXCLUDED_FROM_TRADING = {"sec_filing", "unknown", "supply_chain_disruption", "guidance_cut"}
 
+SECONDARY_CONFIRMATION_SOURCES = frozenset({"cnbc", "yahoo", "yahoo_finance"})
+
+_SOURCE_ALIASES = {
+    "yahoo": "yahoo_finance",
+}
+
 SOURCE_TIER = {
     "sec": 0,
     "exchange": 0,
@@ -51,12 +57,13 @@ SOURCE_TIER = {
     "wsj": 1,
     "ft": 1,
     "nytimes": 1,
-    "cnbc": 1,
+    "cnbc": 2,
     "bbc": 1,
     "aljazeera": 1,
     "axios": 1,
     "npr": 1,
     "marketwatch": 2,
+    "yahoo": 2,
     "yahoo_finance": 2,
     "thestreet": 2,
     "seekingalpha": 2,
@@ -108,9 +115,33 @@ _EARNINGS_WINDOW_RE = re.compile(
 )
 _PRICE_RECAP_RE = re.compile(
     r"\b(how .* stock (?:jumped|rose|fell|dropped|surged|slid)|stock jumped|stock rose|stock fell"
-    r"|shares? jumped|shares? rose|shares? fell)\b",
+     r"|shares? jumped|shares? rose|shares? fell)\b",
     re.IGNORECASE,
 )
+_FOLLOW_UP_COMMENTARY_RE = re.compile(
+    r"\b(trade tracker|final trades|what to know|what it means|market chatter|commentary|commentary piece"
+    r"|column|opinion|price target|analyst (?:says|call|note|view)|technical analysis"
+    r"|ready for (?:a )?\d+% surge|ready for a surge|buy here"
+    r"|does that make .* a buy|what investors need to know|why .* stock (?:is|was|keeps) (?:up|down|moving)"
+    r"|shares? (?:are|were) trading (?:higher|lower)|stocks making the biggest moves|biggest movers"
+    r"|top movers|roundup|recap|market recap|opening bell|ahead of the bell|after the bell)\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_source_name(source: str | None) -> str:
+    lowered = (source or "").strip().lower()
+    if not lowered:
+        return ""
+    return _SOURCE_ALIASES.get(lowered, lowered)
+
+
+def is_secondary_confirmation_source(source: str | None) -> bool:
+    return normalize_source_name(source) in SECONDARY_CONFIRMATION_SOURCES
+
+
+def is_follow_up_commentary(text: str | None) -> bool:
+    return bool(_FOLLOW_UP_COMMENTARY_RE.search(text or ""))
 
 
 def resolve_event_type_for_text(event_type: str | None, text: str) -> str:
@@ -119,6 +150,9 @@ def resolve_event_type_for_text(event_type: str | None, text: str) -> str:
 
     if not lowered:
         return et
+
+    if is_follow_up_commentary(lowered) and et not in {"sec_earnings_release", "sec_filing"}:
+        return "unknown"
 
     if et == "earnings_miss":
         has_positive = bool(_POSITIVE_EARNINGS_RE.search(lowered))

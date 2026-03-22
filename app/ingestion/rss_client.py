@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import feedparser
 from dateutil import parser as dt_parser
 
-from app.analysis.taxonomy import SOURCE_TIER
+from app.analysis.taxonomy import SOURCE_TIER, is_secondary_confirmation_source, normalize_source_name
 from app.core.config import Settings
 from app.core.utils import make_hash, utc_now
 from app.ingestion.types import SourceCheck
@@ -252,23 +252,27 @@ class RssClient:
                 except Exception:
                     published = utc_now()
 
-                item_hash = make_hash(source_name, url, title)
+                normalized_source = normalize_source_name(source_name)
+                item_hash = make_hash(normalized_source, url, title)
                 matched_tickers, relevance_tier = self._ticker_relevance(title, body)
                 item_metadata: dict = {"feed": feed_url, "source_quality_tier": tier}
                 if matched_tickers:
                     item_metadata["matched_tickers"] = matched_tickers
                 if source_name in {"bbc", "aljazeera", "axios", "npr"}:
                     item_metadata["category"] = "geopolitical"
+                source_tier = relevance_tier
+                if is_secondary_confirmation_source(normalized_source):
+                    source_tier = max(source_tier, 2)
                 items.append(
                     RawNewsItem(
-                        source=source_name,
+                        source=normalized_source,
                         url=url,
                         title=title,
                         body=body,
                         published_at=published,
                         ingested_at=utc_now(),
                         hash=item_hash,
-                        source_tier=relevance_tier,
+                        source_tier=source_tier,
                         metadata=item_metadata,
                     )
                 )
@@ -310,8 +314,8 @@ class RssClient:
     ) -> tuple[list[RawNewsItem], list[SourceCheck]]:
         """Fetch per-ticker RSS headlines from Yahoo Finance.
 
-        Yields ticker-tagged items (source_tier=1) providing high-precision
-        stock-specific news that supplements general RSS feeds.
+        Yields ticker-tagged items from Yahoo Finance, but they remain
+        secondary-confirmation evidence rather than primary trigger sources.
         """
         if not self.settings.enable_rss or not self.settings.enable_ticker_rss:
             return [], []
@@ -356,7 +360,7 @@ class RssClient:
                         published_at=published,
                         ingested_at=utc_now(),
                         hash=item_hash,
-                        source_tier=1,  # ticker-specific → tier 1
+                        source_tier=2,
                         metadata={"ticker": ticker, "feed": feed_url},
                     )
                 )

@@ -18,11 +18,16 @@ from app.analysis.signal_validator import (
     ExecutionRecommendation,
     SignalValidator,
 )
-from app.analysis.taxonomy import is_earnings_window_event, is_price_action_recap, resolve_event_type_for_text
+from app.analysis.taxonomy import (
+    is_earnings_window_event,
+    is_price_action_recap,
+    normalize_source_name,
+    resolve_event_type_for_text,
+)
 from app.core.config import Settings
 from app.core.logging import ensure_logging, get_app_logger, log_writeout
 from app.core.utils import ensure_utc, utc_now
-from app.db.models import BacktestRun, BacktestTrade, Bar1m, Event, EventEvidence
+from app.db.models import BacktestRun, BacktestTrade, Bar1m, Event
 
 
 @dataclass
@@ -366,7 +371,8 @@ class BacktestEngineService:
                 passthrough.append(event)
                 continue
             event_ts = ensure_utc(event.event_time)
-            key = (str(event.tickers[0]).upper(), event.event_type or "", event_ts.date())
+            effective_event_type = resolve_event_type_for_text(event.event_type or "", event.summary or "")
+            key = (str(event.tickers[0]).upper(), effective_event_type or "", event_ts.date())
             current = selected.get(key)
             if current is None:
                 selected[key] = event
@@ -627,7 +633,7 @@ class BacktestEngineService:
         end_date = params.get("end_date")
         event_profile = str(params.get("event_profile") or "").strip().lower()
         selected_sources = sorted({
-            source.strip().lower()
+            normalize_source_name(source.strip().lower())
             for source in self._as_list(params.get("sources"))
             if source and source.strip()
         })
@@ -657,14 +663,6 @@ class BacktestEngineService:
                 Event.confidence >= min_conf,
             )
         )
-        if selected_sources:
-            event_ids_for_sources = (
-                select(EventEvidence.event_id)
-                .where(EventEvidence.source.in_(selected_sources))
-                .distinct()
-            )
-            stmt = stmt.where(Event.id.in_(event_ids_for_sources))
-
         if start_date:
             start_dt = ensure_utc(datetime.fromisoformat(str(start_date)))
             stmt = stmt.where(Event.event_time >= start_dt)
@@ -673,6 +671,15 @@ class BacktestEngineService:
             stmt = stmt.where(Event.event_time < end_dt)
 
         events = session.execute(stmt.order_by(Event.event_time.asc())).scalars().all()
+        if selected_sources:
+            source_filtered_events: list[Event] = []
+            selected_source_set = set(selected_sources)
+            for event in events:
+                evidence_rows = self.analysis._evidence_rows(session, event, limit=4)
+                event_sources = {normalize_source_name(row.get("source")) for row in evidence_rows if row.get("source")}
+                if event_sources & selected_source_set:
+                    source_filtered_events.append(event)
+            events = source_filtered_events
         profile_filtered = 0
         if event_profile:
             filtered_events = [event for event in events if self._matches_event_profile(event, event_profile)]
@@ -1383,11 +1390,11 @@ class BacktestEngineService:
             )
 
             event_type_attr[event.event_type] = event_type_attr.get(event.event_type, 0.0) + pnl
-            evidence = session.execute(
-                select(EventEvidence).where(EventEvidence.event_id == event.id).order_by(EventEvidence.id.asc()).limit(1)
-            ).scalar_one_or_none()
-            if evidence:
-                source_attr[evidence.source] = source_attr.get(evidence.source, 0.0) + pnl
+            evidence_rows = self.analysis._evidence_rows(session, event, limit=1)
+            if evidence_rows:
+                source = normalize_source_name(str(evidence_rows[0].get("source") or ""))
+                if source:
+                    source_attr[source] = source_attr.get(source, 0.0) + pnl
 
             emit_progress(idx)
 

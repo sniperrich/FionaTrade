@@ -155,10 +155,12 @@ def test_backtest_dedup_same_day_event(session, settings):
 
     result_no_dedup = svc.run(session, params={**base_params, "dedup_same_day_event": False})
     result_dedup = svc.run(session, params={**base_params, "dedup_same_day_event": True})
+    result_default = svc.run(session, params=base_params)
 
     assert result_no_dedup.metrics["trades"] == 2
     assert result_dedup.metrics["trades"] == 1
     assert result_dedup.metrics["dedup_dropped"] == 1
+    assert result_default.metrics["trades"] == 1
 
 
 def test_backtest_dedup_earnings_window_across_days(session, settings):

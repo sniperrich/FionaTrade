@@ -130,11 +130,12 @@ def test_backtest_source_filter_limits_events_and_trades(session, settings):
             "risk_sizing": False,
             "slippage_bps": 0.0,
             "use_signal_validation": False,
+            "use_tradeability_filter": False,
         },
     )
 
     assert result.status == "DONE"
     assert result.metrics["events_considered"] == 1
     assert result.metrics["trades"] == 1
-    assert result.metrics["selected_sources"] == ["yahoo"]
-    assert set(result.metrics["source_attribution"].keys()) == {"yahoo"}
+    assert result.metrics["selected_sources"] == ["yahoo_finance"]
+    assert set(result.metrics["source_attribution"].keys()) == {"yahoo_finance"}

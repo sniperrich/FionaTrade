@@ -6,7 +6,12 @@ from datetime import timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.analysis.taxonomy import TIER_SCORE, resolve_event_type_for_text
+from app.analysis.taxonomy import (
+    TIER_SCORE,
+    is_secondary_confirmation_source,
+    normalize_source_name,
+    resolve_event_type_for_text,
+)
 from app.core.utils import ensure_utc
 from app.db.models import Event, EventEvidence
 from app.normalization.service import NormalizedCluster
@@ -27,8 +32,7 @@ class _RecentEventSnapshot:
     tickers: list[str]
     event_type: str
     summary: str
-    sources: set[str]
-    tiers: list[int]
+    source_entries: list[tuple[str, int]]
 
 
 class ValidationService:
@@ -107,7 +111,11 @@ class ValidationService:
         ).all()
         by_event_id: dict[int, list[tuple[str, int]]] = {}
         for event_id, source, tier in evidence_rows:
-            by_event_id.setdefault(int(event_id), []).append((str(source or "").lower(), int(tier or 9)))
+            normalized_source = normalize_source_name(source)
+            normalized_tier = int(tier or 9)
+            if is_secondary_confirmation_source(normalized_source):
+                normalized_tier = max(normalized_tier, 2)
+            by_event_id.setdefault(int(event_id), []).append((normalized_source, normalized_tier))
 
         history: list[_RecentEventSnapshot] = []
         for event in events:
@@ -118,8 +126,7 @@ class ValidationService:
                     tickers=[str(t).upper() for t in (event.tickers or [])],
                     event_type=event.event_type,
                     summary=event.summary or "",
-                    sources={source for source, _ in evidence},
-                    tiers=[tier for _, tier in evidence] or [2],
+                    source_entries=evidence or [("", 2)],
                 )
             )
         return history
@@ -134,8 +141,15 @@ class ValidationService:
 
         event_time = ensure_utc(cluster.canonical.event_time)
         summary = cluster.canonical.summary or self._current_text(cluster)
-        sources = {str(item.source or "").lower() for item in cluster.raw_items if item.source}
-        tiers = [self._normalize_source_tier(item.source_tier) for item in cluster.raw_items]
+        source_entries = []
+        for item in cluster.raw_items:
+            source = normalize_source_name(item.source)
+            tier = self._normalize_source_tier(item.source_tier)
+            if is_secondary_confirmation_source(source):
+                tier = max(tier, 2)
+            source_entries.append((source, tier))
+        sources = {source for source, _ in source_entries if source}
+        tiers = [tier for _, tier in source_entries]
         conflict_texts = [summary]
 
         for snapshot in recent_history:
@@ -146,24 +160,46 @@ class ValidationService:
                 continue
             if not self._corroborates(cluster, snapshot):
                 continue
-            sources.update(snapshot.sources)
-            tiers.extend(snapshot.tiers)
+            sources.update(source for source, _ in snapshot.source_entries if source)
+            tiers.extend(tier for _, tier in snapshot.source_entries)
+            source_entries.extend(snapshot.source_entries)
             conflict_texts.append(snapshot.summary)
 
         source_count = len(sources)
         has_tier0 = any(t == 0 for t in tiers)
         conflict = self._has_conflict(conflict_texts)
+        primary_sources = {
+            source
+            for source, _ in source_entries
+            if source and not is_secondary_confirmation_source(source)
+        }
+        secondary_sources = {
+            source
+            for source, _ in source_entries
+            if source and is_secondary_confirmation_source(source)
+        }
+        primary_source_count = len(primary_sources)
+        secondary_source_count = len(secondary_sources)
+        secondary_only = bool(source_count) and primary_source_count == 0 and secondary_source_count > 0
 
         source_score = max(TIER_SCORE.get(t, 10) for t in tiers)
-        corroboration_score = 0 if source_count <= 1 else min(35, (source_count - 1) * 20)
+        corroboration_score = 0
+        if primary_source_count >= 2:
+            corroboration_score = min(35, (primary_source_count - 1) * 20)
+        elif primary_source_count >= 1 and secondary_source_count >= 1:
+            corroboration_score = 20
+        elif secondary_source_count >= 2:
+            corroboration_score = 10
         entity_consistency = 20 if len(cluster.canonical.tickers) == 1 else 12
         conflict_penalty = 40 if conflict else 0
 
         confidence = max(0, min(100, int(source_score + corroboration_score + entity_consistency - conflict_penalty)))
         if conflict:
             return confidence, "WATCH", "source_conflict_detected"
-        if has_tier0 or source_count >= 2:
+        if has_tier0 or primary_source_count >= 2 or (primary_source_count >= 1 and secondary_source_count >= 1):
             return confidence, "VALID", None
+        if secondary_only:
+            return confidence, "WATCH", "secondary_confirmation_only"
         return confidence, "WATCH", "single_source_only"
 
     def _snapshot_from_cluster(self, cluster: NormalizedCluster) -> _RecentEventSnapshot:
@@ -172,8 +208,16 @@ class ValidationService:
             tickers=[str(t).upper() for t in (cluster.canonical.tickers or [])],
             event_type=cluster.canonical.event_type,
             summary=cluster.canonical.summary or "",
-            sources={str(item.source or "").lower() for item in cluster.raw_items if item.source},
-            tiers=[self._normalize_source_tier(item.source_tier) for item in cluster.raw_items] or [2],
+            source_entries=[
+                (
+                    normalize_source_name(item.source),
+                    max(self._normalize_source_tier(item.source_tier), 2)
+                    if is_secondary_confirmation_source(item.source)
+                    else self._normalize_source_tier(item.source_tier),
+                )
+                for item in cluster.raw_items
+                if item.source
+            ] or [("", 2)],
         )
 
     def validate_and_store(self, session: Session, clusters: list[NormalizedCluster]) -> ValidationResult:
@@ -205,13 +249,17 @@ class ValidationService:
             session.flush()
 
             for raw in cluster.raw_items:
+                source = normalize_source_name(raw.source)
+                source_tier = self._normalize_source_tier(raw.source_tier)
+                if is_secondary_confirmation_source(source):
+                    source_tier = max(source_tier, 2)
                 session.add(
                     EventEvidence(
                         event_id=event.id,
                         raw_item_id=raw.id,
                         url=raw.url,
-                        source=raw.source,
-                        source_tier=raw.source_tier,
+                        source=source,
+                        source_tier=source_tier,
                         summary=raw.title[:280],
                     )
                 )
