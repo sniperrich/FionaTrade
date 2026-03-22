@@ -93,6 +93,13 @@ def _serialize_backtest_run(run: BacktestRun, include_detail: bool = False) -> d
             "progress_total": metrics.get("progress_total", 0),
             "progress_pct": metrics.get("progress_pct", 0.0),
             "trades_so_far": metrics.get("trades_so_far", 0),
+            "phase": metrics.get("phase", "queued"),
+            "phase_label": metrics.get("phase_label", "Queued"),
+            "phase_current": metrics.get("phase_current", 0),
+            "phase_total": metrics.get("phase_total", 0),
+            "phase_pct": metrics.get("phase_pct", 0.0),
+            "phase_detail": metrics.get("phase_detail"),
+            "last_progress_at": metrics.get("last_progress_at"),
         },
     }
     if include_detail:
@@ -344,7 +351,19 @@ def queue_backtest(
         "trigger": "api",
     }
 
-    run = BacktestRun(params=params, status="QUEUED")
+    run = BacktestRun(
+        params=params,
+        status="QUEUED",
+        metrics={
+            "phase": "queued",
+            "phase_label": "Queued",
+            "phase_current": 0,
+            "phase_total": 0,
+            "phase_pct": 0.0,
+            "phase_detail": "Waiting for worker to claim command",
+            "last_progress_at": utc_now().isoformat(),
+        },
+    )
     session.add(run)
     session.flush()
 

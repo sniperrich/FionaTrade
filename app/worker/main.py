@@ -175,6 +175,22 @@ def _heartbeat_worker() -> None:
         logger.exception("[worker] heartbeat failed: %s", exc)
 
 
+def _reconcile_orphaned_state() -> None:
+    try:
+        with db_session() as session:
+            counts = runtime.reconcile_orphaned_state(session)
+            if any(counts.values()):
+                logger.warning(
+                    "[worker] reconciled orphaned state commands=%s runs=%s backtests=%s",
+                    counts["commands_failed"],
+                    counts["runs_failed"],
+                    counts["backtests_failed"],
+                )
+                log_writeout("worker_reconciled_orphans", counts)
+    except Exception as exc:
+        logger.exception("[worker] orphaned state reconciliation failed: %s", exc)
+
+
 def _process_worker_commands() -> None:
     try:
         while True:
@@ -297,7 +313,18 @@ def _process_worker_commands() -> None:
                                 existing_run = None
                             if existing_run is not None:
                                 existing_run.status = "FAILED"
-                                existing_run.metrics = {"error": str(exc)}
+                                metrics = dict(existing_run.metrics or {})
+                                metrics.update(
+                                    {
+                                        "phase": "failed",
+                                        "phase_label": "Failed",
+                                        "phase_detail": str(exc),
+                                        "phase_pct": 100.0,
+                                        "error": str(exc),
+                                        "last_progress_at": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                )
+                                existing_run.metrics = metrics
                                 existing_run.finished_at = datetime.now(timezone.utc)
                             runtime.finish_run(
                                 session,
@@ -404,6 +431,7 @@ def main() -> None:
     global scheduler
 
     init_db()
+    _reconcile_orphaned_state()
     with db_session() as session:
         runtime_control.set_live_enabled(session, settings, runtime_control.get_live_enabled(session, settings), source="worker_boot")
         runtime_control.touch_worker_heartbeat(

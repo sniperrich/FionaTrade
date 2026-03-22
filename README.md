@@ -48,6 +48,7 @@ db     -> SQLite，统一保存状态、结果、行情缓存、运行态
 - `MarketDataService` 统一 chart/cache/freshness/fallback/backfill
 - 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
 - SQLite 现在默认启用 `WAL + busy_timeout`，降低 worker/supervisor/backtest 并发写锁冲突
+- worker 启动时会自动清算遗留的 `RUNNING` 命令/运行/回测，避免重启后旧任务永久显示运行中
 
 ### Agent 模式（默认，`AGENT_MODE_ENABLED=true`）
 
@@ -157,6 +158,7 @@ tests/           pytest 测试集
 > - `/api/live/status` 现额外返回 `worker` / `supervisor` / `command_queue`
 > - `/api/worker/history` 用于 `/live` 的专门排障面板（command queue / worker history）
 > - `/api/backtests/run` 会先创建 `QUEUED` 的 `BacktestRun`，再给 worker 排队命令；浏览器关闭后任务照样继续
+> - `/api/backtests` / `/api/backtests/{run_id}` 现在额外返回 `phase / phase_label / phase_current / phase_total / phase_pct / phase_detail / last_progress_at`
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
 > - 若当前是周末/美股闭市，live cycle 会显示 `analysis mode`，这是预期行为，不是失败
 > - 若 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 都为空，live cycle 会明确显示 `no live tickers configured`
@@ -227,7 +229,9 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
   - 创建/更新 `BacktestRun`
   - 在后台执行回测，不依赖浏览器存活
 - Backtest 运行中会持续把 `progress_current / progress_total / progress_pct` 写回 `BacktestRun.metrics`
+- 对于主循环前的耗时阶段，还会持续写入 `phase_*` 字段，因此 Finnhub 预热/LLM 预取期间 UI 不会一直卡在 `0/N`
 - Supervisor heartbeat 遇到短时 SQLite lock 会跳过本次写入并继续守护，不会再因为 heartbeat 写失败把 worker 一起带崩
+- Worker 重启时会把上次异常中断留下的 `RUNNING` backtest / worker command / worker run 统一标记为 `FAILED`
 
 当前支持的 source filter 语义：
 - 若选择 `sources`，只纳入至少有一条 `event_evidence.source` 命中的事件

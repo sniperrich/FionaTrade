@@ -78,6 +78,16 @@ class BacktestEngineService:
         r"|analyst questions|poised to beat|surprise streak|earnings release)\b",
         re.IGNORECASE,
     )
+    _BACKTEST_PHASE_LABELS = {
+        "queued": "Queued",
+        "loading_events": "Loading Events",
+        "cache_warmup": "Cache Warmup",
+        "llm_prefetch": "LLM Prefetch",
+        "event_execution": "Event Execution",
+        "finalizing": "Finalizing",
+        "completed": "Completed",
+        "failed": "Failed",
+    }
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -703,15 +713,38 @@ class BacktestEngineService:
         current_day: date | None = None
         day_start_equity = equity
         day_halted = False
+        processed_events = 0
+        current_phase = "loading_events"
 
         def persist_run_progress(
             *,
-            processed: int,
-            progress_pct: float,
-            trades: int,
+            processed: int | None = None,
+            trades: int | None = None,
+            phase: str | None = None,
+            phase_current: int | None = None,
+            phase_total: int | None = None,
+            phase_detail: str | None = None,
             force_commit: bool = False,
         ) -> None:
+            nonlocal processed_events, current_phase
+            if processed is None:
+                processed = processed_events
+            processed_events = processed
+            if phase is not None:
+                current_phase = phase
+            if trades is None:
+                trades = len(pnl_list)
+            progress_pct = (processed / total_events * 100.0) if total_events else 100.0
+
             partial_metrics = dict(run.metrics or {})
+            if phase_current is None:
+                phase_current = int(partial_metrics.get("phase_current", 0) or 0)
+            if phase_total is None:
+                phase_total = int(partial_metrics.get("phase_total", 0) or 0)
+            phase_pct = (
+                max(0.0, min(100.0, (phase_current / phase_total) * 100.0))
+                if phase_total > 0 else 0.0
+            )
             partial_metrics.update(
                 {
                     "progress_current": processed,
@@ -722,6 +755,13 @@ class BacktestEngineService:
                     "equity_so_far": equity,
                     "selected_sources": selected_sources,
                     "event_profile": event_profile,
+                    "phase": current_phase,
+                    "phase_label": self._BACKTEST_PHASE_LABELS.get(current_phase, current_phase.replace("_", " ").title()),
+                    "phase_current": phase_current,
+                    "phase_total": phase_total,
+                    "phase_pct": phase_pct,
+                    "phase_detail": phase_detail if phase_detail is not None else partial_metrics.get("phase_detail"),
+                    "last_progress_at": utc_now().isoformat(),
                 }
             )
             run.status = "RUNNING"
@@ -730,7 +770,42 @@ class BacktestEngineService:
             if force_commit:
                 session.commit()
 
-        persist_run_progress(processed=0, progress_pct=0.0, trades=0, force_commit=True)
+        def set_phase(
+            phase: str,
+            *,
+            current: int = 0,
+            total: int = 0,
+            detail: str = "",
+            force_commit: bool = True,
+        ) -> None:
+            persist_run_progress(
+                phase=phase,
+                phase_current=current,
+                phase_total=total,
+                phase_detail=detail,
+                force_commit=force_commit,
+            )
+            self.logger.info(
+                "回测阶段 run_id=%s phase=%s %s/%s detail=%s",
+                run.id,
+                phase,
+                current,
+                total,
+                detail,
+            )
+            log_writeout(
+                "backtest_phase",
+                {
+                    "run_id": run.id,
+                    "phase": phase,
+                    "phase_label": self._BACKTEST_PHASE_LABELS.get(phase, phase.replace("_", " ").title()),
+                    "phase_current": current,
+                    "phase_total": total,
+                    "phase_detail": detail,
+                },
+            )
+
+        set_phase("loading_events", current=1, total=1, detail="Loading candidate events")
 
         self.logger.info(
             "回测开始 run_id=%s events=%s dedup_dropped=%s use_llm=%s min_conf=%s horizon=%s entry_window=%s start=%s end=%s",
@@ -788,13 +863,16 @@ class BacktestEngineService:
             if idx % progress_every != 0 and idx != total_events:
                 return
             elapsed = time.perf_counter() - started
-            progress_pct = (idx / total_events * 100.0) if total_events else 100.0
             persist_run_progress(
                 processed=idx,
-                progress_pct=progress_pct,
                 trades=len(pnl_list),
+                phase="event_execution",
+                phase_current=idx,
+                phase_total=total_events,
+                phase_detail=f"Processed {idx} of {total_events} events",
                 force_commit=True,
             )
+            progress_pct = (idx / total_events * 100.0) if total_events else 100.0
             self.logger.info(
                 "回测进度 run_id=%s %.1f%%(%s/%s) trades=%s llm_signals=%s fallback=%s equity=%.2f elapsed=%.1fs",
                 run.id,
@@ -870,15 +948,37 @@ class BacktestEngineService:
                 if current is None or event_ts < current:
                     earliest_event_by_ticker[ticker_key] = event_ts
             unique_tickers = list(earliest_event_by_ticker.keys())
+            if unique_tickers:
+                set_phase(
+                    "cache_warmup",
+                    current=0,
+                    total=len(unique_tickers),
+                    detail=f"Warming Finnhub context for {len(unique_tickers)} tickers",
+                )
             self.logger.info(
                 "预热Finnhub cache run_id=%s unique_tickers=%d",
                 run.id, len(unique_tickers),
             )
             for i, tk in enumerate(unique_tickers):
                 self.analysis._finnhub_earnings_context(tk, event_ts=earliest_event_by_ticker[tk])
+                if (i + 1) % 5 == 0 or (i + 1) == len(unique_tickers):
+                    persist_run_progress(
+                        phase="cache_warmup",
+                        phase_current=i + 1,
+                        phase_total=len(unique_tickers),
+                        phase_detail=f"Warmed Finnhub context for {i + 1}/{len(unique_tickers)} tickers",
+                        force_commit=True,
+                    )
                 if (i + 1) % 10 == 0 or (i + 1) == len(unique_tickers):
                     self.logger.info("Finnhub cache预热 %d/%d", i + 1, len(unique_tickers))
 
+            if tradeable_events:
+                set_phase(
+                    "llm_prefetch",
+                    current=0,
+                    total=len(tradeable_events),
+                    detail=f"Prefetching LLM signals for {len(tradeable_events)} events",
+                )
             self.logger.info(
                 "并发LLM预取 run_id=%s workers=%s tradeable=%s/%s",
                 run.id, llm_workers, len(tradeable_events), total_events,
@@ -910,6 +1010,13 @@ class BacktestEngineService:
                         if completed_count % max(1, llm_workers * 4) == 0 or completed_count == len(tradeable_events):
                             elapsed_llm = time.perf_counter() - llm_started
                             rate = completed_count / elapsed_llm if elapsed_llm > 0 else 0
+                            persist_run_progress(
+                                phase="llm_prefetch",
+                                phase_current=completed_count,
+                                phase_total=len(tradeable_events),
+                                phase_detail=f"Prefetched {completed_count}/{len(tradeable_events)} signals",
+                                force_commit=True,
+                            )
                             self.logger.info(
                                 "LLM预取进度 %d/%d (%.1f/s) eta=%.0fs",
                                 completed_count, len(tradeable_events),
@@ -928,6 +1035,13 @@ class BacktestEngineService:
                     if completed_count % max(1, min(llm_workers, 4) * 4) == 0 or completed_count == len(tradeable_events):
                         elapsed_llm = time.perf_counter() - llm_started
                         rate = completed_count / elapsed_llm if elapsed_llm > 0 else 0
+                        persist_run_progress(
+                            phase="llm_prefetch",
+                            phase_current=completed_count,
+                            phase_total=len(tradeable_events),
+                            phase_detail=f"Prefetched {completed_count}/{len(tradeable_events)} signals",
+                            force_commit=True,
+                        )
                         self.logger.info(
                             "LLM预取进度 %d/%d (%.1f/s) eta=%.0fs",
                             completed_count, len(tradeable_events),
@@ -938,6 +1052,13 @@ class BacktestEngineService:
                 "LLM预取完成 run_id=%s signals=%d elapsed=%.1fs",
                 run.id, len(signal_map), time.perf_counter() - llm_started,
             )
+
+        set_phase(
+            "event_execution",
+            current=0,
+            total=total_events,
+            detail=f"Executing {total_events} events",
+        )
 
         for idx, event in enumerate(events, start=1):
             event_ts = ensure_utc(event.event_time)
@@ -1270,6 +1391,8 @@ class BacktestEngineService:
 
             emit_progress(idx)
 
+        set_phase("finalizing", current=1, total=1, detail="Computing metrics and writing results")
+
         metrics = self._compute_metrics(self.settings.initial_nav, equity_curve, pnl_list)
         metrics["events_considered"] = len(events)
         metrics["event_profile"] = event_profile
@@ -1324,6 +1447,13 @@ class BacktestEngineService:
         metrics["progress_current"] = total_events
         metrics["progress_total"] = total_events
         metrics["progress_pct"] = 100.0
+        metrics["phase"] = "completed"
+        metrics["phase_label"] = self._BACKTEST_PHASE_LABELS["completed"]
+        metrics["phase_current"] = total_events if total_events > 0 else 1
+        metrics["phase_total"] = total_events if total_events > 0 else 1
+        metrics["phase_pct"] = 100.0
+        metrics["phase_detail"] = "Backtest completed"
+        metrics["last_progress_at"] = utc_now().isoformat()
 
         run.metrics = metrics
         run.equity_curve = equity_curve

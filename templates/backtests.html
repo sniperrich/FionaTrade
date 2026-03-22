@@ -184,6 +184,36 @@ function progressBar(current, total, pct){
   `;
 }
 
+function phaseBadge(metrics){
+  const phase = String(metrics?.phase || 'queued').toLowerCase();
+  const label = metrics?.phase_label || phase.replaceAll('_', ' ');
+  const cls = {
+    queued: 'badge-blue',
+    loading_events: 'badge-blue',
+    cache_warmup: 'badge-blue',
+    llm_prefetch: 'badge-accent',
+    event_execution: 'badge-accent',
+    finalizing: 'badge-grey',
+    completed: 'badge-green',
+    failed: 'badge-red',
+  }[phase] || 'badge-grey';
+  return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
+}
+
+function runProgressBlock(metrics){
+  const m = metrics || {};
+  const hasEventProgress = Number(m.progress_total || 0) > 0 && Number(m.progress_current || 0) > 0;
+  const hasPhaseProgress = Number(m.phase_total || 0) > 0;
+  const detail = m.phase_detail ? `<div class="text-xs text-muted" style="margin-top:4px">${escapeHtml(m.phase_detail)}</div>` : '';
+  if(hasEventProgress){
+    return `${phaseBadge(m)}${detail}<div style="margin-top:6px">${progressBar(m.progress_current, m.progress_total, m.progress_pct)}</div>`;
+  }
+  if(hasPhaseProgress){
+    return `${phaseBadge(m)}${detail}<div style="margin-top:6px">${progressBar(m.phase_current, m.phase_total, m.phase_pct)}</div>`;
+  }
+  return `${phaseBadge(m)}${detail}<div class="text-xs text-muted" style="margin-top:6px">Queued</div>`;
+}
+
 function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
 
 function backtestStatusBadge(status){
@@ -257,7 +287,7 @@ async function loadBacktestRuns(){
       <td>${escapeHtml(row.start_date || '—')} → ${escapeHtml(row.end_date || '—')}</td>
       <td><span class="badge ${row.use_llm ? 'badge-accent' : 'badge-grey'}">${row.use_llm ? 'LLM' : 'RULES'}</span></td>
       <td class="text-xs">${escapeHtml(sources)}</td>
-      <td>${progressBar(row.metrics?.progress_current, row.metrics?.progress_total, row.metrics?.progress_pct)}</td>
+      <td>${runProgressBlock(row.metrics)}</td>
       <td class="num">${row.metrics?.trades ?? row.metrics?.trades_so_far ?? 0}</td>
       <td class="num">${fmtPct(row.metrics?.win_rate || 0)}</td>
       <td class="num">${fmtPct(row.metrics?.total_return || 0)}</td>
@@ -303,8 +333,8 @@ async function selectBacktestRun(runId){
       </div>
       <div class="card card-sm">
         <div class="card-title">Progress</div>
-        <div class="card-value">${metrics.progress_total ? `${metrics.progress_current ?? 0}/${metrics.progress_total}` : 'queued'}</div>
-        <div class="card-sub">${fmtPct((metrics.progress_pct || 0) / 100, 1)} complete</div>
+        <div class="card-value">${metrics.progress_total && metrics.progress_current ? `${metrics.progress_current ?? 0}/${metrics.progress_total}` : (metrics.phase_label || 'Queued')}</div>
+        <div class="card-sub">${escapeHtml(metrics.phase_detail || `${fmtPct((metrics.progress_pct || 0) / 100, 1)} complete`)}</div>
       </div>
       <div class="card card-sm">
         <div class="card-title">Filters</div>
@@ -313,7 +343,11 @@ async function selectBacktestRun(runId){
       </div>
     </div>
     <div class="mt12">
-      ${progressBar(metrics.progress_current, metrics.progress_total, metrics.progress_pct)}
+      ${runProgressBlock(metrics)}
+    </div>
+    <div class="mt12 text-sm text-muted">
+      Phase ${escapeHtml(metrics.phase_label || 'Queued')} ·
+      Last progress ${escapeHtml(metrics.last_progress_at || '—')}
     </div>
     <div class="mt12 text-sm text-muted">
       Range ${escapeHtml(data.start_date || '—')} → ${escapeHtml(data.end_date || '—')} ·

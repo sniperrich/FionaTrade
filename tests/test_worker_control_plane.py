@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from app.core.utils import utc_now
+from app.db.models import BacktestRun, WorkerCommand, WorkerRun
 from app.services.runtime_control import CONTROL_WORKER_HEARTBEAT, RuntimeControlService
 from app.services.worker_runtime import COMMAND_RUN_LIVE_CYCLE, WorkerRuntimeService
 
@@ -118,3 +119,50 @@ def test_worker_history_snapshot_contains_runs_commands_and_events(session) -> N
     assert history["runs"][0]["run_key"] == "abcd1234"
     assert history["commands"][0]["command_type"] == COMMAND_RUN_LIVE_CYCLE
     assert history["events"][0]["message"] == "Cycle started"
+
+
+def test_worker_reconciles_orphaned_running_state(session) -> None:
+    runtime = WorkerRuntimeService()
+    command = WorkerCommand(
+        command_type=COMMAND_RUN_LIVE_CYCLE,
+        status="RUNNING",
+        requested_by="pytest",
+    )
+    run = WorkerRun(
+        run_key="orphan123",
+        run_type="backtest",
+        trigger="manual",
+        status="RUNNING",
+        stage="running",
+    )
+    backtest = BacktestRun(
+        params={"start_date": "2026-01-01", "end_date": "2026-01-10"},
+        metrics={"progress_total": 10, "progress_current": 3, "phase": "llm_prefetch"},
+        status="RUNNING",
+    )
+    session.add_all([command, run, backtest])
+    session.commit()
+
+    counts = runtime.reconcile_orphaned_state(session)
+    session.expire_all()
+
+    reconciled_command = session.get(WorkerCommand, command.id)
+    reconciled_run = session.get(WorkerRun, run.id)
+    reconciled_backtest = session.get(BacktestRun, backtest.id)
+
+    assert counts["commands_failed"] == 1
+    assert counts["runs_failed"] == 1
+    assert counts["backtests_failed"] == 1
+
+    assert reconciled_command is not None
+    assert reconciled_command.status == "FAILED"
+    assert "worker restarted" in (reconciled_command.error_message or "")
+
+    assert reconciled_run is not None
+    assert reconciled_run.status == "FAILED"
+    assert reconciled_run.stage == "failed"
+
+    assert reconciled_backtest is not None
+    assert reconciled_backtest.status == "FAILED"
+    assert reconciled_backtest.metrics["phase"] == "failed"
+    assert "worker restarted" in reconciled_backtest.metrics["error"]

@@ -8,7 +8,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.core.utils import ensure_utc, utc_now
-from app.db.models import WorkerCommand, WorkerRun, WorkerRunEvent
+from app.db.models import BacktestRun, WorkerCommand, WorkerRun, WorkerRunEvent
 from app.services.runtime_control import RuntimeControlService
 
 COMMAND_RUN_INGESTION = "run_ingestion_validation"
@@ -19,6 +19,8 @@ COMMAND_RUN_BACKTEST = "run_backtest"
 
 
 class WorkerRuntimeService:
+    ORPHANED_REASON = "worker restarted while task was running"
+
     def queue_command(
         self,
         session: Session,
@@ -233,13 +235,13 @@ class WorkerRuntimeService:
         command_limit: int = 10,
         event_limit: int = 20,
     ) -> dict[str, Any]:
-        runs = self.recent_runs(session, ["live_cycle", "bar_backfill"], limit=run_limit)
+        runs = self.recent_runs(session, ["live_cycle", "bar_backfill", "backtest"], limit=run_limit)
         commands = session.execute(
             select(WorkerCommand)
             .order_by(desc(WorkerCommand.created_at), desc(WorkerCommand.id))
             .limit(command_limit)
         ).scalars().all()
-        events = self.recent_events(session, ["live_cycle", "bar_backfill"], limit=event_limit)
+        events = self.recent_events(session, ["live_cycle", "bar_backfill", "backtest"], limit=event_limit)
         return {
             "runs": [self._serialize_run_summary(run) for run in runs],
             "commands": [self._serialize_command(command) for command in commands],
@@ -249,7 +251,8 @@ class WorkerRuntimeService:
     def runtime_snapshot(self, session: Session) -> dict[str, Any]:
         live_run = self.latest_run(session, "live_cycle")
         backfill_run = self.latest_run(session, "bar_backfill")
-        events = list(reversed(self.recent_events(session, ["live_cycle", "bar_backfill"], limit=16)))
+        backtest_run = self.latest_run(session, "backtest")
+        events = list(reversed(self.recent_events(session, ["live_cycle", "bar_backfill", "backtest"], limit=16)))
         worker = RuntimeControlService().get_worker_status(session)
         supervisor = RuntimeControlService().get_supervisor_status(session)
         queue = self.command_queue_snapshot(session)
@@ -259,6 +262,7 @@ class WorkerRuntimeService:
             for value in [
                 self._ensure_utc_dt(live_run.updated_at if live_run else None),
                 self._ensure_utc_dt(backfill_run.updated_at if backfill_run else None),
+                self._ensure_utc_dt(backtest_run.updated_at if backtest_run else None),
                 self._ensure_utc_dt(events[-1].created_at if events else None),
                 self._parse_iso_dt(worker.get("last_seen_at")),
                 self._parse_iso_dt(supervisor.get("last_seen_at")),
@@ -273,8 +277,71 @@ class WorkerRuntimeService:
             "command_queue": queue,
             "live_cycle": self._serialize_run(live_run),
             "bar_backfill": self._serialize_run(backfill_run),
+            "backtest": self._serialize_run(backtest_run),
             "recent_events": [self._serialize_event(event) for event in events],
         }
+
+    def reconcile_orphaned_state(self, session: Session, reason: str | None = None) -> dict[str, int]:
+        failure_reason = (reason or self.ORPHANED_REASON)[:4000]
+        now = utc_now()
+        counts = {
+            "commands_failed": 0,
+            "runs_failed": 0,
+            "backtests_failed": 0,
+        }
+
+        commands = session.execute(
+            select(WorkerCommand).where(WorkerCommand.status == "RUNNING")
+        ).scalars().all()
+        for command in commands:
+            command.status = "FAILED"
+            command.finished_at = now
+            command.error_message = failure_reason
+            result = dict(command.result_json or {})
+            result.setdefault("reconciled", True)
+            result.setdefault("reason", failure_reason)
+            command.result_json = result
+            counts["commands_failed"] += 1
+
+        runs = session.execute(
+            select(WorkerRun).where(WorkerRun.status == "RUNNING")
+        ).scalars().all()
+        for run in runs:
+            run.status = "FAILED"
+            run.stage = "failed"
+            run.finished_at = now
+            run.updated_at = now
+            run.error_message = failure_reason
+            summary = dict(run.summary_json or {})
+            summary.setdefault("reconciled", True)
+            summary.setdefault("reason", failure_reason)
+            run.summary_json = summary
+            counts["runs_failed"] += 1
+
+        backtests = session.execute(
+            select(BacktestRun).where(BacktestRun.status == "RUNNING")
+        ).scalars().all()
+        for run in backtests:
+            metrics = dict(run.metrics or {})
+            metrics.update(
+                {
+                    "phase": "failed",
+                    "phase_label": "Failed",
+                    "phase_detail": failure_reason,
+                    "phase_pct": 100.0,
+                    "error": failure_reason,
+                    "last_progress_at": now.isoformat(),
+                }
+            )
+            run.metrics = metrics
+            run.status = "FAILED"
+            run.finished_at = now
+            counts["backtests_failed"] += 1
+
+        if any(counts.values()):
+            session.flush()
+            session.commit()
+        return counts
 
     def _serialize_run(self, run: WorkerRun | None) -> dict[str, Any]:
         if run is None:
