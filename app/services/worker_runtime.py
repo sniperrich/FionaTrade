@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime
 import uuid
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.core.utils import utc_now
 from app.db.models import WorkerCommand, WorkerRun, WorkerRunEvent
+from app.services.runtime_control import RuntimeControlService
 
 COMMAND_RUN_INGESTION = "run_ingestion_validation"
 COMMAND_REFRESH_BARS = "refresh_bars"
@@ -186,10 +188,36 @@ class WorkerRuntimeService:
             stmt = stmt.where(WorkerRunEvent.run_type.in_(run_types))
         return session.execute(stmt).scalars().all()
 
+    def command_queue_snapshot(self, session: Session, limit: int = 8) -> dict[str, Any]:
+        counts = {status: count for status, count in session.execute(
+            select(WorkerCommand.status, func.count(WorkerCommand.id)).group_by(WorkerCommand.status)
+        ).all()}
+        rows = session.execute(
+            select(WorkerCommand)
+            .order_by(desc(WorkerCommand.created_at), desc(WorkerCommand.id))
+            .limit(limit)
+        ).scalars().all()
+        return {
+            "pending": int(counts.get("PENDING", 0)),
+            "running": int(counts.get("RUNNING", 0)),
+            "failed": int(counts.get("FAILED", 0)),
+            "completed": int(counts.get("COMPLETED", 0)),
+            "open": int(counts.get("PENDING", 0) + counts.get("RUNNING", 0)),
+            "recent": [self._serialize_command(row) for row in rows],
+        }
+
+    def worker_status_snapshot(self, session: Session) -> dict[str, Any]:
+        return {
+            "worker": RuntimeControlService().get_worker_status(session),
+            "command_queue": self.command_queue_snapshot(session),
+        }
+
     def runtime_snapshot(self, session: Session) -> dict[str, Any]:
         live_run = self.latest_run(session, "live_cycle")
         backfill_run = self.latest_run(session, "bar_backfill")
         events = list(reversed(self.recent_events(session, ["live_cycle", "bar_backfill"], limit=16)))
+        worker = RuntimeControlService().get_worker_status(session)
+        queue = self.command_queue_snapshot(session)
 
         timestamps = [
             value
@@ -197,12 +225,15 @@ class WorkerRuntimeService:
                 live_run.updated_at if live_run else None,
                 backfill_run.updated_at if backfill_run else None,
                 events[-1].created_at if events else None,
+                self._parse_iso_dt(worker.get("last_seen_at")),
             ]
             if value is not None
         ]
         updated_at = max(timestamps) if timestamps else utc_now()
         return {
             "updated_at": updated_at.isoformat(),
+            "worker": worker,
+            "command_queue": queue,
             "live_cycle": self._serialize_run(live_run),
             "bar_backfill": self._serialize_run(backfill_run),
             "recent_events": [self._serialize_event(event) for event in events],
@@ -258,3 +289,25 @@ class WorkerRuntimeService:
             "ts": event.created_at.isoformat() if event.created_at else None,
             "run_key": event.run_key,
         }
+
+    def _serialize_command(self, command: WorkerCommand) -> dict[str, Any]:
+        return {
+            "id": command.id,
+            "command_type": command.command_type,
+            "status": command.status,
+            "requested_by": command.requested_by,
+            "created_at": command.created_at.isoformat() if command.created_at else None,
+            "started_at": command.started_at.isoformat() if command.started_at else None,
+            "finished_at": command.finished_at.isoformat() if command.finished_at else None,
+            "error": command.error_message,
+        }
+
+    def _parse_iso_dt(self, value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value
+        if not value or not isinstance(value, str):
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None

@@ -41,8 +41,10 @@ db     -> SQLite，统一保存状态、结果、行情缓存、运行态
 - `app.main` 已经变成纯 Web 入口，不再持有 scheduler
 - `app.worker.main` 持有所有后台任务
 - `Enable Live` 写入 `runtime_controls`，不再只改当前进程内存
+- worker 每 5 秒写一次 heartbeat 到 `runtime_controls`，WebUI 可判断 `ONLINE / STALE / OFFLINE`
 - live runtime 读取 `worker_runs / worker_run_events`，不再依赖进程内 runtime store
 - `MarketDataService` 统一 chart/cache/freshness/fallback/backfill
+- 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
 
 ### Agent 模式（默认，`AGENT_MODE_ENABLED=true`）
 
@@ -79,8 +81,8 @@ IngestionService → NormalizationService → ValidationService
 
 | 路径 | 功能 |
 |------|------|
-| `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot** |
-| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + local bar cache + ticker K-line + 成交历史翻页** |
+| `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot + worker/queue 状态** |
+| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + local bar cache + ticker K-line + 成交历史翻页** |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**30s 自动拉新 + 源状态/报错 + 历史翻页** |
 | `/settings` | 配置信息 |
@@ -129,6 +131,7 @@ tests/           137 个 pytest 测试
 |------|------|---------|
 | GET | `/api/health` | `{status, llm_configured, llm_model, sources_online, ...}` |
 | GET | `/api/live/status` | **平铺字段**：`{enabled, market_tradeable, market_session(字符串), market_time, tickers, ...}` |
+| GET | `/api/worker/status` | worker heartbeat + command queue 快照 |
 | GET | `/api/agent/runs` | **包装对象**：`{"runs": [...]}` — 每项用 `*_result` 字段名 |
 | GET | `/api/news` | **分页对象**：`{"items": [...], "mode", "latest_id", ...}` |
 | POST | `/api/agent/run` | 触发 Agent 图：`{"tickers": ["AAPL", "NVDA"]}` |
@@ -158,11 +161,13 @@ tests/           137 个 pytest 测试
 > - `/api/agent/runs` 现支持 `ticker/action/limit/offset`
 > - `/api/live/trades` 现支持 `ticker/limit/offset`
 > - Live 页的 runtime 状态现在来自数据库 `worker_runs / worker_run_events`
+> - `/api/live/status` 现额外返回 `worker` 与 `command_queue`，供控制面板判断后台是否仍在运行
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
 > - 若当前是周末/美股闭市，live cycle 会显示 `analysis mode`，这是预期行为，不是失败
 > - 若 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 都为空，live cycle 会明确显示 `no live tickers configured`
 > - 模板页面脚本必须放在 `base.html` 的 `{% block scripts %}` 中，不能直接内联在 `content` 里，否则会先于全局工具函数执行
 > - `Enable Live` 现在是 DB 共享开关，worker 不运行时只会看到 queued command，不会真的执行
+> - 一旦 live 已启用，只要 `python -m app.worker.main` 还在运行，关闭浏览器不会停止 auto trading
 
 ---
 
@@ -205,8 +210,11 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 ```
 或直接点击 `/live` 页面右上角的 **▶ Enable Live** 按钮。
 
+`LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 现在兼容 CSV 和 JSON 数组两种写法。
+
 > Enable Live 现在不会再让 Web 进程直接起后台线程。
 > 它会写入共享 `runtime_controls`，再给 worker 排队 `refresh_bars + live_cycle`。
+> worker 心跳也写在 `runtime_controls`，可从 `/api/worker/status` 或 Live 页面直接确认后台是否在线。
 
 ### 下单逻辑
 - Alpaca bracket 订单（止损 + 止盈原子提交）

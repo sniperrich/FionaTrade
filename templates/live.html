@@ -28,6 +28,13 @@
   </div>
 </div>
 
+<div class="card mb16" style="padding:12px 14px;background:rgba(217,119,87,0.08);border-color:rgba(217,119,87,0.22)">
+  <div class="bold">Control Plane Mode</div>
+  <div class="text-muted text-sm mt4">
+    This UI only controls and observes the worker. Once live trading is enabled, the worker keeps running even if you close the browser.
+  </div>
+</div>
+
 <!-- Portfolio row -->
 <div class="grid g4 mb16">
   <div class="card card-sm">
@@ -59,6 +66,11 @@
       <span class="text-muted text-sm" id="runtime-updated">Waiting…</span>
     </div>
     <div class="grid g4 mb12">
+      <div class="card card-sm">
+        <div class="card-title">Worker</div>
+        <div class="card-value" id="runtime-worker-status">—</div>
+        <div class="card-sub" id="runtime-worker-detail">—</div>
+      </div>
       <div class="card card-sm">
         <div class="card-title">Cycle Stage</div>
         <div class="card-value" id="runtime-cycle-stage">—</div>
@@ -330,7 +342,11 @@ const LIVE_TRADES_PER_PAGE = 20;
 
 function fmt$(n){return n==null?'—':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function sideBadge(s){return s==='long'?'<span class="badge badge-green">LONG</span>':'<span class="badge badge-red">SHORT</span>';}
-function statusBadge(s){const m={submitted:'badge-blue',filled:'badge-green',error:'badge-red',skipped:'badge-grey',analysis:'badge-purple',no_change:'badge-grey',cancelled:'badge-warn'};return `<span class="badge ${m[s]||'badge-grey'}">${s}</span>`;}
+function statusBadge(s){
+  const key=String(s||'').toLowerCase();
+  const m={submitted:'badge-blue',filled:'badge-green',error:'badge-red',failed:'badge-red',skipped:'badge-grey',analysis:'badge-purple',no_change:'badge-grey',cancelled:'badge-warn',pending:'badge-blue',running:'badge-accent',completed:'badge-green'};
+  return `<span class="badge ${m[key]||'badge-grey'}">${escapeHtml(s||'—')}</span>`;
+}
 function actionBadge(a){const m={BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};return `<span class="badge ${m[a]||'badge-grey'}">${a||'—'}</span>`;}
 function safeSlice(v, n=8){return typeof v==='string'?v.slice(0,n):String(v||'').slice(0,n);}
 function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
@@ -374,18 +390,21 @@ function fmtAgo(iso){
 }
 
 function runtimeStatusBadge(status){
+  const key=String(status||'').toLowerCase();
   const cls={
     running:'badge-accent',
     completed:'badge-green',
     idle:'badge-grey',
     error:'badge-red',
     waiting:'badge-blue',
+    online:'badge-green',
+    offline:'badge-grey',
     fresh:'badge-green',
     stale:'badge-warn',
     very_stale:'badge-red',
     empty:'badge-grey',
-  }[status] || 'badge-grey';
-  return `<span class="badge ${cls}">${status||'idle'}</span>`;
+  }[key] || 'badge-grey';
+  return `<span class="badge ${cls}">${escapeHtml(status||'idle')}</span>`;
 }
 
 function runtimeStageLabel(stage){
@@ -592,7 +611,14 @@ async function loadRuntimeStatus(data=null){
     const d=data || await apiFetch('/api/live/runtime');
     const cycle=d.live_cycle||{};
     const backfill=d.bar_backfill||{};
+    const worker=d.worker||{};
+    const queue=d.command_queue||{};
     document.getElementById('runtime-updated').textContent='Updated '+fmtAgo(d.updated_at);
+    document.getElementById('runtime-worker-status').innerHTML=runtimeStatusBadge((worker.status||'idle').toLowerCase())+' '+escapeHtml(worker.status||'OFFLINE');
+    document.getElementById('runtime-worker-detail').textContent=
+      worker.online
+        ? `pid ${worker.pid||'—'} · ${queue.open||0} queued/running`
+        : (worker.reason || 'Worker is not sending heartbeats');
     document.getElementById('runtime-cycle-stage').innerHTML=runtimeStatusBadge(cycle.status)+' '+runtimeStageLabel(cycle.stage);
     document.getElementById('runtime-cycle-progress').textContent=
       cycle.total_tickers ? `${cycle.completed_tickers||0}/${cycle.total_tickers} tickers · cycle ${cycle.cycle_id||'—'}` : (cycle.cycle_id || 'No active cycle');
@@ -606,7 +632,18 @@ async function loadRuntimeStatus(data=null){
       cycle.last_result ? `${cycle.last_result.orders_placed||0} orders · ${cycle.last_result.new_articles||0} new articles` : (cycle.error || 'No completed cycle yet');
 
     const feed=(d.recent_events||[]).slice(0,8);
-    document.getElementById('runtime-feed').innerHTML = feed.length ? feed.map(ev => {
+    const queueLines=(queue.recent||[]).slice(0,4).map(cmd => `
+      <div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:rgba(255,255,255,0.02)">
+        <div class="flex-center gap8" style="justify-content:space-between;align-items:flex-start">
+          <div style="font-weight:600">${escapeHtml(cmd.command_type || 'command')}</div>
+          <div>${statusBadge(cmd.status || '—')}</div>
+        </div>
+        <div class="text-muted text-xs mt4">${[cmd.requested_by, cmd.created_at ? fmtAgo(cmd.created_at) : null].filter(Boolean).join(' · ')}</div>
+      </div>
+    `);
+    document.getElementById('runtime-feed').innerHTML = (feed.length || queueLines.length) ? [
+      queueLines.length ? `<div style="display:grid;gap:8px">${queueLines.join('')}</div>` : '',
+      feed.map(ev => {
       const color = ev.level === 'error' ? 'var(--red)' : (ev.level === 'warn' ? 'var(--amber)' : 'var(--text)');
       return `<div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
         <div class="flex-center gap8" style="justify-content:space-between;align-items:flex-start">
@@ -615,7 +652,8 @@ async function loadRuntimeStatus(data=null){
         </div>
         <div class="text-muted text-xs mt4">${[ev.kind, ev.ticker, ev.agent, ev.stage].filter(Boolean).join(' · ') || 'runtime'}</div>
       </div>`;
-    }).join('') : '<div class="empty-state text-muted">No runtime events yet</div>';
+    }).join('')
+    ].filter(Boolean).join('') : '<div class="empty-state text-muted">No runtime events yet</div>';
   } catch(e){
     document.getElementById('runtime-feed').innerHTML=`<div class="empty-state text-red">Runtime status unavailable: ${e.message}</div>`;
   }

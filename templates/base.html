@@ -71,6 +71,10 @@
         <span id="market-label">Checking market…</span>
       </div>
       <div class="status-row">
+        <div class="dot grey" id="worker-dot"></div>
+        <span id="worker-label">Worker status…</span>
+      </div>
+      <div class="status-row">
         <div class="dot grey" id="llm-dot"></div>
         <span id="llm-label">LLM status…</span>
       </div>
@@ -152,6 +156,21 @@ function renderSidebarStatus(live, health) {
     const label = live.market_session || 'closed';
     mDot.className = 'dot ' + (open ? 'green pulse' : 'grey');
     mLabel.textContent = open ? 'Market open' : ('Market ' + label);
+
+    const worker = live.worker || {};
+    const wDot = document.getElementById('worker-dot');
+    const wLabel = document.getElementById('worker-label');
+    if (worker.status === 'ONLINE') {
+      wDot.className = 'dot green pulse';
+      const queueOpen = live.command_queue?.open || 0;
+      wLabel.textContent = queueOpen ? `Worker online · queue ${queueOpen}` : 'Worker online';
+    } else if (worker.status === 'STALE') {
+      wDot.className = 'dot warn';
+      wLabel.textContent = worker.reason || 'Worker heartbeat stale';
+    } else {
+      wDot.className = 'dot grey';
+      wLabel.textContent = 'Worker offline';
+    }
   }
   if (health) {
     const lDot = document.getElementById('llm-dot');

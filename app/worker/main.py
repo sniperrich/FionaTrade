@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import signal
+import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -33,6 +35,8 @@ runtime = WorkerRuntimeService()
 market_data = MarketDataService(settings)
 scheduler: BackgroundScheduler | None = None
 _shutdown = threading.Event()
+_WORKER_STARTED_AT = datetime.now(timezone.utc)
+_WORKER_HOST = socket.gethostname()
 
 
 def _is_live_enabled() -> bool:
@@ -152,6 +156,26 @@ def _scheduled_live_trading() -> None:
         logger.exception("[live] 模拟盘轮询失败: %s", exc)
 
 
+def _heartbeat_worker() -> None:
+    try:
+        with db_session() as session:
+            enabled = runtime_control.get_live_enabled(session, settings)
+            runtime_control.touch_worker_heartbeat(
+                session,
+                pid=os.getpid(),
+                started_at=_WORKER_STARTED_AT,
+                source="worker",
+                scheduler_running=scheduler is not None,
+                extra={
+                    "host": _WORKER_HOST,
+                    "live_enabled": enabled,
+                    "configured_tickers": market_data.tracked_tickers(),
+                },
+            )
+    except Exception as exc:
+        logger.exception("[worker] heartbeat failed: %s", exc)
+
+
 def _process_worker_commands() -> None:
     try:
         while True:
@@ -216,6 +240,14 @@ def _process_worker_commands() -> None:
 
 def _start_scheduler() -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone="UTC")
+    sched.add_job(
+        _heartbeat_worker,
+        "interval",
+        seconds=5,
+        max_instances=1,
+        id="worker_heartbeat",
+        replace_existing=True,
+    )
     if settings.enable_scheduler:
         sched.add_job(
             _scheduled_tick,
@@ -282,6 +314,18 @@ def main() -> None:
     init_db()
     with db_session() as session:
         runtime_control.set_live_enabled(session, settings, runtime_control.get_live_enabled(session, settings), source="worker_boot")
+        runtime_control.touch_worker_heartbeat(
+            session,
+            pid=os.getpid(),
+            started_at=_WORKER_STARTED_AT,
+            source="worker_boot",
+            scheduler_running=False,
+            extra={
+                "host": _WORKER_HOST,
+                "live_enabled": runtime_control.get_live_enabled(session, settings),
+                "configured_tickers": market_data.tracked_tickers(),
+            },
+        )
     logger.info("Worker startup complete")
 
     signal.signal(signal.SIGINT, _handle_shutdown)
@@ -305,6 +349,8 @@ def main() -> None:
     if scheduler:
         scheduler.shutdown(wait=False)
         scheduler = None
+    with db_session() as session:
+        runtime_control.mark_worker_offline(session, pid=os.getpid(), source="worker_shutdown", reason="shutdown")
 
 
 if __name__ == "__main__":

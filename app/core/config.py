@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import json
+from typing import Annotated
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.universe import SP100_TICKERS
 
@@ -143,7 +145,7 @@ class Settings(BaseSettings):
     # ── Agent System ──────────────────────────────────────────────────────────
     agent_mode_enabled: bool = True
     # Optionally override which tickers the agent graph runs on (empty = all SP100)
-    agent_tickers_override: list[str] = Field(default_factory=list)
+    agent_tickers_override: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # How many minutes of Bar1m history to load for technical analysis
     agent_technicals_lookback_bars: int = 390  # ~1 trading day of 1m bars
 
@@ -176,13 +178,34 @@ class Settings(BaseSettings):
     # ── Live Trading ──────────────────────────────────────────────────────────
     live_trading_enabled: bool = False
     # Tickers to trade live; falls back to agent_tickers_override if empty
-    live_trading_tickers: list[str] = []
+    live_trading_tickers: Annotated[list[str], NoDecode] = []
     # How often (seconds) the live cycle runs during market hours (default 5 min)
     live_cycle_interval_seconds: int = 300
     # Maximum portfolio allocation per position (0.0–1.0)
     live_max_position_pct: float = 0.10
     # Allow order placement during pre-market session (default: False)
     live_allow_premarket: bool = False
+
+    @field_validator("agent_tickers_override", "live_trading_tickers", mode="before")
+    @classmethod
+    def _parse_csv_ticker_list(cls, value):
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return [str(item).upper().strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        return [str(item).upper().strip() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+            return [part.upper().strip() for part in stripped.split(",") if part.strip()]
+        return value
 
 
 @lru_cache(maxsize=1)

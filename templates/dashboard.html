@@ -218,12 +218,21 @@ async function loadSystemStatus(healthData=null, liveData=null) {
     const [h, live] = healthData && liveData
       ? [healthData, liveData]
       : await Promise.all([apiFetch('/api/health'), apiFetch('/api/live/status')]);
+    const worker = live.worker || {};
+    const queue = live.command_queue || {};
     const rows = [
       ['Market', live.market_tradeable ? '<span class="badge badge-green">Open</span>' : `<span class="badge badge-grey">${live.market_session||'closed'}</span>`],
       ['Live Trading', live.enabled ? '<span class="badge badge-accent">Enabled</span>' : '<span class="badge badge-grey">Disabled</span>'],
+      ['Worker', worker.status === 'ONLINE'
+        ? `<span class="badge badge-green">ONLINE</span>`
+        : worker.status === 'STALE'
+          ? '<span class="badge badge-warn">STALE</span>'
+          : '<span class="badge badge-grey">OFFLINE</span>'],
+      ['Queue', `<span class="badge badge-blue">${queue.open||0} open</span>`],
       ['LLM', h.llm_configured ? `<span class="badge badge-green">${h.llm_model||'configured'}</span>` : '<span class="badge badge-warn">Not configured</span>'],
       ['Sources', `<span class="badge badge-blue">${h.sources_online||0} online</span>`],
       ['Last ingest', h.last_ingest_age_s!=null ? (h.last_ingest_age_s<120?'<span class="badge badge-green">'+Math.round(h.last_ingest_age_s)+'s ago</span>':'<span class="badge badge-warn">'+Math.round(h.last_ingest_age_s/60)+'m ago</span>') : '—'],
+      ['Control plane', live.control_plane?.browser_independent ? '<span class="badge badge-green">Browser independent</span>' : '<span class="badge badge-grey">Unknown</span>'],
     ];
     document.getElementById('system-status-body').innerHTML = rows.map(([k,v])=>
       `<div class="flex-center" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border)">

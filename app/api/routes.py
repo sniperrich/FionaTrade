@@ -542,7 +542,10 @@ def live_status(
 
     msi = market_session_info()
     control = RuntimeControlService()
+    runtime = WorkerRuntimeService()
     enabled = control.get_live_enabled(session, settings)
+    worker_status = control.get_worker_status(session)
+    command_queue = runtime.command_queue_snapshot(session, limit=5)
     latest_run = WorkerRuntimeService().latest_run(session, "live_cycle")
     last_cycle: dict | None = None
     if latest_run:
@@ -565,6 +568,13 @@ def live_status(
         "max_position_pct": settings.live_max_position_pct,
         "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
         "last_cycle": last_cycle,
+        "worker": worker_status,
+        "command_queue": command_queue,
+        "control_plane": {
+            "mode": "worker_control_plane",
+            "browser_independent": True,
+            "requires_worker": True,
+        },
     })
 
 
@@ -573,6 +583,13 @@ def live_runtime_status(
     session: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return WorkerRuntimeService().runtime_snapshot(session)
+
+
+@router.get("/worker/status")
+def worker_status(
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return WorkerRuntimeService().worker_status_snapshot(session)
 
 
 @router.get("/live/bar_cache")
@@ -1113,6 +1130,6 @@ def set_live_enabled(
                 "No live tickers are configured yet. "
                 if enabled and not has_tickers else ""
             )
-            + "Worker must be running to execute queued jobs."
+            + "Worker must be running to execute queued jobs. Closing the browser does not stop auto trading."
         ),
     }

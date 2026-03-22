@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.core.utils import ensure_utc, utc_now
 from app.db.models import RuntimeControl
 
 CONTROL_LIVE_ENABLED = "live_trading_enabled"
+CONTROL_WORKER_HEARTBEAT = "worker_heartbeat"
+DEFAULT_WORKER_STALE_SECONDS = 20
 
 
 class RuntimeControlService:
@@ -53,3 +57,112 @@ class RuntimeControlService:
             },
         )
         return bool(enabled)
+
+    def touch_worker_heartbeat(
+        self,
+        session: Session,
+        *,
+        pid: int,
+        started_at: datetime,
+        source: str = "worker",
+        scheduler_running: bool = True,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        payload = self.get(session, CONTROL_WORKER_HEARTBEAT) or {}
+        payload.update(
+            {
+                "pid": int(pid),
+                "source": source,
+                "status": "ONLINE",
+                "started_at": ensure_utc(started_at).isoformat(),
+                "last_seen_at": now.isoformat(),
+                "scheduler_running": bool(scheduler_running),
+            }
+        )
+        if extra:
+            payload.update(extra)
+        self.set(session, CONTROL_WORKER_HEARTBEAT, payload)
+        return payload
+
+    def mark_worker_offline(
+        self,
+        session: Session,
+        *,
+        pid: int | None = None,
+        source: str = "worker",
+        reason: str = "shutdown",
+    ) -> dict[str, Any]:
+        now = utc_now()
+        payload = self.get(session, CONTROL_WORKER_HEARTBEAT) or {}
+        if pid is not None:
+            payload["pid"] = int(pid)
+        payload.update(
+            {
+                "source": source,
+                "status": "OFFLINE",
+                "last_seen_at": now.isoformat(),
+                "stopped_at": now.isoformat(),
+                "reason": reason,
+            }
+        )
+        self.set(session, CONTROL_WORKER_HEARTBEAT, payload)
+        return payload
+
+    def get_worker_status(
+        self,
+        session: Session,
+        stale_after_seconds: int = DEFAULT_WORKER_STALE_SECONDS,
+    ) -> dict[str, Any]:
+        payload = self.get(session, CONTROL_WORKER_HEARTBEAT) or {}
+        started_at = self._parse_dt(payload.get("started_at"))
+        last_seen_at = self._parse_dt(payload.get("last_seen_at"))
+        stopped_at = self._parse_dt(payload.get("stopped_at"))
+        now = utc_now()
+        age_seconds = None
+        if last_seen_at is not None:
+            age_seconds = round((now - last_seen_at).total_seconds(), 1)
+
+        raw_status = str(payload.get("status", "")).upper()
+        if raw_status == "OFFLINE":
+            status = "OFFLINE"
+            online = False
+            reason = payload.get("reason") or "worker stopped"
+        elif last_seen_at is None:
+            status = "OFFLINE"
+            online = False
+            reason = "no heartbeat recorded"
+        elif age_seconds is not None and age_seconds <= stale_after_seconds:
+            status = "ONLINE"
+            online = True
+            reason = None
+        else:
+            status = "STALE"
+            online = False
+            reason = f"last heartbeat {age_seconds:.1f}s ago" if age_seconds is not None else "heartbeat missing"
+
+        return {
+            "status": status,
+            "online": online,
+            "pid": payload.get("pid"),
+            "source": payload.get("source") or "worker",
+            "scheduler_running": bool(payload.get("scheduler_running", False)),
+            "started_at": started_at.isoformat() if started_at else None,
+            "last_seen_at": last_seen_at.isoformat() if last_seen_at else None,
+            "stopped_at": stopped_at.isoformat() if stopped_at else None,
+            "last_seen_age_seconds": age_seconds,
+            "reason": reason,
+            "live_enabled": bool(payload.get("live_enabled", False)),
+            "configured_tickers": payload.get("configured_tickers") or [],
+            "host": payload.get("host"),
+        }
+
+    def _parse_dt(self, value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return ensure_utc(value)
+        if not value or not isinstance(value, str):
+            return None
+        try:
+            return ensure_utc(datetime.fromisoformat(value))
+        except ValueError:
+            return None
