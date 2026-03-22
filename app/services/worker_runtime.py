@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from app.core.utils import utc_now
+from app.core.utils import ensure_utc, utc_now
 from app.db.models import WorkerCommand, WorkerRun, WorkerRunEvent
 from app.services.runtime_control import RuntimeControlService
 
@@ -15,6 +15,7 @@ COMMAND_RUN_INGESTION = "run_ingestion_validation"
 COMMAND_REFRESH_BARS = "refresh_bars"
 COMMAND_RUN_LIVE_CYCLE = "run_live_cycle"
 COMMAND_REFRESH_EARNINGS = "refresh_earnings_calendar"
+COMMAND_RUN_BACKTEST = "run_backtest"
 
 
 class WorkerRuntimeService:
@@ -256,9 +257,9 @@ class WorkerRuntimeService:
         timestamps = [
             value
             for value in [
-                live_run.updated_at if live_run else None,
-                backfill_run.updated_at if backfill_run else None,
-                events[-1].created_at if events else None,
+                self._ensure_utc_dt(live_run.updated_at if live_run else None),
+                self._ensure_utc_dt(backfill_run.updated_at if backfill_run else None),
+                self._ensure_utc_dt(events[-1].created_at if events else None),
                 self._parse_iso_dt(worker.get("last_seen_at")),
                 self._parse_iso_dt(supervisor.get("last_seen_at")),
             ]
@@ -358,6 +359,21 @@ class WorkerRuntimeService:
             "updated_at": run.updated_at.isoformat() if run.updated_at else None,
             "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         }
+
+    def _ensure_utc_dt(self, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return ensure_utc(value)
+
+    def _parse_iso_dt(self, value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return ensure_utc(value)
+        if not value or not isinstance(value, str):
+            return None
+        try:
+            return ensure_utc(datetime.fromisoformat(value))
+        except ValueError:
+            return None
 
     def _parse_iso_dt(self, value: Any) -> datetime | None:
         if isinstance(value, datetime):

@@ -78,6 +78,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + worker history + local bar cache + ticker K-line + 成交历史翻页** |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**30s 自动拉新 + 源状态/报错 + 历史翻页** |
+| `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果与交易明细 |
 | `/settings` | 配置信息 |
 
 ---
@@ -97,13 +98,13 @@ app/
   agent_graph/   graph.py（AgentGraph）+ state.py（TypedDict 状态）
   broker/        alpaca.py（完整 Alpaca REST v2，777 行）+ paper.py
   services/      live_trading.py + market_data.py + worker_runtime.py + runtime_control.py
-  backtest_engine/ 离线研究/回测模块（不再暴露在主 WebUI/API）
+  backtest_engine/ 离线研究/回测模块（现已通过 worker-backed `/backtests` 控制面暴露）
   market/        1m K 线回填（Finnhub → Alpaca → yfinance → stooq）
   monitoring/    HealthAuditService（数据源延迟 + 状态快照）
   api/routes.py  所有 REST API 端点
   webui/routes.py Jinja2 页面路由
 
-templates/       5 个 HTML 模板（Dashboard / Live / Agents / News / Settings）
+templates/       6 个 HTML 模板（Dashboard / Live / Agents / News / Backtests / Settings）
 static/ft.css    Claude 风格 CSS 设计系统
 scripts/         独立工具脚本（回测、历史数据回填等）
 tests/           pytest 测试集
@@ -123,6 +124,10 @@ tests/           pytest 测试集
 | GET | `/api/news` | **分页对象**：`{"items": [...], "mode", "latest_id", ...}` |
 | POST | `/api/agent/run` | 触发 Agent 图：`{"tickers": ["AAPL", "NVDA"]}` |
 | POST | `/api/ingest/run` | 给 worker 排队一次 ingestion |
+| GET | `/api/backtests/options` | 回测表单选项：sources / event profiles / default params |
+| GET | `/api/backtests` | 最近回测 runs 列表 |
+| GET | `/api/backtests/{run_id}` | 单个回测详情：params / metrics / equity_curve / trade_log |
+| POST | `/api/backtests/run` | 给 worker 排队一条 backtest 任务 |
 | POST | `/api/live/set_enabled` | 写入共享 runtime control，并给 worker 排队 live backfill/cycle |
 | POST | `/api/live/cycle` | 给 worker 排队一次 live cycle |
 | POST | `/api/live/order` | 手动下单 |
@@ -150,6 +155,7 @@ tests/           pytest 测试集
 > - Live 页的 runtime 状态现在来自数据库 `worker_runs / worker_run_events`
 > - `/api/live/status` 现额外返回 `worker` / `supervisor` / `command_queue`
 > - `/api/worker/history` 用于 `/live` 的专门排障面板（command queue / worker history）
+> - `/api/backtests/run` 会先创建 `QUEUED` 的 `BacktestRun`，再给 worker 排队命令；浏览器关闭后任务照样继续
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
 > - 若当前是周末/美股闭市，live cycle 会显示 `analysis mode`，这是预期行为，不是失败
 > - 若 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 都为空，live cycle 会明确显示 `no live tickers configured`
@@ -203,6 +209,28 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 > Enable Live 现在不会再让 Web 进程直接起后台线程。
 > 它会写入共享 `runtime_controls`，再给 worker 排队 `refresh_bars + live_cycle`。
 > worker/supervisor 心跳都写在 `runtime_controls`，可从 `/api/worker/status` 或 Live 页面直接确认后台是否在线。
+
+---
+
+## 回测控制面
+
+- `/backtests` 现在是正式控制页面，不再要求手动跑脚本才能研究
+- WebUI 负责：
+  - 选择 `start_date / end_date`
+  - 选择 `rules / llm`
+  - 选择 `event_profile`
+  - 选择 `source filter`
+  - 查看最近 runs、metrics、trade log
+- Worker 负责：
+  - 消费 `run_backtest` command
+  - 创建/更新 `BacktestRun`
+  - 在后台执行回测，不依赖浏览器存活
+
+当前支持的 source filter 语义：
+- 若选择 `sources`，只纳入至少有一条 `event_evidence.source` 命中的事件
+- 若不选，默认使用全部 source
+
+当前实现仍然是事件回测，不是 AgentGraph 全链回测。
 
 ### 下单逻辑
 - Alpaca bracket 订单（止损 + 止盈原子提交）

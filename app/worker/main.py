@@ -10,10 +10,12 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from app.backtest_engine.service import BacktestEngineService
 from app.core.config import get_settings
 from app.core.logging import get_app_logger, log_writeout, setup_logging
 from app.core.market_hours import is_market_open
 from app.db.database import db_session, init_db
+from app.db.models import BacktestRun
 from app.ingestion.service import IngestionService
 from app.monitoring.health import HealthAuditService
 from app.services.earnings_calendar import EarningsCalendarService
@@ -23,6 +25,7 @@ from app.services.runtime_control import RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
     COMMAND_REFRESH_EARNINGS,
+    COMMAND_RUN_BACKTEST,
     COMMAND_RUN_INGESTION,
     COMMAND_RUN_LIVE_CYCLE,
     WorkerRuntimeService,
@@ -183,6 +186,7 @@ def _process_worker_commands() -> None:
                         COMMAND_REFRESH_BARS,
                         COMMAND_RUN_LIVE_CYCLE,
                         COMMAND_REFRESH_EARNINGS,
+                        COMMAND_RUN_BACKTEST,
                     ],
                 )
                 if command is None:
@@ -230,6 +234,92 @@ def _process_worker_commands() -> None:
                             session,
                             trigger=str(payload.get("trigger", "manual")),
                         )
+                    elif command.command_type == COMMAND_RUN_BACKTEST:
+                        worker_run = runtime.start_run(
+                            session,
+                            run_type="backtest",
+                            trigger=str(payload.get("trigger", "manual")),
+                            stage="running",
+                            summary_json={
+                                "start_date": payload.get("start_date"),
+                                "end_date": payload.get("end_date"),
+                                "use_llm": bool(payload.get("use_llm", False)),
+                                "event_profile": payload.get("event_profile") or "",
+                                "sources": payload.get("sources") or [],
+                            },
+                        )
+                        runtime.add_event(
+                            session,
+                            "backtest",
+                            "Backtest started",
+                            run=worker_run,
+                            stage="running",
+                            payload={
+                                "backtest_run_id": payload.get("backtest_run_id"),
+                                "start_date": payload.get("start_date"),
+                                "end_date": payload.get("end_date"),
+                            },
+                        )
+                        try:
+                            bt_result = BacktestEngineService(settings).run(
+                                session,
+                                params=payload,
+                                run_id=int(payload["backtest_run_id"]) if payload.get("backtest_run_id") else None,
+                            )
+                            result = {
+                                "backtest_run_id": bt_result.run_id,
+                                "status": bt_result.status,
+                                "metrics": bt_result.metrics,
+                            }
+                            runtime.finish_run(
+                                session,
+                                worker_run,
+                                status="COMPLETED",
+                                stage="completed",
+                                summary=result,
+                            )
+                            runtime.add_event(
+                                session,
+                                "backtest",
+                                "Backtest completed",
+                                run=worker_run,
+                                stage="completed",
+                                payload={
+                                    "backtest_run_id": bt_result.run_id,
+                                    "trades": bt_result.metrics.get("trades", 0),
+                                    "total_return": bt_result.metrics.get("total_return", 0.0),
+                                },
+                            )
+                        except Exception as exc:
+                            if payload.get("backtest_run_id"):
+                                existing_run = session.get(BacktestRun, int(payload["backtest_run_id"]))
+                            else:
+                                existing_run = None
+                            if existing_run is not None:
+                                existing_run.status = "FAILED"
+                                existing_run.metrics = {"error": str(exc)}
+                                existing_run.finished_at = datetime.now(timezone.utc)
+                            runtime.finish_run(
+                                session,
+                                worker_run,
+                                status="FAILED",
+                                stage="failed",
+                                error_message=str(exc),
+                                summary={"backtest_run_id": payload.get("backtest_run_id")},
+                            )
+                            runtime.add_event(
+                                session,
+                                "backtest",
+                                "Backtest failed",
+                                run=worker_run,
+                                level="error",
+                                stage="failed",
+                                payload={
+                                    "backtest_run_id": payload.get("backtest_run_id"),
+                                    "error": str(exc),
+                                },
+                            )
+                            raise
                     else:
                         raise ValueError(f"unsupported worker command: {command.command_type}")
                     runtime.complete_command(session, command, result=result if isinstance(result, dict) else {"result": result})

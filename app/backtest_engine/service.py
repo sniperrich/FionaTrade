@@ -9,7 +9,7 @@ from datetime import date, datetime, time as dt_time, timedelta
 from statistics import mean, pstdev
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, delete, select
 from sqlalchemy.orm import Session
 
 from app.analysis.service import AnalysisService
@@ -519,7 +519,7 @@ class BacktestEngineService:
             "trades": len(pnl_list),
         }
 
-    def run(self, session: Session, params: dict | None = None) -> BacktestResult:
+    def run(self, session: Session, params: dict | None = None, run_id: int | None = None) -> BacktestResult:
         params = params or {}
         horizon_min = int(params.get("horizon_min", self.settings.default_horizon_min))
         min_conf = int(params.get("min_confidence", self.settings.min_trade_confidence))
@@ -616,10 +616,30 @@ class BacktestEngineService:
         start_date = params.get("start_date")
         end_date = params.get("end_date")
         event_profile = str(params.get("event_profile") or "").strip().lower()
+        selected_sources = sorted({
+            source.strip().lower()
+            for source in self._as_list(params.get("sources"))
+            if source and source.strip()
+        })
 
-        run = BacktestRun(params=params, status="RUNNING")
-        session.add(run)
-        session.flush()
+        if run_id is not None:
+            run = session.get(BacktestRun, run_id)
+            if run is None:
+                run = BacktestRun(id=run_id, params=params, status="RUNNING")
+                session.add(run)
+            else:
+                run.params = params
+                run.metrics = {}
+                run.equity_curve = []
+                run.trade_log = []
+                run.status = "RUNNING"
+                run.finished_at = None
+            session.flush()
+            session.execute(delete(BacktestTrade).where(BacktestTrade.run_id == run.id))
+        else:
+            run = BacktestRun(params=params, status="RUNNING")
+            session.add(run)
+            session.flush()
 
         stmt = select(Event).where(
             and_(
@@ -627,6 +647,13 @@ class BacktestEngineService:
                 Event.confidence >= min_conf,
             )
         )
+        if selected_sources:
+            event_ids_for_sources = (
+                select(EventEvidence.event_id)
+                .where(EventEvidence.source.in_(selected_sources))
+                .distinct()
+            )
+            stmt = stmt.where(Event.id.in_(event_ids_for_sources))
 
         if start_date:
             start_dt = ensure_utc(datetime.fromisoformat(str(start_date)))
@@ -676,6 +703,7 @@ class BacktestEngineService:
                 "horizon_min": horizon_min,
                 "start_date": start_date,
                 "end_date": end_date,
+                "sources": selected_sources,
                 "entry_window_min": entry_window_min,
                 "hard_stops": hard_stops,
                 "risk_sizing": risk_sizing,
@@ -826,6 +854,8 @@ class BacktestEngineService:
             llm_started = time.perf_counter()
             completed_count = 0
 
+            supports_parallel_prefetch = session.get_bind().dialect.name != "sqlite" and llm_workers > 1
+
             def _fetch_signal(ev):
                 return ev.id, self.analysis.event_to_signal(
                     ev,
@@ -833,18 +863,37 @@ class BacktestEngineService:
                     use_tradeability_filter=use_tradeability_filter,
                 )
 
-            with ThreadPoolExecutor(max_workers=llm_workers) as pool:
-                futures = {pool.submit(_fetch_signal, ev): ev for ev in tradeable_events}
-                for fut in as_completed(futures):
+            if supports_parallel_prefetch:
+                with ThreadPoolExecutor(max_workers=llm_workers) as pool:
+                    futures = {pool.submit(_fetch_signal, ev): ev for ev in tradeable_events}
+                    for fut in as_completed(futures):
+                        try:
+                            eid, sig = fut.result()
+                            signal_map[eid] = sig
+                        except Exception as exc:
+                            ev = futures[fut]
+                            self.logger.warning("LLM预取失败 event_id=%s: %s", ev.id, exc)
+                            signal_map[ev.id] = None
+                        completed_count += 1
+                        if completed_count % max(1, llm_workers * 4) == 0 or completed_count == len(tradeable_events):
+                            elapsed_llm = time.perf_counter() - llm_started
+                            rate = completed_count / elapsed_llm if elapsed_llm > 0 else 0
+                            self.logger.info(
+                                "LLM预取进度 %d/%d (%.1f/s) eta=%.0fs",
+                                completed_count, len(tradeable_events),
+                                rate,
+                                (len(tradeable_events) - completed_count) / rate if rate > 0 else 0,
+                            )
+            else:
+                for ev in tradeable_events:
                     try:
-                        eid, sig = fut.result()
+                        eid, sig = _fetch_signal(ev)
                         signal_map[eid] = sig
                     except Exception as exc:
-                        ev = futures[fut]
                         self.logger.warning("LLM预取失败 event_id=%s: %s", ev.id, exc)
                         signal_map[ev.id] = None
                     completed_count += 1
-                    if completed_count % max(1, llm_workers * 4) == 0 or completed_count == len(tradeable_events):
+                    if completed_count % max(1, min(llm_workers, 4) * 4) == 0 or completed_count == len(tradeable_events):
                         elapsed_llm = time.perf_counter() - llm_started
                         rate = completed_count / elapsed_llm if elapsed_llm > 0 else 0
                         self.logger.info(
@@ -1192,6 +1241,7 @@ class BacktestEngineService:
         metrics = self._compute_metrics(self.settings.initial_nav, equity_curve, pnl_list)
         metrics["events_considered"] = len(events)
         metrics["event_profile"] = event_profile
+        metrics["selected_sources"] = selected_sources
         metrics["profile_filtered"] = profile_filtered
         metrics["event_type_attribution"] = event_type_attr
         metrics["source_attribution"] = source_attr

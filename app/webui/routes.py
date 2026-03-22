@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_app_settings, get_db
 from app.core.config import Settings
 from app.core.utils import utc_now
-from app.db.models import AgentRun, LiveTrade, RawItem, SourceStatus
+from app.db.models import AgentRun, BacktestRun, EventEvidence, LiveTrade, RawItem, SourceStatus
 from app.services.runtime_control import RuntimeControlService
 
 templates = Jinja2Templates(directory="templates")
@@ -157,6 +157,45 @@ def agents_page(
             "tickers": all_tickers,
             "selected_ticker": ticker,
             "agent_mode_enabled": settings.agent_mode_enabled,
+        },
+    )
+
+
+@router.get("/backtests", response_class=HTMLResponse)
+def backtests_page(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=20, ge=5, le=100),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+):
+    total_count = int(session.execute(select(func.count(BacktestRun.id))).scalar_one() or 0)
+    pager = _build_pager(total_count, page, per_page)
+    rows = session.execute(
+        select(BacktestRun)
+        .order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
+        .offset(pager["offset"])
+        .limit(pager["per_page"])
+    ).scalars().all()
+    sources = session.execute(
+        select(distinct(EventEvidence.source)).order_by(EventEvidence.source.asc())
+    ).scalars().all()
+    return templates.TemplateResponse(
+        "backtests.html",
+        {
+            "request": request,
+            "title": "Backtests",
+            "backtest_runs": rows,
+            "backtest_sources": [source for source in sources if source],
+            "backtest_defaults": {
+                "start_date": (utc_now() - timedelta(days=30)).date().isoformat(),
+                "end_date": utc_now().date().isoformat(),
+                "use_llm": False,
+                "event_profile": "",
+                "min_confidence": settings.min_trade_confidence,
+                "min_severity": 0,
+            },
+            "pager": pager,
         },
     )
 

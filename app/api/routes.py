@@ -5,18 +5,20 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import desc, distinct, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_app_settings, get_db
 from app.core.config import Settings
 from app.core.utils import utc_now
-from app.db.models import RawItem, SourceStatus
+from app.backtest_engine.service import BacktestEngineService
+from app.db.models import BacktestRun, EventEvidence, RawItem, SourceStatus
 from app.monitoring.health import HealthAuditService
 from app.services.market_data import MarketDataService
 from app.services.runtime_control import RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
+    COMMAND_RUN_BACKTEST,
     COMMAND_RUN_INGESTION,
     COMMAND_RUN_LIVE_CYCLE,
     WorkerRuntimeService,
@@ -47,6 +49,54 @@ def _cache_invalidate(prefix: str) -> None:
     for key in list(_RUNTIME_CACHE.keys()):
         if key.startswith(prefix):
             _RUNTIME_CACHE.pop(key, None)
+
+
+def _normalize_source_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [item.strip().lower() for item in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(item).strip().lower() for item in value]
+    else:
+        items = [str(value).strip().lower()]
+    return [item for item in items if item]
+
+
+def _serialize_backtest_run(run: BacktestRun, include_detail: bool = False) -> dict[str, Any]:
+    params = run.params or {}
+    metrics = run.metrics or {}
+    payload = {
+        "id": run.id,
+        "status": run.status,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "start_date": params.get("start_date"),
+        "end_date": params.get("end_date"),
+        "use_llm": bool(params.get("use_llm", False)),
+        "event_profile": params.get("event_profile") or "",
+        "sources": params.get("sources") or [],
+        "min_confidence": params.get("min_confidence"),
+        "metrics": {
+            "trades": metrics.get("trades", 0),
+            "events_considered": metrics.get("events_considered", 0),
+            "total_return": metrics.get("total_return", 0.0),
+            "win_rate": metrics.get("win_rate", 0.0),
+            "sharpe": metrics.get("sharpe", 0.0),
+            "max_drawdown": metrics.get("max_drawdown", 0.0),
+            "profit_factor": metrics.get("profit_factor", 0.0),
+            "llm_signals": metrics.get("llm_signals", 0),
+            "profile_filtered": metrics.get("profile_filtered", 0),
+            "tradeability_filtered": metrics.get("tradeability_filtered", 0),
+            "validation_blocked": metrics.get("validation_blocked", 0),
+        },
+    }
+    if include_detail:
+        payload["params"] = params
+        payload["metrics_full"] = metrics
+        payload["equity_curve"] = run.equity_curve or []
+        payload["trade_log"] = run.trade_log or []
+    return payload
 
 
 @router.get("/health")
@@ -203,6 +253,125 @@ def list_news_source_status(
             for row in rows
         ],
     }
+
+
+@router.get("/backtests/options")
+def backtest_options(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    source_rows = session.execute(
+        select(distinct(EventEvidence.source)).order_by(EventEvidence.source.asc())
+    ).scalars().all()
+    return {
+        "sources": [row for row in source_rows if row],
+        "event_profiles": [
+            {"value": "", "label": "All Events"},
+            {"value": "earnings_only", "label": "Earnings Only"},
+        ],
+        "defaults": {
+            "start_date": (utc_now() - timedelta(days=30)).date().isoformat(),
+            "end_date": utc_now().date().isoformat(),
+            "use_llm": False,
+            "event_profile": "",
+            "sources": [],
+            "min_confidence": settings.min_trade_confidence,
+            "min_severity": 0,
+            "use_signal_validation": bool(getattr(settings, "validation_enabled", True)),
+            "use_tradeability_filter": settings.event_tradeability_filter_enabled,
+            "use_event_quality_filter": settings.backtest_use_event_quality_filter,
+        },
+    }
+
+
+@router.get("/backtests")
+def list_backtests(
+    session: Session = Depends(get_db),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    stmt = select(BacktestRun)
+    count_stmt = select(func.count(BacktestRun.id))
+    if status:
+        normalized_status = status.strip().upper()
+        stmt = stmt.where(BacktestRun.status == normalized_status)
+        count_stmt = count_stmt.where(BacktestRun.status == normalized_status)
+
+    total_count = int(session.execute(count_stmt).scalar_one() or 0)
+    rows = session.execute(
+        stmt.order_by(desc(BacktestRun.created_at), desc(BacktestRun.id)).offset(offset).limit(limit)
+    ).scalars().all()
+    return {
+        "total_count": total_count,
+        "items": [_serialize_backtest_run(row) for row in rows],
+    }
+
+
+@router.post("/backtests/run")
+def queue_backtest(
+    payload: dict[str, Any] = Body(default_factory=dict),
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    start_date = payload.get("start_date")
+    end_date = payload.get("end_date")
+    if not start_date or not end_date:
+        raise HTTPException(status_code=400, detail="start_date and end_date are required")
+    try:
+        start_dt = datetime.fromisoformat(str(start_date))
+        end_dt = datetime.fromisoformat(str(end_date))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid date range: {exc}") from exc
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=400, detail="end_date must be after start_date")
+
+    params = {
+        "start_date": str(start_date),
+        "end_date": str(end_date),
+        "use_llm": bool(payload.get("use_llm", False)),
+        "event_profile": str(payload.get("event_profile") or "").strip().lower(),
+        "sources": _normalize_source_list(payload.get("sources")),
+        "min_confidence": int(payload.get("min_confidence", settings.min_trade_confidence)),
+        "min_severity": int(payload.get("min_severity", 0)),
+        "use_signal_validation": bool(payload.get("use_signal_validation", getattr(settings, "validation_enabled", True))),
+        "use_tradeability_filter": bool(payload.get("use_tradeability_filter", settings.event_tradeability_filter_enabled)),
+        "use_event_quality_filter": bool(payload.get("use_event_quality_filter", settings.backtest_use_event_quality_filter)),
+        "trigger": "api",
+    }
+
+    run = BacktestRun(params=params, status="QUEUED")
+    session.add(run)
+    session.flush()
+
+    command = WorkerRuntimeService().queue_command(
+        session,
+        COMMAND_RUN_BACKTEST,
+        payload={**params, "backtest_run_id": run.id},
+        requested_by="api",
+    )
+    session.commit()
+    _cache_invalidate("ui:backtests")
+
+    return {
+        "queued": True,
+        "run_id": run.id,
+        "command_id": command.id,
+        "status": run.status,
+        "message": "Backtest queued for worker",
+    }
+
+
+@router.get("/backtests/{run_id}")
+def get_backtest_run(
+    run_id: int,
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    row = BacktestEngineService(settings).get_run(session, run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+    return _serialize_backtest_run(row, include_detail=True)
 
 
 @router.post("/market/backfill")

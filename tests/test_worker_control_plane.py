@@ -86,6 +86,26 @@ def test_worker_runtime_snapshot_includes_worker_and_queue(session) -> None:
     assert any(row["id"] == pending.id for row in queue["recent"])
 
 
+def test_worker_runtime_snapshot_handles_naive_db_timestamps(session) -> None:
+    control = RuntimeControlService()
+    runtime = WorkerRuntimeService()
+
+    control.touch_worker_heartbeat(
+        session,
+        pid=99,
+        started_at=utc_now() - timedelta(minutes=1),
+    )
+    run = runtime.start_run(session, run_type="live_cycle", trigger="manual", run_key="naive1234")
+    runtime.add_event(session, "live_cycle", "Cycle started", run=run, stage="starting", ticker="AAPL")
+    session.commit()
+    session.expire_all()
+
+    snapshot = runtime.runtime_snapshot(session)
+    assert snapshot["updated_at"]
+    assert snapshot["worker"]["status"] == "ONLINE"
+    assert snapshot["live_cycle"]["cycle_id"] == "naive1234"
+
+
 def test_worker_history_snapshot_contains_runs_commands_and_events(session) -> None:
     runtime = WorkerRuntimeService()
     run = runtime.start_run(session, run_type="live_cycle", trigger="manual", run_key="abcd1234", total_tickers=2)

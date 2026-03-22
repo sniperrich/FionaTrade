@@ -1,0 +1,373 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
+    <div>
+      <div class="page-title">Backtests</div>
+      <div class="page-sub">
+        Worker-backed research jobs. Submit from the UI, let the worker run in background, and inspect results here.
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn btn-ghost btn-sm" onclick="refreshBacktests()">↻ Refresh</button>
+    </div>
+  </div>
+</div>
+
+<div class="card mb16" style="padding:12px 14px;background:rgba(217,119,87,0.08);border-color:rgba(217,119,87,0.22)">
+  <div class="bold">Background Execution</div>
+  <div class="text-muted text-sm mt4">
+    Backtests are queued into the worker command system. Closing the browser does not stop a running backtest.
+  </div>
+</div>
+
+<div class="grid g3 mb16">
+  <div class="card card-sm">
+    <div class="card-title">Worker</div>
+    <div class="card-value" id="bt-worker-status">—</div>
+    <div class="card-sub" id="bt-worker-sub">Waiting…</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Queue Open</div>
+    <div class="card-value" id="bt-queue-open">—</div>
+    <div class="card-sub" id="bt-queue-sub">Pending / running commands</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Latest Run</div>
+    <div class="card-value" id="bt-latest-run">—</div>
+    <div class="card-sub" id="bt-latest-run-sub">Waiting…</div>
+  </div>
+</div>
+
+<div class="grid g2 mb16" style="grid-template-columns:1.2fr 1fr">
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Run Backtest</div>
+    </div>
+    <form id="backtest-form">
+      <div class="form-row mb8">
+        <div class="form-group">
+          <label>Start Date</label>
+          <input type="date" id="bt-start-date" value="{{ backtest_defaults.start_date }}" required />
+        </div>
+        <div class="form-group">
+          <label>End Date</label>
+          <input type="date" id="bt-end-date" value="{{ backtest_defaults.end_date }}" required />
+        </div>
+      </div>
+      <div class="form-row mb8">
+        <div class="form-group">
+          <label>Event Profile</label>
+          <select id="bt-event-profile">
+            <option value="" selected>All Events</option>
+            <option value="earnings_only">Earnings Only</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Mode</label>
+          <div class="seg-group">
+            <input type="radio" name="bt-mode" id="bt-rules" value="rules" {% if not backtest_defaults.use_llm %}checked{% endif %}>
+            <label for="bt-rules">Rules</label>
+            <input type="radio" name="bt-mode" id="bt-llm" value="llm" {% if backtest_defaults.use_llm %}checked{% endif %}>
+            <label for="bt-llm">LLM</label>
+          </div>
+        </div>
+      </div>
+      <div class="form-row mb8">
+        <div class="form-group">
+          <label>Min Confidence</label>
+          <input type="number" id="bt-min-confidence" min="0" max="100" step="1" value="{{ backtest_defaults.min_confidence }}" />
+        </div>
+        <div class="form-group">
+          <label>Min Severity</label>
+          <input type="number" id="bt-min-severity" min="0" max="100" step="1" value="{{ backtest_defaults.min_severity }}" />
+        </div>
+      </div>
+      <div class="form-group mb8">
+        <label>Filters</label>
+        <div class="stack" style="gap:8px">
+          <label class="text-sm"><input type="checkbox" id="bt-use-validation" checked /> Use signal validation</label>
+          <label class="text-sm"><input type="checkbox" id="bt-use-tradeability" checked /> Use tradeability filter</label>
+          <label class="text-sm"><input type="checkbox" id="bt-use-quality-filter" /> Use event quality filter</label>
+        </div>
+      </div>
+      <div class="form-group mb12">
+        <label>Source Filter</label>
+        <div class="text-muted text-sm mb8">Leave all unchecked to use every source.</div>
+        <div id="bt-sources" class="grid g3" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
+          {% for source in backtest_sources %}
+          <label class="text-sm"><input type="checkbox" value="{{ source }}" /> {{ source }}</label>
+          {% endfor %}
+          {% if not backtest_sources %}
+          <div class="empty-state">No event evidence sources found yet.</div>
+          {% endif %}
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary">Queue Backtest</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Run Detail</div>
+      <span class="text-muted text-sm" id="bt-detail-updated">Waiting…</span>
+    </div>
+    <div id="bt-detail-body" class="stack">
+      <div class="empty-state">Select a backtest run to inspect metrics and trade log.</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-header mb8">
+    <div class="section-title">Recent Runs</div>
+    <span class="text-muted text-sm" id="bt-list-updated">Waiting…</span>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>ID</th>
+        <th>Status</th>
+        <th>Date Range</th>
+        <th>Mode</th>
+        <th>Sources</th>
+        <th class="num">Events</th>
+        <th class="num">Trades</th>
+        <th class="num">Win Rate</th>
+        <th class="num">Return</th>
+        <th></th>
+      </tr></thead>
+      <tbody id="bt-runs-body">
+        <tr><td colspan="10" class="empty-state">Loading runs…</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="pager-bar">
+    <div class="pager-summary" id="bt-pager-summary">Loading runs…</div>
+    <div class="pager-actions">
+      <button id="bt-prev-btn" class="btn btn-ghost btn-sm" onclick="setBacktestPage(backtestPage-1)">← Prev</button>
+      <span id="bt-page-label" class="pager-label">Page 1</span>
+      <button id="bt-next-btn" class="btn btn-ghost btn-sm" onclick="setBacktestPage(backtestPage+1)">Next →</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const BACKTESTS_PER_PAGE = {{ pager.per_page|tojson }};
+let backtestPage = {{ pager.page|tojson }};
+let selectedBacktestRunId = null;
+let backtestPollTimer = null;
+
+function fmtPct(v, digits=2){
+  if(v == null || Number.isNaN(Number(v))) return '—';
+  return `${(Number(v) * 100).toFixed(digits)}%`;
+}
+
+function fmtUsd(v){
+  if(v == null || Number.isNaN(Number(v))) return '—';
+  return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+
+function backtestStatusBadge(status){
+  const key=String(status||'').toLowerCase();
+  const cls={queued:'badge-blue',running:'badge-accent',done:'badge-green',completed:'badge-green',failed:'badge-red'}[key] || 'badge-grey';
+  return `<span class="badge ${cls}">${escapeHtml(status||'UNKNOWN')}</span>`;
+}
+
+function selectedSources(){
+  return [...document.querySelectorAll('#bt-sources input[type="checkbox"]:checked')].map(el => el.value);
+}
+
+function currentBacktestPayload(){
+  const mode = document.querySelector('input[name="bt-mode"]:checked')?.value || 'rules';
+  return {
+    start_date: document.getElementById('bt-start-date').value,
+    end_date: document.getElementById('bt-end-date').value,
+    event_profile: document.getElementById('bt-event-profile').value,
+    use_llm: mode === 'llm',
+    min_confidence: Number(document.getElementById('bt-min-confidence').value || 0),
+    min_severity: Number(document.getElementById('bt-min-severity').value || 0),
+    use_signal_validation: document.getElementById('bt-use-validation').checked,
+    use_tradeability_filter: document.getElementById('bt-use-tradeability').checked,
+    use_event_quality_filter: document.getElementById('bt-use-quality-filter').checked,
+    sources: selectedSources(),
+  };
+}
+
+function updateBacktestPager(totalCount, count){
+  const totalPages = Math.max(1, Math.ceil(totalCount / BACKTESTS_PER_PAGE));
+  if(backtestPage > totalPages) backtestPage = totalPages;
+  document.getElementById('bt-page-label').textContent = `Page ${backtestPage}`;
+  document.getElementById('bt-prev-btn').disabled = backtestPage <= 1;
+  document.getElementById('bt-next-btn').disabled = backtestPage >= totalPages;
+  const start = totalCount ? ((backtestPage - 1) * BACKTESTS_PER_PAGE + 1) : 0;
+  const end = totalCount ? ((backtestPage - 1) * BACKTESTS_PER_PAGE + count) : 0;
+  document.getElementById('bt-pager-summary').textContent = totalCount ? `Showing ${start}-${end} of ${totalCount}` : 'No backtest runs yet';
+}
+
+async function loadWorkerSummary(){
+  try{
+    const data = await apiFetch('/api/worker/status');
+    const worker = data.worker || {};
+    document.getElementById('bt-worker-status').innerHTML = backtestStatusBadge(worker.status || 'OFFLINE');
+    document.getElementById('bt-worker-sub').textContent = worker.reason || (worker.last_seen_at ? `Last heartbeat ${worker.last_seen_at}` : 'No heartbeat');
+    document.getElementById('bt-queue-open').textContent = data.command_queue?.open ?? 0;
+    document.getElementById('bt-queue-sub').textContent = `pending ${data.command_queue?.pending ?? 0} · running ${data.command_queue?.running ?? 0}`;
+  } catch (e) {
+    document.getElementById('bt-worker-status').innerHTML = backtestStatusBadge('OFFLINE');
+    document.getElementById('bt-worker-sub').textContent = e.message;
+  }
+}
+
+async function loadBacktestRuns(){
+  const offset = (backtestPage - 1) * BACKTESTS_PER_PAGE;
+  const data = await apiFetch(`/api/backtests?limit=${BACKTESTS_PER_PAGE}&offset=${offset}`);
+  const items = data.items || [];
+  document.getElementById('bt-list-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  updateBacktestPager(Number(data.total_count || 0), items.length);
+  document.getElementById('bt-latest-run').textContent = items.length ? `#${items[0].id}` : '—';
+  document.getElementById('bt-latest-run-sub').textContent = items.length ? `${items[0].status} · ${fmtPct(items[0].metrics?.total_return || 0)}` : 'No runs yet';
+  if(!items.length){
+    document.getElementById('bt-runs-body').innerHTML = '<tr><td colspan="10" class="empty-state">No backtest runs yet.</td></tr>';
+    return [];
+  }
+  document.getElementById('bt-runs-body').innerHTML = items.map(row => {
+    const sources = (row.sources || []).length ? row.sources.join(', ') : 'All';
+    return `<tr>
+      <td class="mono text-xs">#${row.id}</td>
+      <td>${backtestStatusBadge(row.status)}</td>
+      <td>${escapeHtml(row.start_date || '—')} → ${escapeHtml(row.end_date || '—')}</td>
+      <td><span class="badge ${row.use_llm ? 'badge-accent' : 'badge-grey'}">${row.use_llm ? 'LLM' : 'RULES'}</span></td>
+      <td class="text-xs">${escapeHtml(sources)}</td>
+      <td class="num">${row.metrics?.events_considered ?? 0}</td>
+      <td class="num">${row.metrics?.trades ?? 0}</td>
+      <td class="num">${fmtPct(row.metrics?.win_rate || 0)}</td>
+      <td class="num">${fmtPct(row.metrics?.total_return || 0)}</td>
+      <td><button class="btn btn-ghost btn-xs" onclick="selectBacktestRun(${row.id})">Inspect</button></td>
+    </tr>`;
+  }).join('');
+  return items;
+}
+
+async function selectBacktestRun(runId){
+  selectedBacktestRunId = runId;
+  document.getElementById('bt-detail-updated').textContent = 'Loading…';
+  let data;
+  try {
+    data = await apiFetch(`/api/backtests/${runId}`);
+  } catch (e) {
+    document.getElementById('bt-detail-body').innerHTML = `<div class="empty-state text-red">Failed to load run #${runId}: ${escapeHtml(e.message)}</div>`;
+    document.getElementById('bt-detail-updated').textContent = 'Error';
+    return;
+  }
+  const metrics = data.metrics_full || {};
+  const trades = (data.trade_log || []).slice(-12).reverse();
+  const topTrades = trades.length ? trades.map(trade => `
+    <tr>
+      <td class="bold">${escapeHtml(trade.ticker || '—')}</td>
+      <td>${escapeHtml(trade.side || '—')}</td>
+      <td class="num">${fmtUsd(trade.pnl || 0)}</td>
+      <td>${escapeHtml(trade.exit_reason || '—')}</td>
+      <td class="text-xs">${escapeHtml((trade.entry_ts || '').replace('T', ' ').slice(0, 16))}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="5" class="empty-state">No trades recorded.</td></tr>';
+  document.getElementById('bt-detail-body').innerHTML = `
+    <div class="grid g2">
+      <div class="card card-sm">
+        <div class="card-title">Return</div>
+        <div class="card-value">${fmtPct(metrics.total_return || 0)}</div>
+        <div class="card-sub">Sharpe ${Number(metrics.sharpe || 0).toFixed(2)}</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Trades</div>
+        <div class="card-value">${metrics.trades ?? 0}</div>
+        <div class="card-sub">Win rate ${fmtPct(metrics.win_rate || 0)}</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Events</div>
+        <div class="card-value">${metrics.events_considered ?? 0}</div>
+        <div class="card-sub">Profile filtered ${metrics.profile_filtered ?? 0}</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Filters</div>
+        <div class="card-value">${(data.sources || []).length ? data.sources.length : 'All'}</div>
+        <div class="card-sub">${escapeHtml((data.sources || []).join(', ') || 'All sources')}</div>
+      </div>
+    </div>
+    <div class="mt12 text-sm text-muted">
+      Range ${escapeHtml(data.start_date || '—')} → ${escapeHtml(data.end_date || '—')} ·
+      Mode ${data.use_llm ? 'LLM' : 'RULES'} ·
+      Status ${escapeHtml(data.status || '—')}
+    </div>
+    <div class="mt12 tbl-wrap">
+      <table>
+        <thead><tr><th>Ticker</th><th>Side</th><th class="num">PnL</th><th>Exit</th><th>Entry</th></tr></thead>
+        <tbody>${topTrades}</tbody>
+      </table>
+    </div>
+  `;
+  document.getElementById('bt-detail-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+async function queueBacktest(event){
+  event.preventDefault();
+  const payload = currentBacktestPayload();
+  if(!payload.start_date || !payload.end_date){
+    toast('Start date and end date are required', 'error');
+    return;
+  }
+  try {
+    const response = await apiFetch('/api/backtests/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+      timeout: 15000,
+    });
+    toast(`Queued backtest #${response.run_id}`, 'success');
+    selectedBacktestRunId = response.run_id;
+    await refreshBacktests();
+  } catch (e) {
+    toast(`Failed to queue backtest: ${e.message}`, 'error');
+  }
+}
+
+async function refreshBacktests(){
+  let runs = [];
+  try {
+    [runs] = await Promise.all([
+      loadBacktestRuns(),
+      loadWorkerSummary(),
+    ]);
+  } catch (e) {
+    document.getElementById('bt-runs-body').innerHTML = `<tr><td colspan="10" class="empty-state text-red">${escapeHtml(e.message)}</td></tr>`;
+    document.getElementById('bt-list-updated').textContent = 'Error';
+    return;
+  }
+  if(selectedBacktestRunId){
+    await selectBacktestRun(selectedBacktestRunId);
+  } else if(runs && runs.length){
+    await selectBacktestRun(runs[0].id);
+  }
+  const active = (runs || []).some(row => ['QUEUED', 'RUNNING'].includes(String(row.status || '').toUpperCase()));
+  if(backtestPollTimer){
+    clearTimeout(backtestPollTimer);
+    backtestPollTimer = null;
+  }
+  if(active){
+    backtestPollTimer = setTimeout(refreshBacktests, 8000);
+  }
+}
+
+function setBacktestPage(nextPage){
+  if(nextPage < 1) return;
+  backtestPage = nextPage;
+  refreshBacktests();
+}
+
+document.getElementById('backtest-form').addEventListener('submit', queueBacktest);
+refreshBacktests();
+</script>
+{% endblock %}
