@@ -618,7 +618,7 @@ class AnalysisService:
         reason = "tradeable"
         tradeable = True
 
-        if follow_up_hits and not hard_event_hits:
+        if follow_up_hits and (not hard_event_hits or effective_event_type == "unknown"):
             tradeable = False
             reason = "follow_up_or_commentary"
         elif secondary_confirmation_only and strong_sources == 0:

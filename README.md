@@ -242,7 +242,7 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 
 当前事件质量/来源规则补充：
 - `CNBC / Yahoo / Yahoo Finance RSS` 会被降成二级确认源；`Reuters/Bloomberg/SEC/company` 这类仍可作为 primary evidence
-- `trade tracker / why stock is up / top movers / market chatter / recap / commentary` 这类 follow-up/commentary 标题会被降级或直接过滤
+- `trade tracker / what's going on with / why are ... trading / returns to haunt / preview / long-term potential / top movers / market chatter / recap` 这类 follow-up/commentary 标题会被降级或直接过滤
 - 纯 secondary-only 的事件不会通过 validation 成为可交易 primary event，也会在 tradeability gate 被挡掉
 
 当前实现仍然是事件回测，不是 AgentGraph 全链回测。

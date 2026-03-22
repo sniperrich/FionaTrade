@@ -119,10 +119,12 @@ _PRICE_RECAP_RE = re.compile(
     re.IGNORECASE,
 )
 _FOLLOW_UP_COMMENTARY_RE = re.compile(
-    r"\b(trade tracker|final trades|what to know|what it means|market chatter|commentary|commentary piece"
+    r"\b(trade tracker|final trades|what to know|what it means|market chatter|market commentary|commentary piece"
     r"|column|opinion|price target|analyst (?:says|call|note|view)|technical analysis"
-    r"|ready for (?:a )?\d+% surge|ready for a surge|buy here"
-    r"|does that make .* a buy|what investors need to know|why .* stock (?:is|was|keeps) (?:up|down|moving)"
+    r"|ready for (?:a )?\d+% surge|ready for a surge|buy here|returns to haunt"
+    r"|long[\s-]?term potential|preview:|q[1-4] preview|earnings preview"
+    r"|does that make .* a buy|what investors need to know|what'?s going on with"
+    r"|why are .* (?:shares|stock) trading|why .* stock (?:is|was|keeps) (?:up|down|moving)"
     r"|shares? (?:are|were) trading (?:higher|lower)|stocks making the biggest moves|biggest movers"
     r"|top movers|roundup|recap|market recap|opening bell|ahead of the bell|after the bell)\b",
     re.IGNORECASE,

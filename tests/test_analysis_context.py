@@ -355,3 +355,97 @@ def test_tradeability_blocks_secondary_confirmation_only_source(session, setting
     tradeability = svc.assess_tradeability(event, session=session)
     assert tradeability["tradeable"] is False
     assert tradeability["reason"] == "secondary_confirmation_only"
+
+
+def test_tradeability_blocks_followup_commentary_patterns(session, settings):
+    svc = AnalysisService(settings)
+    event_ts = datetime(2026, 3, 6, 10, 2, tzinfo=timezone.utc)
+    event = Event(
+        event_type="policy_shock",
+        tickers=["COST"],
+        entities=["Costco Wholesale"],
+        severity=68,
+        confidence=80,
+        validation_status="VALID",
+        summary="What's Going On With Costco Wholesale Stock Today?",
+        event_time=event_ts,
+    )
+    session.add(event)
+    session.flush()
+
+    raw = RawItem(
+        source="benzinga",
+        source_tier=1,
+        url="https://example.com/cost-commentary",
+        title="What's Going On With Costco Wholesale Stock Today?",
+        body="Costco stock was little changed premarket after a Q2 beat, analyst support and cautious tariff commentary.",
+        published_at=event_ts,
+        ingested_at=event_ts,
+        item_hash="analysis-followup-cost",
+        metadata_json={"ticker": "COST"},
+        processed=True,
+    )
+    session.add(raw)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=raw.source,
+            source_tier=raw.source_tier,
+            summary=raw.title,
+        )
+    )
+    session.flush()
+
+    tradeability = svc.assess_tradeability(event, session=session)
+    assert tradeability["tradeable"] is False
+    assert tradeability["reason"] == "follow_up_or_commentary"
+
+
+def test_tradeability_blocks_commentary_even_when_body_mentions_hard_event(session, settings):
+    svc = AnalysisService(settings)
+    event_ts = datetime(2026, 2, 25, 14, 26, tzinfo=timezone.utc)
+    event = Event(
+        event_type="merger_acquisition",
+        tickers=["GE"],
+        entities=["GE Aerospace"],
+        severity=68,
+        confidence=80,
+        validation_status="VALID",
+        summary="Why Are Palantir Shares Trading Higher On Wednesday?",
+        event_time=event_ts,
+    )
+    session.add(event)
+    session.flush()
+
+    raw = RawItem(
+        source="benzinga",
+        source_tier=1,
+        url="https://example.com/ge-palantir",
+        title="Why Are Palantir Shares Trading Higher On Wednesday?",
+        body="Palantir shares rise after a partnership with GE Aerospace tied to a military contract and broader AI rollout.",
+        published_at=event_ts,
+        ingested_at=event_ts,
+        item_hash="analysis-followup-hard-event",
+        metadata_json={"ticker": "GE"},
+        processed=True,
+    )
+    session.add(raw)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=raw.source,
+            source_tier=raw.source_tier,
+            summary=raw.title,
+        )
+    )
+    session.flush()
+
+    tradeability = svc.assess_tradeability(event, session=session)
+    assert tradeability["tradeable"] is False
+    assert tradeability["reason"] == "follow_up_or_commentary"
