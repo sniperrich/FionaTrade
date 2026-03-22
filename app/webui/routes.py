@@ -6,14 +6,13 @@ from math import ceil
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import and_, distinct, func, select
+from sqlalchemy import distinct, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_app_settings, get_db
 from app.core.config import Settings
 from app.core.utils import utc_now
-from app.db.models import BacktestRun, Event, EventEvidence, PaperFill, Position, RawItem, Signal, SourceStatus
-from app.paper_engine.service import PaperEngineService
+from app.db.models import AgentRun, LiveTrade, RawItem, SourceStatus
 from app.services.runtime_control import RuntimeControlService
 
 templates = Jinja2Templates(directory="templates")
@@ -44,11 +43,9 @@ def dashboard(request: Request, session: Session = Depends(get_db), settings: Se
     now = utc_now()
     one_day_ago = now - timedelta(days=1)
 
-    events_24h = session.execute(select(func.count(Event.id)).where(Event.created_at >= one_day_ago)).scalar_one()
-    signals_24h = session.execute(select(func.count(Signal.id)).where(Signal.created_at >= one_day_ago)).scalar_one()
-    valid_signals = session.execute(
-        select(func.count(Signal.id)).where(and_(Signal.status == "ACTIVE", Signal.expires_at > now))
-    ).scalar_one()
+    news_items_24h = session.execute(select(func.count(RawItem.id)).where(RawItem.ingested_at >= one_day_ago)).scalar_one()
+    agent_runs_24h = session.execute(select(func.count(AgentRun.id)).where(AgentRun.created_at >= one_day_ago)).scalar_one()
+    live_trades_24h = session.execute(select(func.count(LiveTrade.id)).where(LiveTrade.created_at >= one_day_ago)).scalar_one()
 
     latest_ingest = session.execute(select(func.max(RawItem.ingested_at))).scalar_one()
     source_latency_sec = 0.0
@@ -58,56 +55,15 @@ def dashboard(request: Request, session: Session = Depends(get_db), settings: Se
             latest_ingest = latest_ingest.replace(tzinfo=timezone.utc)
         source_latency_sec = (now - latest_ingest).total_seconds()
 
-    engine = PaperEngineService(settings)
-    portfolio = engine.portfolio(session)
-
     context = {
         "request": request,
         "title": "Dashboard",
-        "events_24h": events_24h,
-        "signals_24h": signals_24h,
-        "valid_signals": valid_signals,
+        "news_items_24h": news_items_24h,
+        "agent_runs_24h": agent_runs_24h,
+        "live_trades_24h": live_trades_24h,
         "source_latency_sec": round(source_latency_sec, 1),
-        "paper_nav": round(portfolio["nav"], 2),
-        "paper_realized": round(portfolio["realized_pnl"], 2),
-        "paper_unrealized": round(portfolio["unrealized_pnl"], 2),
     }
     return templates.TemplateResponse("dashboard.html", context)
-
-
-@router.get("/events", response_class=HTMLResponse)
-def event_stream(
-    request: Request,
-    page: int = Query(default=1, ge=1),
-    per_page: int = Query(default=50, ge=10, le=200),
-    session: Session = Depends(get_db),
-):
-    total_count = session.execute(select(func.count(Event.id))).scalar_one()
-    pager = _build_pager(total_count, page, per_page)
-    events = session.execute(
-        select(Event)
-        .order_by(Event.event_time.desc())
-        .offset(pager["offset"])
-        .limit(pager["per_page"])
-    ).scalars().all()
-    evidence_map: dict[int, list[EventEvidence]] = {}
-    for event in events:
-        evidence_map[event.id] = (
-            session.execute(select(EventEvidence).where(EventEvidence.event_id == event.id).order_by(EventEvidence.id.asc()))
-            .scalars()
-            .all()
-        )
-
-    return templates.TemplateResponse(
-        "events.html",
-        {
-            "request": request,
-            "title": "Event Stream",
-            "events": events,
-            "evidence_map": evidence_map,
-            "pager": pager,
-        },
-    )
 
 
 @router.get("/news", response_class=HTMLResponse)
@@ -159,89 +115,6 @@ def news_stream(
     )
 
 
-@router.get("/signals", response_class=HTMLResponse)
-def signals(
-    request: Request,
-    page: int = Query(default=1, ge=1),
-    per_page: int = Query(default=50, ge=10, le=200),
-    session: Session = Depends(get_db),
-):
-    total_count = session.execute(select(func.count(Signal.id))).scalar_one()
-    pager = _build_pager(total_count, page, per_page)
-    rows = session.execute(
-        select(Signal)
-        .order_by(Signal.created_at.desc())
-        .offset(pager["offset"])
-        .limit(pager["per_page"])
-    ).scalars().all()
-    return templates.TemplateResponse(
-        "signals.html",
-        {
-            "request": request,
-            "title": "Signals",
-            "signals": rows,
-            "pager": pager,
-        },
-    )
-
-
-@router.get("/paper", response_class=HTMLResponse)
-def paper_trading(
-    request: Request,
-    page: int = Query(default=1, ge=1),
-    per_page: int = Query(default=50, ge=10, le=200),
-    session: Session = Depends(get_db),
-    settings: Settings = Depends(get_app_settings),
-):
-    engine = PaperEngineService(settings)
-    portfolio = engine.portfolio(session)
-    total_fills = session.execute(select(func.count(PaperFill.id))).scalar_one()
-    pager = _build_pager(total_fills, page, per_page)
-    fills = session.execute(
-        select(PaperFill)
-        .order_by(PaperFill.filled_at.desc())
-        .offset(pager["offset"])
-        .limit(pager["per_page"])
-    ).scalars().all()
-    positions = session.execute(select(Position).order_by(Position.ticker.asc())).scalars().all()
-
-    return templates.TemplateResponse(
-        "paper.html",
-        {
-            "request": request,
-            "title": "Paper Trading",
-            "portfolio": portfolio,
-            "fills": fills,
-            "positions": positions,
-            "pager": pager,
-        },
-    )
-
-
-@router.get("/backtests", response_class=HTMLResponse)
-def backtests(
-    request: Request,
-    page: int = Query(default=1, ge=1),
-    per_page: int = Query(default=25, ge=10, le=100),
-    session: Session = Depends(get_db),
-):
-    total_count = session.execute(select(func.count(BacktestRun.id))).scalar_one()
-    pager = _build_pager(total_count, page, per_page)
-    runs = session.execute(
-        select(BacktestRun)
-        .order_by(BacktestRun.created_at.desc())
-        .offset(pager["offset"])
-        .limit(pager["per_page"])
-    ).scalars().all()
-    return templates.TemplateResponse(
-        "backtests.html",
-        {
-            "request": request,
-            "title": "Backtests",
-            "runs": runs,
-            "pager": pager,
-        },
-    )
 
 
 @router.get("/settings", response_class=HTMLResponse)
@@ -263,7 +136,6 @@ def agents_page(
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ):
-    from app.db.models import AgentRun
     from sqlalchemy import desc, distinct, select
 
     stmt = select(AgentRun).order_by(desc(AgentRun.created_at)).limit(50)

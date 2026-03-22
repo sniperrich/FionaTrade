@@ -119,6 +119,27 @@
 <div class="grid g2 mb16">
   <div class="card">
     <div class="section-header mb8">
+      <div class="section-title">Command Queue</div>
+      <span class="text-muted text-sm" id="command-queue-updated">Waiting…</span>
+    </div>
+    <div id="command-queue-body" class="stack">
+      <div class="empty-state">Loading command queue…</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Worker History</div>
+      <span class="text-muted text-sm" id="worker-history-updated">Waiting…</span>
+    </div>
+    <div id="worker-history-body" class="stack">
+      <div class="empty-state">Loading worker history…</div>
+    </div>
+  </div>
+</div>
+
+<div class="grid g2 mb16">
+  <div class="card">
+    <div class="section-header mb8">
       <div class="section-title">Portfolio Curve</div>
       <div class="filter-bar" style="margin:0">
         <select id="portfolio-period" onchange="refreshAll()" style="width:110px">
@@ -336,7 +357,7 @@
 {% endblock %}
 {% block scripts %}
 <script>
-const LIVE_CACHE_PREFIX = 'ui:live_snapshot:v2:';
+const LIVE_CACHE_PREFIX = 'ui:live_snapshot:v3:';
 let liveTradesPage = 1;
 const LIVE_TRADES_PER_PAGE = 20;
 
@@ -612,12 +633,13 @@ async function loadRuntimeStatus(data=null){
     const cycle=d.live_cycle||{};
     const backfill=d.bar_backfill||{};
     const worker=d.worker||{};
+    const supervisor=d.supervisor||{};
     const queue=d.command_queue||{};
     document.getElementById('runtime-updated').textContent='Updated '+fmtAgo(d.updated_at);
     document.getElementById('runtime-worker-status').innerHTML=runtimeStatusBadge((worker.status||'idle').toLowerCase())+' '+escapeHtml(worker.status||'OFFLINE');
     document.getElementById('runtime-worker-detail').textContent=
       worker.online
-        ? `pid ${worker.pid||'—'} · ${queue.open||0} queued/running`
+        ? `pid ${worker.pid||'—'} · supervisor ${supervisor.status||'OFFLINE'} · ${queue.open||0} queued/running`
         : (worker.reason || 'Worker is not sending heartbeats');
     document.getElementById('runtime-cycle-stage').innerHTML=runtimeStatusBadge(cycle.status)+' '+runtimeStageLabel(cycle.stage);
     document.getElementById('runtime-cycle-progress').textContent=
@@ -656,6 +678,42 @@ async function loadRuntimeStatus(data=null){
     ].filter(Boolean).join('') : '<div class="empty-state text-muted">No runtime events yet</div>';
   } catch(e){
     document.getElementById('runtime-feed').innerHTML=`<div class="empty-state text-red">Runtime status unavailable: ${e.message}</div>`;
+  }
+}
+
+async function loadWorkerHistory(data=null){
+  try{
+    const d=data || await apiFetch('/api/worker/history?run_limit=8&command_limit=8&event_limit=12');
+    document.getElementById('command-queue-updated').textContent='Updated '+fmtAgo((d.commands||[])[0]?.created_at || new Date().toISOString());
+    document.getElementById('worker-history-updated').textContent='Updated '+fmtAgo((d.runs||[])[0]?.updated_at || new Date().toISOString());
+
+    const commands=(d.commands||[]).slice(0,8);
+    document.getElementById('command-queue-body').innerHTML = commands.length ? commands.map(cmd => `
+      <div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+        <div class="flex-center gap8" style="justify-content:space-between;align-items:flex-start">
+          <div class="bold">${escapeHtml(cmd.command_type || 'command')}</div>
+          <div>${statusBadge(cmd.status || '—')}</div>
+        </div>
+        <div class="text-muted text-xs mt4">${[cmd.requested_by, cmd.created_at ? fmtAgo(cmd.created_at) : null].filter(Boolean).join(' · ')}</div>
+        ${cmd.error ? `<div class="text-red text-xs mt4">${escapeHtml(cmd.error)}</div>` : ''}
+      </div>
+    `).join('') : '<div class="empty-state text-muted">No queued commands</div>';
+
+    const runs=(d.runs||[]).slice(0,8);
+    document.getElementById('worker-history-body').innerHTML = runs.length ? runs.map(run => `
+      <div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+        <div class="flex-center gap8" style="justify-content:space-between;align-items:flex-start">
+          <div class="bold">${escapeHtml(run.run_type || 'run')} · ${escapeHtml(run.run_key || '—')}</div>
+          <div>${statusBadge(run.status || '—')}</div>
+        </div>
+        <div class="text-muted text-xs mt4">${[run.trigger, run.market_session, run.updated_at ? fmtAgo(run.updated_at) : null].filter(Boolean).join(' · ')}</div>
+        <div class="text-muted text-xs mt4">${(run.completed_tickers||0)}/${(run.total_tickers||0)} tickers · stage ${escapeHtml(run.stage || '—')}</div>
+        ${run.error ? `<div class="text-red text-xs mt4">${escapeHtml(run.error)}</div>` : ''}
+      </div>
+    `).join('') : '<div class="empty-state text-muted">No worker history yet</div>';
+  } catch(e){
+    document.getElementById('command-queue-body').innerHTML=`<div class="empty-state text-red">Command queue unavailable: ${e.message}</div>`;
+    document.getElementById('worker-history-body').innerHTML=`<div class="empty-state text-red">Worker history unavailable: ${e.message}</div>`;
   }
 }
 
@@ -879,6 +937,7 @@ function hydrateLiveSnapshot(snapshot){
   if(snapshot.bars) loadTickerChart(snapshot.bars);
   if(snapshot.runtime) loadRuntimeStatus(snapshot.runtime);
   if(snapshot.bar_cache) loadBarCacheStatus(snapshot.bar_cache);
+  if(snapshot.worker_history) loadWorkerHistory(snapshot.worker_history);
 }
 
 async function refreshAll(){
@@ -906,6 +965,7 @@ async function refreshAll(){
       loadTradeHistory(),
       loadMarketStatus(),
       loadRuntimeStatus(),
+      loadWorkerHistory(),
       loadBarCacheStatus(),
       loadPortfolioHistory(),
       loadTickerChart(),
@@ -917,6 +977,7 @@ const initialLiveSnapshot=readViewCache(liveSnapshotCacheKey(), 10 * 60 * 1000);
 if(initialLiveSnapshot) hydrateLiveSnapshot(initialLiveSnapshot);
 refreshAll();
 setInterval(loadRuntimeStatus,5000);
+setInterval(loadWorkerHistory,7000);
 setInterval(loadBarCacheStatus,10000);
 setInterval(refreshAll,15000);
 </script>

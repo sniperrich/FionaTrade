@@ -12,6 +12,7 @@ from app.db.models import RuntimeControl
 
 CONTROL_LIVE_ENABLED = "live_trading_enabled"
 CONTROL_WORKER_HEARTBEAT = "worker_heartbeat"
+CONTROL_WORKER_SUPERVISOR = "worker_supervisor"
 DEFAULT_WORKER_STALE_SECONDS = 20
 
 
@@ -68,8 +69,120 @@ class RuntimeControlService:
         scheduler_running: bool = True,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        return self._touch_process_heartbeat(
+            session,
+            key=CONTROL_WORKER_HEARTBEAT,
+            pid=pid,
+            started_at=started_at,
+            source=source,
+            scheduler_running=scheduler_running,
+            extra=extra,
+        )
+
+    def mark_worker_offline(
+        self,
+        session: Session,
+        *,
+        pid: int | None = None,
+        source: str = "worker",
+        reason: str = "shutdown",
+    ) -> dict[str, Any]:
+        return self._mark_process_offline(
+            session,
+            key=CONTROL_WORKER_HEARTBEAT,
+            pid=pid,
+            source=source,
+            reason=reason,
+        )
+
+    def touch_supervisor_heartbeat(
+        self,
+        session: Session,
+        *,
+        pid: int,
+        started_at: datetime,
+        source: str = "worker_supervisor",
+        scheduler_running: bool = True,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._touch_process_heartbeat(
+            session,
+            key=CONTROL_WORKER_SUPERVISOR,
+            pid=pid,
+            started_at=started_at,
+            source=source,
+            scheduler_running=scheduler_running,
+            extra=extra,
+        )
+
+    def mark_supervisor_offline(
+        self,
+        session: Session,
+        *,
+        pid: int | None = None,
+        source: str = "worker_supervisor",
+        reason: str = "shutdown",
+    ) -> dict[str, Any]:
+        return self._mark_process_offline(
+            session,
+            key=CONTROL_WORKER_SUPERVISOR,
+            pid=pid,
+            source=source,
+            reason=reason,
+        )
+
+    def _mark_process_offline(
+        self,
+        session: Session,
+        *,
+        key: str,
+        pid: int | None = None,
+        source: str,
+        reason: str,
+    ) -> dict[str, Any]:
         now = utc_now()
-        payload = self.get(session, CONTROL_WORKER_HEARTBEAT) or {}
+        payload = self.get(session, key) or {}
+        if pid is not None:
+            payload["pid"] = int(pid)
+        payload.update(
+            {
+                "source": source,
+                "status": "OFFLINE",
+                "last_seen_at": now.isoformat(),
+                "stopped_at": now.isoformat(),
+                "reason": reason,
+            }
+        )
+        self.set(session, key, payload)
+        return payload
+
+    def get_worker_status(
+        self,
+        session: Session,
+        stale_after_seconds: int = DEFAULT_WORKER_STALE_SECONDS,
+    ) -> dict[str, Any]:
+        return self._get_process_status(session, CONTROL_WORKER_HEARTBEAT, stale_after_seconds)
+
+    def get_supervisor_status(
+        self,
+        session: Session,
+        stale_after_seconds: int = DEFAULT_WORKER_STALE_SECONDS,
+    ) -> dict[str, Any]:
+        return self._get_process_status(session, CONTROL_WORKER_SUPERVISOR, stale_after_seconds)
+
+    def _touch_process_heartbeat(
+        self,
+        session: Session,
+        *,
+        key: str,
+        pid: int,
+        started_at: datetime,
+        source: str,
+        scheduler_running: bool,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        payload = self.get(session, key) or {}
         payload.update(
             {
                 "pid": int(pid),
@@ -82,39 +195,16 @@ class RuntimeControlService:
         )
         if extra:
             payload.update(extra)
-        self.set(session, CONTROL_WORKER_HEARTBEAT, payload)
+        self.set(session, key, payload)
         return payload
 
-    def mark_worker_offline(
+    def _get_process_status(
         self,
         session: Session,
-        *,
-        pid: int | None = None,
-        source: str = "worker",
-        reason: str = "shutdown",
+        key: str,
+        stale_after_seconds: int,
     ) -> dict[str, Any]:
-        now = utc_now()
-        payload = self.get(session, CONTROL_WORKER_HEARTBEAT) or {}
-        if pid is not None:
-            payload["pid"] = int(pid)
-        payload.update(
-            {
-                "source": source,
-                "status": "OFFLINE",
-                "last_seen_at": now.isoformat(),
-                "stopped_at": now.isoformat(),
-                "reason": reason,
-            }
-        )
-        self.set(session, CONTROL_WORKER_HEARTBEAT, payload)
-        return payload
-
-    def get_worker_status(
-        self,
-        session: Session,
-        stale_after_seconds: int = DEFAULT_WORKER_STALE_SECONDS,
-    ) -> dict[str, Any]:
-        payload = self.get(session, CONTROL_WORKER_HEARTBEAT) or {}
+        payload = self.get(session, key) or {}
         started_at = self._parse_dt(payload.get("started_at"))
         last_seen_at = self._parse_dt(payload.get("last_seen_at"))
         stopped_at = self._parse_dt(payload.get("stopped_at"))

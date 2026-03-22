@@ -30,8 +30,8 @@ from app.core.config import Settings
 from app.core.logging import get_app_logger, log_live_cycle
 from app.core.market_hours import market_session_info
 from app.db.models import AgentRun, Bar1m, LiveTrade, WorkerRun
+from app.ingestion.service import IngestionService
 from app.services.market_data import MarketDataService
-from app.services.orchestrator import PipelineOrchestrator
 from app.services.worker_runtime import WorkerRuntimeService
 from app.tools.news import count_new_raw_items
 
@@ -132,8 +132,8 @@ class LiveTradingService:
         new_article_count = 0
         try:
             self._update_run(session, run, stage="ingestion", current_agent=None)
-            orchestrator = PipelineOrchestrator(self.settings)
-            orchestrator.run_ingestion_validation(session)
+            ingestion = IngestionService(self.settings)
+            ingestion.run(session)
             new_article_count = count_new_raw_items(session, cycle_start)
         except Exception as exc:
             self._emit_event(session, run, f"Cycle {cycle_id} ingestion failed: {exc}", level="warn", stage="ingestion")

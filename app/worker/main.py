@@ -5,6 +5,7 @@ import signal
 import socket
 import threading
 import time
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -13,11 +14,11 @@ from app.core.config import get_settings
 from app.core.logging import get_app_logger, log_writeout, setup_logging
 from app.core.market_hours import is_market_open
 from app.db.database import db_session, init_db
+from app.ingestion.service import IngestionService
 from app.monitoring.health import HealthAuditService
 from app.services.earnings_calendar import EarningsCalendarService
 from app.services.live_trading import LiveTradingService
 from app.services.market_data import MarketDataService
-from app.services.orchestrator import PipelineOrchestrator
 from app.services.runtime_control import RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
@@ -44,29 +45,24 @@ def _is_live_enabled() -> bool:
         return runtime_control.get_live_enabled(session, settings)
 
 
-def _scheduled_tick() -> None:
+def _scheduled_ingestion() -> None:
     try:
         with db_session() as session:
-            orchestrator = PipelineOrchestrator(settings)
-            ingest_result = orchestrator.run_ingestion_validation(session)
-            signal_result = orchestrator.run_signals(session)
-            paper_result = orchestrator.run_paper_execution(session)
+            ingest_result = IngestionService(settings).run(session)
             log_writeout(
-                "pipeline_tick",
+                "ingestion_tick",
                 {
-                    "ingestion": ingest_result,
-                    "signals": signal_result,
-                    "paper": paper_result,
+                    "ingestion": asdict(ingest_result),
                 },
             )
             logger.info(
-                "轮询完成 ingest=%s signals=%s paper=%s",
-                ingest_result,
-                signal_result,
-                paper_result,
+                "采集完成 fetched=%s inserted=%s duplicates=%s",
+                ingest_result.fetched,
+                ingest_result.inserted,
+                ingest_result.duplicate_dropped,
             )
     except Exception as exc:
-        logger.exception("轮询任务失败: %s", exc)
+        logger.exception("采集任务失败: %s", exc)
 
 
 def _scheduled_health_audit() -> None:
@@ -194,7 +190,13 @@ def _process_worker_commands() -> None:
                 try:
                     payload = command.payload_json or {}
                     if command.command_type == COMMAND_RUN_INGESTION:
-                        result = PipelineOrchestrator(settings).run_ingestion_validation(session)
+                        result = IngestionService(settings).run(session)
+                        result = {
+                            "fetched": result.fetched,
+                            "inserted": result.inserted,
+                            "duplicate_dropped": result.duplicate_dropped,
+                            "raw_item_ids": result.raw_item_ids,
+                        }
                     elif command.command_type == COMMAND_REFRESH_BARS:
                         result = market_data.refresh_bars(
                             session,
@@ -250,11 +252,11 @@ def _start_scheduler() -> BackgroundScheduler:
     )
     if settings.enable_scheduler:
         sched.add_job(
-            _scheduled_tick,
+            _scheduled_ingestion,
             "interval",
             seconds=settings.poll_interval_seconds,
             max_instances=1,
-            id="poll_tick",
+            id="ingestion_tick",
             replace_existing=True,
         )
         if settings.enable_health_audit:

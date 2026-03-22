@@ -188,6 +188,17 @@ class WorkerRuntimeService:
             stmt = stmt.where(WorkerRunEvent.run_type.in_(run_types))
         return session.execute(stmt).scalars().all()
 
+    def recent_runs(
+        self,
+        session: Session,
+        run_types: list[str] | None = None,
+        limit: int = 12,
+    ) -> list[WorkerRun]:
+        stmt = select(WorkerRun).order_by(desc(WorkerRun.updated_at), desc(WorkerRun.id)).limit(limit)
+        if run_types:
+            stmt = stmt.where(WorkerRun.run_type.in_(run_types))
+        return session.execute(stmt).scalars().all()
+
     def command_queue_snapshot(self, session: Session, limit: int = 8) -> dict[str, Any]:
         counts = {status: count for status, count in session.execute(
             select(WorkerCommand.status, func.count(WorkerCommand.id)).group_by(WorkerCommand.status)
@@ -209,7 +220,29 @@ class WorkerRuntimeService:
     def worker_status_snapshot(self, session: Session) -> dict[str, Any]:
         return {
             "worker": RuntimeControlService().get_worker_status(session),
+            "supervisor": RuntimeControlService().get_supervisor_status(session),
             "command_queue": self.command_queue_snapshot(session),
+        }
+
+    def history_snapshot(
+        self,
+        session: Session,
+        *,
+        run_limit: int = 10,
+        command_limit: int = 10,
+        event_limit: int = 20,
+    ) -> dict[str, Any]:
+        runs = self.recent_runs(session, ["live_cycle", "bar_backfill"], limit=run_limit)
+        commands = session.execute(
+            select(WorkerCommand)
+            .order_by(desc(WorkerCommand.created_at), desc(WorkerCommand.id))
+            .limit(command_limit)
+        ).scalars().all()
+        events = self.recent_events(session, ["live_cycle", "bar_backfill"], limit=event_limit)
+        return {
+            "runs": [self._serialize_run_summary(run) for run in runs],
+            "commands": [self._serialize_command(command) for command in commands],
+            "events": [self._serialize_event(event) for event in events],
         }
 
     def runtime_snapshot(self, session: Session) -> dict[str, Any]:
@@ -217,6 +250,7 @@ class WorkerRuntimeService:
         backfill_run = self.latest_run(session, "bar_backfill")
         events = list(reversed(self.recent_events(session, ["live_cycle", "bar_backfill"], limit=16)))
         worker = RuntimeControlService().get_worker_status(session)
+        supervisor = RuntimeControlService().get_supervisor_status(session)
         queue = self.command_queue_snapshot(session)
 
         timestamps = [
@@ -226,6 +260,7 @@ class WorkerRuntimeService:
                 backfill_run.updated_at if backfill_run else None,
                 events[-1].created_at if events else None,
                 self._parse_iso_dt(worker.get("last_seen_at")),
+                self._parse_iso_dt(supervisor.get("last_seen_at")),
             ]
             if value is not None
         ]
@@ -233,6 +268,7 @@ class WorkerRuntimeService:
         return {
             "updated_at": updated_at.isoformat(),
             "worker": worker,
+            "supervisor": supervisor,
             "command_queue": queue,
             "live_cycle": self._serialize_run(live_run),
             "bar_backfill": self._serialize_run(backfill_run),
@@ -300,6 +336,27 @@ class WorkerRuntimeService:
             "started_at": command.started_at.isoformat() if command.started_at else None,
             "finished_at": command.finished_at.isoformat() if command.finished_at else None,
             "error": command.error_message,
+        }
+
+    def _serialize_run_summary(self, run: WorkerRun) -> dict[str, Any]:
+        return {
+            "id": run.id,
+            "run_key": run.run_key,
+            "run_type": run.run_type,
+            "trigger": run.trigger,
+            "status": run.status,
+            "stage": run.stage,
+            "current_ticker": run.current_ticker,
+            "current_agent": run.current_agent,
+            "market_session": run.market_session,
+            "dry_run": run.dry_run,
+            "total_tickers": run.total_tickers,
+            "completed_tickers": run.completed_tickers,
+            "error": run.error_message,
+            "summary": run.summary_json or {},
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         }
 
     def _parse_iso_dt(self, value: Any) -> datetime | None:

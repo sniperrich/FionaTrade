@@ -1,5 +1,5 @@
 [Unit]
-Description=FionaTrade Web Control Plane
+Description=FionaTrade Worker Supervisor
 After=network.target
 Wants=network-online.target
 
@@ -11,26 +11,17 @@ WorkingDirectory=/opt/fionatrade
 Environment="PATH=/opt/fionatrade/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 EnvironmentFile=/opt/fionatrade/.env
 
-# Main process
-ExecStart=/opt/fionatrade/.venv/bin/uvicorn app.main:app \
-    --host 127.0.0.1 \
-    --port 6888 \
-    --workers 1 \
-    --log-level info \
-    --no-access-log
+ExecStart=/opt/fionatrade/.venv/bin/python -m app.worker.supervisor
 
-# Restart policy
 Restart=always
-RestartSec=10
+RestartSec=5
 StartLimitInterval=120
-StartLimitBurst=5
+StartLimitBurst=10
 
-# Logging — journalctl -u fionatrade -f
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=fionatrade
+SyslogIdentifier=fionatrade-worker
 
-# Resource limits
 LimitNOFILE=65536
 TimeoutStartSec=60
 TimeoutStopSec=30

@@ -5,17 +5,15 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_app_settings, get_db
-from app.backtest_engine.service import BacktestEngineService
 from app.core.config import Settings
 from app.core.utils import utc_now
-from app.db.models import BacktestRun, Event, EventEvidence, RawItem, Signal, SourceStatus
+from app.db.models import RawItem, SourceStatus
 from app.monitoring.health import HealthAuditService
 from app.services.market_data import MarketDataService
-from app.services.orchestrator import PipelineOrchestrator
 from app.services.runtime_control import RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
@@ -95,49 +93,6 @@ def run_ingest(
         "command_type": command.command_type,
         "message": "Ingestion job queued for worker",
     }
-
-
-@router.get("/events")
-def list_events(
-    session: Session = Depends(get_db),
-    limit: int = Query(default=100, ge=1, le=500),
-    status: str | None = Query(default=None),
-) -> list[dict[str, Any]]:
-    stmt = select(Event).order_by(Event.event_time.desc()).limit(limit)
-    if status:
-        stmt = select(Event).where(Event.validation_status == status).order_by(Event.event_time.desc()).limit(limit)
-
-    rows = session.execute(stmt).scalars().all()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        evidence = session.execute(
-            select(EventEvidence).where(EventEvidence.event_id == row.id).order_by(EventEvidence.id.asc())
-        ).scalars().all()
-        out.append(
-            {
-                "id": row.id,
-                "event_type": row.event_type,
-                "tickers": row.tickers,
-                "severity": row.severity,
-                "event_time": row.event_time,
-                "confidence": row.confidence,
-                "validation_status": row.validation_status,
-                "conflict_reason": row.conflict_reason,
-                "summary": row.summary,
-                "evidence": [
-                    {
-                        "id": e.id,
-                        "url": e.url,
-                        "source": e.source,
-                        "source_tier": e.source_tier,
-                        "captured_at": e.captured_at,
-                        "summary": e.summary,
-                    }
-                    for e in evidence
-                ],
-            }
-        )
-    return out
 
 
 @router.get("/news")
@@ -250,56 +205,6 @@ def list_news_source_status(
     }
 
 
-@router.post("/signals/run")
-def run_signals(
-    session: Session = Depends(get_db),
-    settings: Settings = Depends(get_app_settings),
-) -> dict[str, Any]:
-    orchestrator = PipelineOrchestrator(settings)
-    return orchestrator.run_signals(session)
-
-
-@router.get("/signals")
-def list_signals(
-    session: Session = Depends(get_db),
-    limit: int = Query(default=100, ge=1, le=500),
-    active_only: bool = Query(default=False),
-) -> list[dict[str, Any]]:
-    stmt = select(Signal).order_by(Signal.created_at.desc()).limit(limit)
-    if active_only:
-        stmt = select(Signal).where(and_(Signal.status == "ACTIVE", Signal.expires_at > utc_now())).order_by(
-            Signal.created_at.desc()
-        ).limit(limit)
-
-    rows = session.execute(stmt).scalars().all()
-    return [
-        {
-            "id": s.id,
-            "event_id": s.event_id,
-            "action": s.action,
-            "ticker": s.ticker,
-            "confidence": s.confidence,
-            "horizon_min": s.horizon_min,
-            "reason": s.reason,
-            "expires_at": s.expires_at,
-            "fallback_used": s.fallback_used,
-            "status": s.status,
-            "created_at": s.created_at,
-            "executed_at": s.executed_at,
-        }
-        for s in rows
-    ]
-
-
-@router.post("/paper/execute")
-def execute_paper(
-    session: Session = Depends(get_db),
-    settings: Settings = Depends(get_app_settings),
-) -> dict[str, Any]:
-    orchestrator = PipelineOrchestrator(settings)
-    return orchestrator.run_paper_execution(session)
-
-
 @router.post("/market/backfill")
 def run_market_backfill(
     payload: dict[str, Any] = Body(default_factory=dict),
@@ -338,53 +243,6 @@ def run_market_backfill(
         "command_id": command.id,
         "command_type": command.command_type,
         "message": "Market backfill job queued for worker",
-    }
-
-
-@router.get("/paper/portfolio")
-def paper_portfolio(
-    session: Session = Depends(get_db),
-    settings: Settings = Depends(get_app_settings),
-) -> dict[str, Any]:
-    orchestrator = PipelineOrchestrator(settings)
-    return orchestrator.portfolio(session)
-
-
-@router.post("/backtests/run")
-def run_backtest(
-    payload: dict[str, Any] = Body(default_factory=dict),
-    session: Session = Depends(get_db),
-    settings: Settings = Depends(get_app_settings),
-) -> dict[str, Any]:
-    engine = BacktestEngineService(settings)
-    result = engine.run(session, params=payload)
-    return {
-        "run_id": result.run_id,
-        "status": result.status,
-        "metrics": result.metrics,
-    }
-
-
-@router.get("/backtests/{run_id}")
-def get_backtest(
-    run_id: int,
-    session: Session = Depends(get_db),
-    settings: Settings = Depends(get_app_settings),
-) -> dict[str, Any]:
-    engine = BacktestEngineService(settings)
-    row = engine.get_run(session, run_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="backtest run not found")
-
-    return {
-        "id": row.id,
-        "status": row.status,
-        "params": row.params,
-        "metrics": row.metrics,
-        "equity_curve": row.equity_curve,
-        "trade_log": row.trade_log,
-        "created_at": row.created_at,
-        "finished_at": row.finished_at,
     }
 
 
@@ -544,8 +402,7 @@ def live_status(
     control = RuntimeControlService()
     runtime = WorkerRuntimeService()
     enabled = control.get_live_enabled(session, settings)
-    worker_status = control.get_worker_status(session)
-    command_queue = runtime.command_queue_snapshot(session, limit=5)
+    worker_bundle = runtime.worker_status_snapshot(session)
     latest_run = WorkerRuntimeService().latest_run(session, "live_cycle")
     last_cycle: dict | None = None
     if latest_run:
@@ -568,8 +425,9 @@ def live_status(
         "max_position_pct": settings.live_max_position_pct,
         "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
         "last_cycle": last_cycle,
-        "worker": worker_status,
-        "command_queue": command_queue,
+        "worker": worker_bundle["worker"],
+        "supervisor": worker_bundle["supervisor"],
+        "command_queue": worker_bundle["command_queue"],
         "control_plane": {
             "mode": "worker_control_plane",
             "browser_independent": True,
@@ -590,6 +448,21 @@ def worker_status(
     session: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return WorkerRuntimeService().worker_status_snapshot(session)
+
+
+@router.get("/worker/history")
+def worker_history(
+    session: Session = Depends(get_db),
+    run_limit: int = Query(default=10, ge=1, le=50),
+    command_limit: int = Query(default=10, ge=1, le=50),
+    event_limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    return WorkerRuntimeService().history_snapshot(
+        session,
+        run_limit=run_limit,
+        command_limit=command_limit,
+        event_limit=event_limit,
+    )
 
 
 @router.get("/live/bar_cache")
@@ -1005,6 +878,7 @@ def live_snapshot(
         "bars": None,
         "bar_cache": None,
         "runtime": None,
+        "worker_history": None,
         "errors": {},
     }
 
@@ -1067,6 +941,11 @@ def live_snapshot(
         payload["runtime"] = live_runtime_status(session=session)
     except Exception as exc:
         payload["errors"]["runtime"] = str(exc)
+
+    try:
+        payload["worker_history"] = worker_history(session=session, run_limit=8, command_limit=8, event_limit=16)
+    except Exception as exc:
+        payload["errors"]["worker_history"] = str(exc)
 
     return _cache_set(cache_key, payload)
 

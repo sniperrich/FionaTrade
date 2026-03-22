@@ -59,11 +59,15 @@ fi
 # ── 6. systemd 服务 ───────────────────────────────────────────────────────────
 echo "[6/7] 安装 systemd 服务..."
 cp "$DEPLOY_DIR/fionatrade.service" /etc/systemd/system/fionatrade.service
+cp "$DEPLOY_DIR/fionatrade-worker.service" /etc/systemd/system/fionatrade-worker.service
 systemctl daemon-reload
 systemctl enable fionatrade
+systemctl enable fionatrade-worker
 systemctl restart fionatrade
+systemctl restart fionatrade-worker
 sleep 3
 systemctl status fionatrade --no-pager
+systemctl status fionatrade-worker --no-pager
 
 # ── 7. nginx ──────────────────────────────────────────────────────────────────
 echo "[7/7] 配置 nginx..."
@@ -83,6 +87,8 @@ echo "  4. systemctl restart fionatrade"
 echo "  5. 访问 http://your-server-ip"
 echo ""
 echo "常用命令："
-echo "  journalctl -u fionatrade -f          # 实时日志"
-echo "  systemctl restart fionatrade         # 重启服务"
+echo "  journalctl -u fionatrade -f          # Web 日志"
+echo "  journalctl -u fionatrade-worker -f   # Worker/Supervisor 日志"
+echo "  systemctl restart fionatrade         # 重启 Web"
+echo "  systemctl restart fionatrade-worker  # 重启 Worker"
 echo "  curl http://localhost:$APP_PORT/api/health  # 健康检查"

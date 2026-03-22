@@ -18,8 +18,8 @@ nano .env   # 填写 FINNHUB_API_KEY / LLM_API_KEY / ALPACA_API_KEY
 # Web（只负责 API + UI）
 uvicorn app.main:app --host 0.0.0.0 --port 6888 --reload
 
-# Worker（负责 scheduler / ingestion / live cycle / backfill）
-python -m app.worker.main
+# Worker Supervisor（负责自动拉起 worker / 崩溃重启 / 失败恢复）
+python -m app.worker.supervisor
 
 # 访问 WebUI
 open http://localhost:6888
@@ -39,9 +39,11 @@ db     -> SQLite，统一保存状态、结果、行情缓存、运行态
 
 关键点：
 - `app.main` 已经变成纯 Web 入口，不再持有 scheduler
-- `app.worker.main` 持有所有后台任务
+- `app.worker.supervisor` 负责自动拉起和重启 `app.worker.main`
+- `app.worker.main` 只负责后台任务，不负责自我守护
 - `Enable Live` 写入 `runtime_controls`，不再只改当前进程内存
 - worker 每 5 秒写一次 heartbeat 到 `runtime_controls`，WebUI 可判断 `ONLINE / STALE / OFFLINE`
+- supervisor 也会写 heartbeat，WebUI/API 能区分 “worker 挂了” 和 “根本没人守护”
 - live runtime 读取 `worker_runs / worker_run_events`，不再依赖进程内 runtime store
 - `MarketDataService` 统一 chart/cache/freshness/fallback/backfill
 - 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
@@ -68,28 +70,15 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 
 **风控限制（硬编码）：** 最大仓位 20% · 日亏损上限 3% · 最少 2 个信号共识
 
-### Legacy 模式（`AGENT_MODE_ENABLED=false`）
-
-```
-IngestionService → NormalizationService → ValidationService
-    → SignalEngineService（AnalysisService + SignalValidator）→ PaperEngineService
-```
-
----
-
 ## WebUI 页面
 
 | 路径 | 功能 |
 |------|------|
 | `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot + worker/queue 状态** |
-| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + local bar cache + ticker K-line + 成交历史翻页** |
+| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + worker history + local bar cache + ticker K-line + 成交历史翻页** |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**30s 自动拉新 + 源状态/报错 + 历史翻页** |
 | `/settings` | 配置信息 |
-| `/signals` | 遗留信号流（翻页） |
-| `/events` | 事件流（翻页） |
-| `/paper` | 模拟盘组合（fills 翻页） |
-| `/backtests` | 回测历史（翻页） |
 
 ---
 
@@ -99,7 +88,7 @@ IngestionService → NormalizationService → ValidationService
 app/
   core/          配置（config.py）、日志、market_hours、SP100 ticker 集合
   db/            SQLAlchemy 模型（models.py）+ db_session() 上下文管理器
-  worker/        Worker 入口：scheduler / command pump / live cycle / backfill
+  worker/        supervisor.py + main.py（守护 / scheduler / command pump / live cycle / backfill）
   ingestion/     数据源：finnhub_client / rss_client / sec_client / fred_client / earnings_release_client
   normalization/ RawItem → Event（聚类 + ticker 提取 + taxonomy）
   validation/    事件去重 + 冲突检测
@@ -107,20 +96,17 @@ app/
   agents/        6 个 Agent 类（继承 BaseAgent）
   agent_graph/   graph.py（AgentGraph）+ state.py（TypedDict 状态）
   broker/        alpaca.py（完整 Alpaca REST v2，777 行）+ paper.py
-  services/      live_trading.py + market_data.py + worker_runtime.py + runtime_control.py + orchestrator.py
-  analysis/      [已弃用] legacy 分析服务，仅供回测兼容
-  signal_engine/ 遗留信号引擎
-  paper_engine/  模拟填单 + 持仓跟踪 + NAV
-  backtest_engine/ 3 阶段回测：warmup → 并行 LLM → 串行执行
+  services/      live_trading.py + market_data.py + worker_runtime.py + runtime_control.py
+  backtest_engine/ 离线研究/回测模块（不再暴露在主 WebUI/API）
   market/        1m K 线回填（Finnhub → Alpaca → yfinance → stooq）
   monitoring/    HealthAuditService（数据源延迟 + 状态快照）
   api/routes.py  所有 REST API 端点
   webui/routes.py Jinja2 页面路由
 
-templates/       9 个 HTML 模板（Claude 风格 sidebar 布局）
+templates/       5 个 HTML 模板（Dashboard / Live / Agents / News / Settings）
 static/ft.css    Claude 风格 CSS 设计系统
 scripts/         独立工具脚本（回测、历史数据回填等）
-tests/           137 个 pytest 测试
+tests/           pytest 测试集
 ```
 
 ---
@@ -130,8 +116,9 @@ tests/           137 个 pytest 测试
 | 方法 | 路径 | 返回格式 |
 |------|------|---------|
 | GET | `/api/health` | `{status, llm_configured, llm_model, sources_online, ...}` |
-| GET | `/api/live/status` | **平铺字段**：`{enabled, market_tradeable, market_session(字符串), market_time, tickers, ...}` |
-| GET | `/api/worker/status` | worker heartbeat + command queue 快照 |
+| GET | `/api/live/status` | **平铺字段**：`{enabled, market_tradeable, market_session(字符串), market_time, tickers, worker, supervisor, command_queue, ...}` |
+| GET | `/api/worker/status` | worker + supervisor heartbeat + command queue 快照 |
+| GET | `/api/worker/history` | recent worker runs + commands + runtime events |
 | GET | `/api/agent/runs` | **包装对象**：`{"runs": [...]}` — 每项用 `*_result` 字段名 |
 | GET | `/api/news` | **分页对象**：`{"items": [...], "mode", "latest_id", ...}` |
 | POST | `/api/agent/run` | 触发 Agent 图：`{"tickers": ["AAPL", "NVDA"]}` |
@@ -161,13 +148,14 @@ tests/           137 个 pytest 测试
 > - `/api/agent/runs` 现支持 `ticker/action/limit/offset`
 > - `/api/live/trades` 现支持 `ticker/limit/offset`
 > - Live 页的 runtime 状态现在来自数据库 `worker_runs / worker_run_events`
-> - `/api/live/status` 现额外返回 `worker` 与 `command_queue`，供控制面板判断后台是否仍在运行
+> - `/api/live/status` 现额外返回 `worker` / `supervisor` / `command_queue`
+> - `/api/worker/history` 用于 `/live` 的专门排障面板（command queue / worker history）
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
 > - 若当前是周末/美股闭市，live cycle 会显示 `analysis mode`，这是预期行为，不是失败
 > - 若 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 都为空，live cycle 会明确显示 `no live tickers configured`
 > - 模板页面脚本必须放在 `base.html` 的 `{% block scripts %}` 中，不能直接内联在 `content` 里，否则会先于全局工具函数执行
 > - `Enable Live` 现在是 DB 共享开关，worker 不运行时只会看到 queued command，不会真的执行
-> - 一旦 live 已启用，只要 `python -m app.worker.main` 还在运行，关闭浏览器不会停止 auto trading
+> - 一旦 live 已启用，只要 `python -m app.worker.supervisor` 还在运行，关闭浏览器不会停止 auto trading
 
 ---
 
@@ -214,7 +202,7 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 
 > Enable Live 现在不会再让 Web 进程直接起后台线程。
 > 它会写入共享 `runtime_controls`，再给 worker 排队 `refresh_bars + live_cycle`。
-> worker 心跳也写在 `runtime_controls`，可从 `/api/worker/status` 或 Live 页面直接确认后台是否在线。
+> worker/supervisor 心跳都写在 `runtime_controls`，可从 `/api/worker/status` 或 Live 页面直接确认后台是否在线。
 
 ### 下单逻辑
 - Alpaca bracket 订单（止损 + 止盈原子提交）
@@ -241,6 +229,7 @@ cd /opt/fionatrade
 bash deploy.sh
 nano .env          # 填入 API keys
 systemctl restart fionatrade
+systemctl restart fionatrade-worker
 
 # 验证
 curl http://localhost:6888/api/health
@@ -257,7 +246,8 @@ curl http://localhost:6888/api/health
 
 ### 运维命令
 ```bash
-journalctl -u fionatrade -f        # 实时日志
+journalctl -u fionatrade -f        # Web 日志
+journalctl -u fionatrade-worker -f # Worker/Supervisor 日志
 systemctl restart fionatrade       # 重启
 curl http://localhost:6888/api/health  # 健康检查
 ```
@@ -267,7 +257,7 @@ curl http://localhost:6888/api/health  # 健康检查
 ## 测试
 
 ```bash
-pytest tests/                      # 137 个测试，~2.4s
+pytest tests/                      # 运行测试集
 pytest tests/ --cov=app            # 带覆盖率
 pytest tests/test_agent_graph.py -v
 ```

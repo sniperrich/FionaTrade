@@ -24,4 +24,4 @@ def startup_event() -> None:
     init_db()
     logger.info("Web startup complete")
     logger.info("中文提示：打开 WebUI http://127.0.0.1:6888 ，健康检查 http://127.0.0.1:6888/api/health")
-    logger.info("中文提示：后台任务已迁移到 worker 进程，请单独运行 python -m app.worker.main")
+    logger.info("中文提示：后台任务已迁移到 worker 进程，推荐单独运行 python -m app.worker.supervisor")

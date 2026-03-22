@@ -37,21 +37,21 @@
       <div class="loading"><div class="spinner"></div> Loading…</div>
     </div>
   </div>
-  <!-- Pipeline stats -->
+  <!-- Control plane stats -->
   <div class="card">
-    <div class="card-title">Pipeline (24h)</div>
+    <div class="card-title">Activity (24h)</div>
     <div class="grid g2 mt8">
       <div>
-        <div class="text-muted text-sm">Events ingested</div>
-        <div style="font-size:22px;font-weight:700;margin-top:2px">{{ events_24h }}</div>
+        <div class="text-muted text-sm">News items ingested</div>
+        <div style="font-size:22px;font-weight:700;margin-top:2px">{{ news_items_24h }}</div>
       </div>
       <div>
-        <div class="text-muted text-sm">Signals generated</div>
-        <div style="font-size:22px;font-weight:700;margin-top:2px">{{ signals_24h }}</div>
+        <div class="text-muted text-sm">Agent runs</div>
+        <div style="font-size:22px;font-weight:700;margin-top:2px">{{ agent_runs_24h }}</div>
       </div>
       <div>
-        <div class="text-muted text-sm">Active signals</div>
-        <div style="font-size:22px;font-weight:700;margin-top:2px;color:var(--green)">{{ valid_signals }}</div>
+        <div class="text-muted text-sm">Live trades recorded</div>
+        <div style="font-size:22px;font-weight:700;margin-top:2px;color:var(--green)">{{ live_trades_24h }}</div>
       </div>
       <div>
         <div class="text-muted text-sm">Source latency</div>
@@ -219,6 +219,7 @@ async function loadSystemStatus(healthData=null, liveData=null) {
       ? [healthData, liveData]
       : await Promise.all([apiFetch('/api/health'), apiFetch('/api/live/status')]);
     const worker = live.worker || {};
+    const supervisor = live.supervisor || {};
     const queue = live.command_queue || {};
     const rows = [
       ['Market', live.market_tradeable ? '<span class="badge badge-green">Open</span>' : `<span class="badge badge-grey">${live.market_session||'closed'}</span>`],
@@ -226,6 +227,11 @@ async function loadSystemStatus(healthData=null, liveData=null) {
       ['Worker', worker.status === 'ONLINE'
         ? `<span class="badge badge-green">ONLINE</span>`
         : worker.status === 'STALE'
+          ? '<span class="badge badge-warn">STALE</span>'
+          : '<span class="badge badge-grey">OFFLINE</span>'],
+      ['Supervisor', supervisor.status === 'ONLINE'
+        ? '<span class="badge badge-green">ONLINE</span>'
+        : supervisor.status === 'STALE'
           ? '<span class="badge badge-warn">STALE</span>'
           : '<span class="badge badge-grey">OFFLINE</span>'],
       ['Queue', `<span class="badge badge-blue">${queue.open||0} open</span>`],
