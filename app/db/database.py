@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from app.core.config import get_settings
@@ -52,3 +53,10 @@ def init_db() -> None:
     from app.db import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+
+
+def is_sqlite_lock_error(exc: Exception) -> bool:
+    if not isinstance(exc, OperationalError):
+        return False
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message

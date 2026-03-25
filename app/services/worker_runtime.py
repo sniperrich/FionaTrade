@@ -86,6 +86,32 @@ class WorkerRuntimeService:
         session.flush()
         return command
 
+    def cancel_pending_commands(
+        self,
+        session: Session,
+        *,
+        command_types: list[str],
+        reason: str,
+    ) -> int:
+        rows = session.execute(
+            select(WorkerCommand)
+            .where(
+                WorkerCommand.status == "PENDING",
+                WorkerCommand.command_type.in_(command_types),
+            )
+            .order_by(WorkerCommand.created_at.asc(), WorkerCommand.id.asc())
+        ).scalars().all()
+        now = utc_now()
+        for row in rows:
+            row.status = "CANCELLED"
+            row.finished_at = now
+            row.error_message = reason[:4000]
+            result = dict(row.result_json or {})
+            result.update({"cancelled": True, "reason": reason})
+            row.result_json = result
+        session.flush()
+        return len(rows)
+
     def start_run(
         self,
         session: Session,
@@ -215,6 +241,7 @@ class WorkerRuntimeService:
             "pending": int(counts.get("PENDING", 0)),
             "running": int(counts.get("RUNNING", 0)),
             "failed": int(counts.get("FAILED", 0)),
+            "cancelled": int(counts.get("CANCELLED", 0)),
             "completed": int(counts.get("COMPLETED", 0)),
             "open": int(counts.get("PENDING", 0) + counts.get("RUNNING", 0)),
             "recent": [self._serialize_command(row) for row in rows],

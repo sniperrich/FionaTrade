@@ -9,7 +9,12 @@ from app.api.routes import set_live_enabled
 from app.core.utils import utc_now
 from app.db.models import BacktestRun, WorkerCommand, WorkerRun
 from app.services.runtime_control import CONTROL_WORKER_HEARTBEAT, RuntimeControlService
-from app.services.worker_runtime import COMMAND_RUN_LIVE_CYCLE, WorkerRuntimeService
+from app.services.worker_runtime import (
+    COMMAND_REFRESH_BARS,
+    COMMAND_RUN_INGESTION,
+    COMMAND_RUN_LIVE_CYCLE,
+    WorkerRuntimeService,
+)
 
 
 def test_worker_heartbeat_status_transitions(session) -> None:
@@ -195,3 +200,28 @@ def test_set_live_enabled_queues_commands_when_worker_and_supervisor_online(sess
         "refresh_bars",
         "run_live_cycle",
     ]
+
+
+def test_set_live_enabled_disables_and_cancels_pending_live_commands(session, settings) -> None:
+    control = RuntimeControlService()
+    runtime = WorkerRuntimeService()
+    now = utc_now() - timedelta(minutes=1)
+    control.touch_worker_heartbeat(session, pid=3001, started_at=now, extra={"configured_tickers": ["AAPL"]})
+    control.touch_supervisor_heartbeat(session, pid=3002, started_at=now, extra={"child_pid": 3001})
+
+    control.set_live_enabled(session, settings, True, source="pytest")
+    runtime.queue_command(session, COMMAND_RUN_INGESTION, payload={"trigger": "enable_live"}, requested_by="pytest")
+    runtime.queue_command(session, COMMAND_REFRESH_BARS, payload={"trigger": "enable_live"}, requested_by="pytest")
+    runtime.queue_command(session, COMMAND_RUN_LIVE_CYCLE, payload={"trigger": "enable_live"}, requested_by="pytest")
+
+    result = set_live_enabled(body={"enabled": False}, session=session, settings=settings)
+
+    assert result["enabled"] is False
+    assert "Cancelled 3 pending live commands" in result["message"]
+
+    commands = session.query(WorkerCommand).order_by(WorkerCommand.id.asc()).all()
+    assert [command.status for command in commands] == ["CANCELLED", "CANCELLED", "CANCELLED"]
+
+    queue = runtime.command_queue_snapshot(session)
+    assert queue["pending"] == 0
+    assert queue["cancelled"] == 3

@@ -5,13 +5,15 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from sqlalchemy.exc import OperationalError
 from sqlalchemy import desc, distinct, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.deps import get_app_settings, get_db
 from app.core.config import Settings
 from app.core.utils import utc_now
 from app.backtest_engine.service import BacktestEngineService
+from app.db.database import is_sqlite_lock_error
 from app.db.models import BacktestRun, EventEvidence, RawItem, SourceStatus
 from app.monitoring.health import HealthAuditService
 from app.services.market_data import MarketDataService
@@ -26,6 +28,45 @@ from app.services.worker_runtime import (
 
 router = APIRouter(prefix="/api", tags=["api"])
 _RUNTIME_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _retry_db_write(
+    operation,
+    *,
+    bind,
+    attempts: int = 8,
+    base_sleep: float = 0.25,
+):
+    last_exc: Exception | None = None
+    writer_factory = sessionmaker(
+        bind=bind,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+        future=True,
+    )
+    for attempt in range(attempts):
+        try:
+            write_session = writer_factory()
+            try:
+                result = operation(write_session)
+                write_session.commit()
+                return result
+            except Exception:
+                write_session.rollback()
+                raise
+            finally:
+                write_session.close()
+        except OperationalError as exc:
+            if not is_sqlite_lock_error(exc):
+                raise
+            last_exc = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(base_sleep * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("db write retry failed without captured exception")
 
 
 def _cache_get(key: str, ttl_seconds: float) -> Any | None:
@@ -1151,8 +1192,6 @@ def set_live_enabled(
 ) -> dict[str, Any]:
     """Toggle live trading through shared DB runtime control."""
     control = RuntimeControlService()
-    runtime = WorkerRuntimeService()
-    was_enabled = control.get_live_enabled(session, settings)
     enabled = bool(body.get("enabled", True))
     has_tickers = bool(settings.live_trading_tickers or list(settings.agent_tickers_override or []))
     worker_status = control.get_worker_status(session)
@@ -1176,37 +1215,63 @@ def set_live_enabled(
                 ),
             )
 
-    control.set_live_enabled(session, settings, enabled, source="api")
-    if enabled and not was_enabled:
-        runtime.queue_command(
-            session,
-            COMMAND_RUN_INGESTION,
-            payload={"trigger": "enable_live"},
-            requested_by="api",
-        )
-        tickers = [t.upper() for t in (settings.live_trading_tickers or list(settings.agent_tickers_override or [])) if t]
-        today = utc_now().strftime("%Y-%m-%d")
-        tomorrow = (utc_now() + timedelta(days=1)).strftime("%Y-%m-%d")
-        runtime.queue_command(
-            session,
-            COMMAND_REFRESH_BARS,
-            payload={
-                "start_date": today,
-                "end_date": tomorrow,
-                "tickers": tickers,
-                "chunk_days": 1,
-                "sleep_seconds": 0.1,
-                "trigger": "enable_live",
-            },
-            requested_by="api",
-        )
-        runtime.queue_command(
-            session,
-            COMMAND_RUN_LIVE_CYCLE,
-            payload={"trigger": "enable_live"},
-            requested_by="api",
-        )
-    session.commit()
+    tickers = [t.upper() for t in (settings.live_trading_tickers or list(settings.agent_tickers_override or [])) if t]
+
+    def _write_toggle(write_session: Session) -> dict[str, Any]:
+        write_control = RuntimeControlService()
+        write_runtime = WorkerRuntimeService()
+        local_was_enabled = write_control.get_live_enabled(write_session, settings)
+        write_control.set_live_enabled(write_session, settings, enabled, source="api")
+        cancelled_commands = 0
+        if enabled and not local_was_enabled:
+            write_runtime.queue_command(
+                write_session,
+                COMMAND_RUN_INGESTION,
+                payload={"trigger": "enable_live"},
+                requested_by="api",
+            )
+            today = utc_now().strftime("%Y-%m-%d")
+            tomorrow = (utc_now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            write_runtime.queue_command(
+                write_session,
+                COMMAND_REFRESH_BARS,
+                payload={
+                    "start_date": today,
+                    "end_date": tomorrow,
+                    "tickers": tickers,
+                    "chunk_days": 1,
+                    "sleep_seconds": 0.1,
+                    "trigger": "enable_live",
+                },
+                requested_by="api",
+            )
+            write_runtime.queue_command(
+                write_session,
+                COMMAND_RUN_LIVE_CYCLE,
+                payload={"trigger": "enable_live"},
+                requested_by="api",
+            )
+        if not enabled:
+            cancelled_commands = write_runtime.cancel_pending_commands(
+                write_session,
+                command_types=[COMMAND_RUN_INGESTION, COMMAND_REFRESH_BARS, COMMAND_RUN_LIVE_CYCLE],
+                reason="live trading disabled from control plane",
+            )
+        return {
+            "was_enabled": local_was_enabled,
+            "cancelled_commands": cancelled_commands,
+        }
+
+    try:
+        write_result = _retry_db_write(_write_toggle, bind=session.get_bind())
+    except OperationalError as exc:
+        if is_sqlite_lock_error(exc):
+            raise HTTPException(
+                status_code=503,
+                detail="database is busy; try again in a few seconds",
+            ) from exc
+        raise
+
     _cache_invalidate("live:")
     _cache_invalidate("ui:")
 
@@ -1216,11 +1281,15 @@ def set_live_enabled(
             f"Live trading {'enabled' if enabled else 'disabled'} in shared runtime control. "
             + (
                 "Queued bar backfill and an immediate live cycle for worker. "
-                if enabled and not was_enabled else ""
+                if enabled and not write_result.get("was_enabled") else ""
             )
             + (
                 "No live tickers are configured yet. "
                 if enabled and not has_tickers else ""
+            )
+            + (
+                f"Cancelled {write_result.get('cancelled_commands', 0)} pending live commands. "
+                if not enabled and write_result.get("cancelled_commands", 0) else ""
             )
             + "Worker and supervisor are online. Closing the browser does not stop auto trading."
         ),

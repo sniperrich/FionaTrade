@@ -179,6 +179,9 @@ tests/           pytest 测试集
 > - 模板页面脚本必须放在 `base.html` 的 `{% block scripts %}` 中，不能直接内联在 `content` 里，否则会先于全局工具函数执行
 > - `Enable Live` 现在是 DB 共享开关，worker 不运行时只会看到 queued command，不会真的执行
 > - `Enable Live` 现在会先检查 worker + supervisor heartbeat；若后台不在线，会直接返回 `409`，阻止出现“按钮打开了但实际上没有执行进程”的假成功
+> - `Disable Live` 现在会取消尚未执行的 live 相关命令，避免关闭后旧的 `refresh_bars / live_cycle / ingestion` 继续跑
+> - `/api/live/set_enabled` 现在会按当前数据库连接重试写入；若 SQLite 仍被长事务占住，会返回 `503 database is busy`，而不是直接 500
+> - worker 遇到短时 SQLite 锁时会把受影响的 `RUNNING` command 重新排回 `PENDING`，避免残留假运行状态
 > - 一旦 live 已启用，只要 `python -m app.worker.supervisor` 还在运行，关闭浏览器不会停止 auto trading
 
 ---

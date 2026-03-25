@@ -14,8 +14,8 @@ from app.backtest_engine.service import BacktestEngineService
 from app.core.config import get_settings
 from app.core.logging import get_app_logger, log_writeout, setup_logging
 from app.core.market_hours import is_market_open
-from app.db.database import db_session, init_db
-from app.db.models import BacktestRun
+from app.db.database import db_session, init_db, is_sqlite_lock_error
+from app.db.models import BacktestRun, WorkerCommand
 from app.ingestion.service import IngestionService
 from app.monitoring.health import HealthAuditService
 from app.services.earnings_calendar import EarningsCalendarService
@@ -172,7 +172,27 @@ def _heartbeat_worker() -> None:
                 },
             )
     except Exception as exc:
+        if is_sqlite_lock_error(exc):
+            logger.warning("[worker] heartbeat skipped due to database lock: %s", exc)
+            return
         logger.exception("[worker] heartbeat failed: %s", exc)
+
+
+def _requeue_command_due_to_lock(command_id: int) -> None:
+    try:
+        with db_session() as session:
+            command = session.get(WorkerCommand, command_id)
+            if command is None or command.status != "RUNNING":
+                return
+            command.status = "PENDING"
+            command.started_at = None
+            command.error_message = None
+            result = dict(command.result_json or {})
+            result["retry_due_to_db_lock"] = True
+            command.result_json = result
+            session.flush()
+    except Exception as exc:
+        logger.exception("[worker] unable to requeue locked command %s: %s", command_id, exc)
 
 
 def _reconcile_orphaned_state() -> None:
@@ -207,154 +227,185 @@ def _process_worker_commands() -> None:
                 )
                 if command is None:
                     return
-                try:
-                    payload = command.payload_json or {}
-                    if command.command_type == COMMAND_RUN_INGESTION:
-                        result = IngestionService(settings).run(session)
-                        result = {
-                            "fetched": result.fetched,
-                            "inserted": result.inserted,
-                            "duplicate_dropped": result.duplicate_dropped,
-                            "raw_item_ids": result.raw_item_ids,
-                        }
-                    elif command.command_type == COMMAND_REFRESH_BARS:
-                        result = market_data.refresh_bars(
-                            session,
-                            start_date=str(payload.get("start_date")),
-                            end_date=str(payload.get("end_date")),
-                            tickers=payload.get("tickers"),
-                            chunk_days=int(payload.get("chunk_days", 5)),
-                            sleep_seconds=float(payload.get("sleep_seconds", 0.12)),
-                            trigger=str(payload.get("trigger", "manual")),
-                        )
-                    elif command.command_type == COMMAND_REFRESH_EARNINGS:
-                        service = EarningsCalendarService(settings)
-                        if payload.get("from_date") and payload.get("to_date"):
-                            refreshed = service.refresh(
-                                session,
-                                from_date=str(payload["from_date"]),
-                                to_date=str(payload["to_date"]),
-                                symbols=payload.get("symbols"),
-                            )
-                        else:
-                            refreshed = service.refresh_if_due(session)
-                        result = {
-                            "fetched": getattr(refreshed, "fetched", 0),
-                            "upserted": getattr(refreshed, "upserted", 0),
-                            "skipped": getattr(refreshed, "skipped", 0),
-                            "from_date": getattr(refreshed, "from_date", None),
-                            "to_date": getattr(refreshed, "to_date", None),
-                        }
-                    elif command.command_type == COMMAND_RUN_LIVE_CYCLE:
-                        result = LiveTradingService(settings).run_cycle(
-                            session,
-                            trigger=str(payload.get("trigger", "manual")),
-                        )
-                    elif command.command_type == COMMAND_RUN_BACKTEST:
-                        worker_run = runtime.start_run(
-                            session,
-                            run_type="backtest",
-                            trigger=str(payload.get("trigger", "manual")),
-                            stage="running",
-                            summary_json={
-                                "start_date": payload.get("start_date"),
-                                "end_date": payload.get("end_date"),
-                                "use_llm": bool(payload.get("use_llm", False)),
-                                "event_profile": payload.get("event_profile") or "",
-                                "sources": payload.get("sources") or [],
-                            },
-                        )
-                        runtime.add_event(
-                            session,
-                            "backtest",
-                            "Backtest started",
-                            run=worker_run,
-                            stage="running",
-                            payload={
-                                "backtest_run_id": payload.get("backtest_run_id"),
-                                "start_date": payload.get("start_date"),
-                                "end_date": payload.get("end_date"),
-                            },
-                        )
-                        try:
-                            bt_result = BacktestEngineService(settings).run(
-                                session,
-                                params=payload,
-                                run_id=int(payload["backtest_run_id"]) if payload.get("backtest_run_id") else None,
-                            )
-                            result = {
-                                "backtest_run_id": bt_result.run_id,
-                                "status": bt_result.status,
-                                "metrics": bt_result.metrics,
-                            }
-                            runtime.finish_run(
-                                session,
-                                worker_run,
-                                status="COMPLETED",
-                                stage="completed",
-                                summary=result,
-                            )
-                            runtime.add_event(
-                                session,
-                                "backtest",
-                                "Backtest completed",
-                                run=worker_run,
-                                stage="completed",
-                                payload={
-                                    "backtest_run_id": bt_result.run_id,
-                                    "trades": bt_result.metrics.get("trades", 0),
-                                    "total_return": bt_result.metrics.get("total_return", 0.0),
-                                },
-                            )
-                        except Exception as exc:
-                            if payload.get("backtest_run_id"):
-                                existing_run = session.get(BacktestRun, int(payload["backtest_run_id"]))
-                            else:
-                                existing_run = None
-                            if existing_run is not None:
-                                existing_run.status = "FAILED"
-                                metrics = dict(existing_run.metrics or {})
-                                metrics.update(
-                                    {
-                                        "phase": "failed",
-                                        "phase_label": "Failed",
-                                        "phase_detail": str(exc),
-                                        "phase_pct": 100.0,
-                                        "error": str(exc),
-                                        "last_progress_at": datetime.now(timezone.utc).isoformat(),
-                                    }
-                                )
-                                existing_run.metrics = metrics
-                                existing_run.finished_at = datetime.now(timezone.utc)
-                            runtime.finish_run(
-                                session,
-                                worker_run,
-                                status="FAILED",
-                                stage="failed",
-                                error_message=str(exc),
-                                summary={"backtest_run_id": payload.get("backtest_run_id")},
-                            )
-                            runtime.add_event(
-                                session,
-                                "backtest",
-                                "Backtest failed",
-                                run=worker_run,
-                                level="error",
-                                stage="failed",
-                                payload={
-                                    "backtest_run_id": payload.get("backtest_run_id"),
-                                    "error": str(exc),
-                                },
-                            )
-                            raise
-                    else:
-                        raise ValueError(f"unsupported worker command: {command.command_type}")
-                    runtime.complete_command(session, command, result=result if isinstance(result, dict) else {"result": result})
-                except Exception as exc:
-                    runtime.fail_command(session, command, str(exc), result={"payload": command.payload_json or {}})
-                    logger.exception("[worker] Command %s failed: %s", command.command_type, exc)
+                command_id = command.id
+            _execute_claimed_command(command_id)
     except Exception as exc:
         logger.exception("[worker] command pump failed: %s", exc)
+
+
+def _execute_claimed_command(command_id: int) -> None:
+    try:
+        with db_session() as session:
+            command = session.get(WorkerCommand, command_id)
+            if command is None:
+                return
+            payload = command.payload_json or {}
+            result: dict[str, object] | None = None
+
+            if command.command_type == COMMAND_RUN_INGESTION:
+                if not _is_live_enabled() and str(payload.get("trigger")) == "enable_live":
+                    result = {"skipped": True, "reason": "live_disabled"}
+                else:
+                    ingest_result = IngestionService(settings).run(session)
+                    result = {
+                        "fetched": ingest_result.fetched,
+                        "inserted": ingest_result.inserted,
+                        "duplicate_dropped": ingest_result.duplicate_dropped,
+                        "raw_item_ids": ingest_result.raw_item_ids,
+                    }
+            elif command.command_type == COMMAND_REFRESH_BARS:
+                if not _is_live_enabled() and str(payload.get("trigger")) == "enable_live":
+                    result = {"skipped": True, "reason": "live_disabled"}
+                else:
+                    result = market_data.refresh_bars(
+                        session,
+                        start_date=str(payload.get("start_date")),
+                        end_date=str(payload.get("end_date")),
+                        tickers=payload.get("tickers"),
+                        chunk_days=int(payload.get("chunk_days", 5)),
+                        sleep_seconds=float(payload.get("sleep_seconds", 0.12)),
+                        trigger=str(payload.get("trigger", "manual")),
+                    )
+            elif command.command_type == COMMAND_REFRESH_EARNINGS:
+                service = EarningsCalendarService(settings)
+                if payload.get("from_date") and payload.get("to_date"):
+                    refreshed = service.refresh(
+                        session,
+                        from_date=str(payload["from_date"]),
+                        to_date=str(payload["to_date"]),
+                        symbols=payload.get("symbols"),
+                    )
+                else:
+                    refreshed = service.refresh_if_due(session)
+                result = {
+                    "fetched": getattr(refreshed, "fetched", 0),
+                    "upserted": getattr(refreshed, "upserted", 0),
+                    "skipped": getattr(refreshed, "skipped", 0),
+                    "from_date": getattr(refreshed, "from_date", None),
+                    "to_date": getattr(refreshed, "to_date", None),
+                }
+            elif command.command_type == COMMAND_RUN_LIVE_CYCLE:
+                if not _is_live_enabled():
+                    result = {"skipped": True, "reason": "live_disabled"}
+                else:
+                    result = LiveTradingService(settings).run_cycle(
+                        session,
+                        trigger=str(payload.get("trigger", "manual")),
+                    )
+            elif command.command_type == COMMAND_RUN_BACKTEST:
+                worker_run = runtime.start_run(
+                    session,
+                    run_type="backtest",
+                    trigger=str(payload.get("trigger", "manual")),
+                    stage="running",
+                    summary_json={
+                        "start_date": payload.get("start_date"),
+                        "end_date": payload.get("end_date"),
+                        "use_llm": bool(payload.get("use_llm", False)),
+                        "event_profile": payload.get("event_profile") or "",
+                        "sources": payload.get("sources") or [],
+                    },
+                )
+                runtime.add_event(
+                    session,
+                    "backtest",
+                    "Backtest started",
+                    run=worker_run,
+                    stage="running",
+                    payload={
+                        "backtest_run_id": payload.get("backtest_run_id"),
+                        "start_date": payload.get("start_date"),
+                        "end_date": payload.get("end_date"),
+                    },
+                )
+                try:
+                    bt_result = BacktestEngineService(settings).run(
+                        session,
+                        params=payload,
+                        run_id=int(payload["backtest_run_id"]) if payload.get("backtest_run_id") else None,
+                    )
+                    result = {
+                        "backtest_run_id": bt_result.run_id,
+                        "status": bt_result.status,
+                        "metrics": bt_result.metrics,
+                    }
+                    runtime.finish_run(
+                        session,
+                        worker_run,
+                        status="COMPLETED",
+                        stage="completed",
+                        summary=result,
+                    )
+                    runtime.add_event(
+                        session,
+                        "backtest",
+                        "Backtest completed",
+                        run=worker_run,
+                        stage="completed",
+                        payload={
+                            "backtest_run_id": bt_result.run_id,
+                            "trades": bt_result.metrics.get("trades", 0),
+                            "total_return": bt_result.metrics.get("total_return", 0.0),
+                        },
+                    )
+                except Exception as exc:
+                    if payload.get("backtest_run_id"):
+                        existing_run = session.get(BacktestRun, int(payload["backtest_run_id"]))
+                    else:
+                        existing_run = None
+                    if existing_run is not None:
+                        existing_run.status = "FAILED"
+                        metrics = dict(existing_run.metrics or {})
+                        metrics.update(
+                            {
+                                "phase": "failed",
+                                "phase_label": "Failed",
+                                "phase_detail": str(exc),
+                                "phase_pct": 100.0,
+                                "error": str(exc),
+                                "last_progress_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                        existing_run.metrics = metrics
+                        existing_run.finished_at = datetime.now(timezone.utc)
+                    runtime.finish_run(
+                        session,
+                        worker_run,
+                        status="FAILED",
+                        stage="failed",
+                        error_message=str(exc),
+                        summary={"backtest_run_id": payload.get("backtest_run_id")},
+                    )
+                    runtime.add_event(
+                        session,
+                        "backtest",
+                        "Backtest failed",
+                        run=worker_run,
+                        level="error",
+                        stage="failed",
+                        payload={
+                            "backtest_run_id": payload.get("backtest_run_id"),
+                            "error": str(exc),
+                        },
+                    )
+                    raise
+            else:
+                raise ValueError(f"unsupported worker command: {command.command_type}")
+
+            runtime.complete_command(session, command, result=result if isinstance(result, dict) else {"result": result})
+    except Exception as exc:
+        if is_sqlite_lock_error(exc):
+            logger.warning("[worker] command %s delayed by database lock", command_id)
+            _requeue_command_due_to_lock(command_id)
+            return
+        try:
+            with db_session() as session:
+                command = session.get(WorkerCommand, command_id)
+                if command is not None and command.status != "CANCELLED":
+                    runtime.fail_command(session, command, str(exc), result={"payload": command.payload_json or {}})
+        except Exception as fail_exc:
+            logger.exception("[worker] unable to persist command failure for %s: %s", command_id, fail_exc)
+        logger.exception("[worker] Command %s failed: %s", command_id, exc)
 
 
 def _start_scheduler() -> BackgroundScheduler:
@@ -434,18 +485,24 @@ def main() -> None:
     _reconcile_orphaned_state()
     with db_session() as session:
         runtime_control.set_live_enabled(session, settings, runtime_control.get_live_enabled(session, settings), source="worker_boot")
-        runtime_control.touch_worker_heartbeat(
-            session,
-            pid=os.getpid(),
-            started_at=_WORKER_STARTED_AT,
-            source="worker_boot",
-            scheduler_running=False,
-            extra={
-                "host": _WORKER_HOST,
-                "live_enabled": runtime_control.get_live_enabled(session, settings),
-                "configured_tickers": market_data.tracked_tickers(),
-            },
-        )
+        try:
+            runtime_control.touch_worker_heartbeat(
+                session,
+                pid=os.getpid(),
+                started_at=_WORKER_STARTED_AT,
+                source="worker_boot",
+                scheduler_running=False,
+                extra={
+                    "host": _WORKER_HOST,
+                    "live_enabled": runtime_control.get_live_enabled(session, settings),
+                    "configured_tickers": market_data.tracked_tickers(),
+                },
+            )
+        except Exception as exc:
+            if is_sqlite_lock_error(exc):
+                logger.warning("[worker] startup heartbeat skipped due to database lock: %s", exc)
+            else:
+                raise
     logger.info("Worker startup complete")
 
     signal.signal(signal.SIGINT, _handle_shutdown)
