@@ -92,7 +92,16 @@ class AgentGraph:
 
         def _run_agent_with_own_session(agent, result_key):
             """Run a single agent in its own DB session."""
-            if progress_callback:
+            thread_session = make_session()
+            try:
+                return result_key, agent.analyze(thread_session, ticker, context)
+            finally:
+                thread_session.close()
+
+        # Emit "running" updates from the caller thread only.
+        # The callback may write DB runtime state and must not run from worker threads.
+        if progress_callback:
+            for agent, _result_key in parallel_agents:
                 progress_callback(
                     {
                         "stage": "parallel_agent_running",
@@ -100,11 +109,6 @@ class AgentGraph:
                         "message": f"{ticker}: {agent.name} analyzing",
                     }
                 )
-            thread_session = make_session()
-            try:
-                return result_key, agent.analyze(thread_session, ticker, context)
-            finally:
-                thread_session.close()
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             future_to_key = {

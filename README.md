@@ -200,6 +200,7 @@ tests/           pytest 测试集
 > - PortfolioManager 现在可输出 `execution_mode + entry_plan`；当 action=HOLD 且 mode=WAIT_* 时，live 会创建 entry plan 并在后续 cycle 触发执行
 > - `/api/live/plans` 提供计划列表，`/api/live/plans/{plan_id}/cancel` 可手动取消 active 计划
 > - `/api/live/plans/events` 提供 entry plan 事件流（created/evaluated/triggered/trigger_failed/expired/cancelled），`/live` 页有独立 Trigger Log 卡片用于排障
+> - 已修复并行 agent 进度回调并发写库导致的 `Session is already flushing / prepared state`，live cycle 不会再因该错误把 AAPL/NVDA 直接打成 graph error
 > - 一旦 live 已启用，只要 `python -m app.worker.supervisor` 还在运行，关闭浏览器不会停止 auto trading
 
 ---

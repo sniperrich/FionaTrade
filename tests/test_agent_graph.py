@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -155,3 +156,20 @@ class TestAgentGraphAgentSignalsAggregation:
         assert "fundamentals" in signals
         assert "technicals" in signals
         assert "risk_manager" in signals
+
+
+def test_progress_callback_runs_on_caller_thread_only(settings, session_factory):
+    session, factory = session_factory
+    _add_bars(session, "AAPL")
+    graph = AgentGraph(settings, session_factory=factory)
+    for agent in [graph.macro, graph.news, graph.fundamentals, graph.risk, graph.portfolio]:
+        agent._call_llm = lambda *a, **kw: None
+
+    main_thread_id = threading.get_ident()
+    callback_thread_ids: set[int] = set()
+
+    def progress_callback(_update):
+        callback_thread_ids.add(threading.get_ident())
+
+    graph.run(session, "AAPL", progress_callback=progress_callback)
+    assert callback_thread_ids == {main_thread_id}
