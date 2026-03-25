@@ -71,15 +71,35 @@
 <div id="news-list">
 {% for item in news_items %}
 {% set item_ticker = item.metadata_json.get('ticker') if item.metadata_json else None %}
-<div class="news-card" data-id="{{ item.id }}" data-source="{{ item.source }}" data-tickers="{{ item_ticker or '' }}" data-headline="{{ (item.title or '') | lower }}">
+{% set backfill = news_backfill_meta.get(item.id, {}) %}
+<div
+  class="news-card"
+  data-id="{{ item.id }}"
+  data-sort-id="{{ item.id }}"
+  data-sort-ts="{{ item.published_at.timestamp()|int if item.published_at else 0 }}"
+  data-source="{{ item.source }}"
+  data-tickers="{{ item_ticker or '' }}"
+  data-headline="{{ (item.title or '') | lower }}"
+>
   <div class="news-headline">{{ item.title or "(no title)" }}</div>
   <div class="news-meta">
     {% if item_ticker %}
     <span class="badge badge-accent">{{ item_ticker }}</span>
     {% endif %}
     <span class="badge badge-grey">{{ item.source or "unknown" }}</span>
+    {% if backfill.get('historical_backfill') %}
+    <span
+      class="badge badge-warn"
+      title="补录延迟 {{ backfill.get('backfill_delay_min') }} 分钟（阈值 {{ news_backfill_delay_minutes }} 分钟）"
+    >
+      历史补录
+    </span>
+    {% endif %}
+    {% if item.published_at %}
+    <span class="text-muted text-xs" title="published_at">{{ item.published_at.strftime('%m-%d %H:%M') }}</span>
+    {% endif %}
     {% if item.ingested_at %}
-    <span class="text-muted text-xs" title="{{ item.ingested_at }}">{{ item.ingested_at.strftime('%H:%M') if item.ingested_at else '' }}</span>
+    <span class="text-muted text-xs" title="{{ item.ingested_at }}">ingest {{ item.ingested_at.strftime('%H:%M') if item.ingested_at else '' }}</span>
     {% endif %}
     {% if item.url %}
     <a href="{{ item.url }}" target="_blank" class="text-xs" style="color:var(--accent)">↗ source</a>
@@ -136,6 +156,18 @@ function getNewsCards(){
   return [...document.querySelectorAll('.news-card')];
 }
 
+function parseNewsSortKey(obj){
+  const ts=Number(obj?.sortTs ?? obj?.dataset?.sortTs ?? 0);
+  const id=Number(obj?.id ?? obj?.dataset?.sortId ?? 0);
+  return { ts: Number.isFinite(ts) ? ts : 0, id: Number.isFinite(id) ? id : 0 };
+}
+
+function itemSortKey(item){
+  const published=item?.published_at ? new Date(item.published_at) : null;
+  const ts=published && Number.isFinite(published.getTime()) ? Math.floor(published.getTime()/1000) : 0;
+  return parseNewsSortKey({ sortTs: ts, id: Number(item?.id || 0) });
+}
+
 function rebuildTickerFilter(){
   const tickerSel=document.getElementById('filter-ticker');
   const current=tickerSel.value;
@@ -190,19 +222,29 @@ function renderSourceStatuses(items){
 function renderNewsCard(item){
   const ticker=item.metadata?.ticker || '';
   const source=item.source || 'unknown';
+  const published=item.published_at ? new Date(item.published_at) : null;
   const ingested=item.ingested_at ? new Date(item.ingested_at) : null;
-  const timeLabel=ingested ? ingested.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+  const publishedTs=published && Number.isFinite(published.getTime()) ? Math.floor(published.getTime()/1000) : 0;
+  const publishedLabel=published ? published.toLocaleString([], {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}) : '';
+  const ingestedLabel=ingested ? ingested.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+  const historical=item.historical_backfill===true;
+  const delayMin=Number.isFinite(Number(item.backfill_delay_min)) ? Number(item.backfill_delay_min) : null;
+  const backfillBadge=historical
+    ? `<span class="badge badge-warn" title="补录延迟 ${delayMin ?? '?'} 分钟">历史补录</span>`
+    : '';
   const body=item.body_preview ? `
     <span class="news-expand" onclick="toggleBody(this)">▼ Read more</span>
     <div class="news-body">${escapeHtml(item.body_preview)}</div>
   ` : '';
   return `
-    <div class="news-card" data-id="${item.id}" data-source="${escapeHtml(source)}" data-tickers="${escapeHtml(ticker)}" data-headline="${escapeHtml((item.title || '').toLowerCase())}">
+    <div class="news-card" data-id="${item.id}" data-sort-id="${item.id}" data-sort-ts="${publishedTs}" data-source="${escapeHtml(source)}" data-tickers="${escapeHtml(ticker)}" data-headline="${escapeHtml((item.title || '').toLowerCase())}">
       <div class="news-headline">${escapeHtml(item.title || '(no title)')}</div>
       <div class="news-meta">
         ${ticker ? `<span class="badge badge-accent">${escapeHtml(ticker)}</span>` : ''}
         <span class="badge badge-grey">${escapeHtml(source)}</span>
-        ${timeLabel ? `<span class="text-muted text-xs">${escapeHtml(timeLabel)}</span>` : ''}
+        ${backfillBadge}
+        ${publishedLabel ? `<span class="text-muted text-xs">${escapeHtml(publishedLabel)}</span>` : ''}
+        ${ingestedLabel ? `<span class="text-muted text-xs">ingest ${escapeHtml(ingestedLabel)}</span>` : ''}
         ${item.url ? `<a href="${item.url}" target="_blank" class="text-xs" style="color:var(--accent)">↗ source</a>` : ''}
       </div>
       ${body}
@@ -217,8 +259,31 @@ function prependNews(items){
   if(!fresh.length) return 0;
   const empty=list.querySelector('.empty-state');
   if(empty && !getNewsCards().length) empty.remove();
-  const html=fresh.reverse().map(renderNewsCard).join('');
-  list.insertAdjacentHTML('afterbegin', html);
+  const sorted=fresh.slice().sort((a,b)=>{
+    const ka=itemSortKey(a);
+    const kb=itemSortKey(b);
+    if(ka.ts!==kb.ts) return kb.ts-ka.ts;
+    return kb.id-ka.id;
+  });
+  sorted.forEach(item=>{
+    const wrapper=document.createElement('div');
+    wrapper.innerHTML=renderNewsCard(item).trim();
+    const node=wrapper.firstElementChild;
+    if(!node) return;
+    const key=itemSortKey(item);
+    let inserted=false;
+    for(const card of getNewsCards()){
+      const ck=parseNewsSortKey({ dataset: card.dataset });
+      if(key.ts>ck.ts || (key.ts===ck.ts && key.id>ck.id)){
+        card.before(node);
+        inserted=true;
+        break;
+      }
+    }
+    if(!inserted){
+      list.appendChild(node);
+    }
+  });
   const cards=getNewsCards();
   cards.slice(250).forEach(card=>card.remove());
   rebuildTickerFilter();

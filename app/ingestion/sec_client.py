@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 import re
 from time import sleep
@@ -13,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.core.utils import make_hash, utc_now
+from app.core.utils import ensure_utc, make_hash, utc_now
 from app.db.models import IngestionCursor
 from app.ingestion.types import SourceCheck
 from app.schemas.types import RawNewsItem
@@ -63,6 +64,10 @@ class SecClient:
             row.cursor_value = value
             return
         session.add(IngestionCursor(cursor_key=key, cursor_value=value))
+
+    @staticmethod
+    def _ticker_accession_cursor_key(ticker: str) -> str:
+        return f"sec_last_accession:{ticker.upper()}"
 
     def _ticker_cik_map(self) -> dict[str, str]:
         with httpx.Client(timeout=15.0, headers=self.headers) as client:
@@ -523,9 +528,16 @@ class SecClient:
         success_requests = 0
         atom_fallback_tickers = 0
         sec_earnings_items = 0
+        skipped_old_filings = 0
+        recent_cutoff = utc_now() - timedelta(days=max(1, int(self.settings.sec_recent_max_age_days)))
 
         with httpx.Client(timeout=15.0, headers=self.headers) as client:
             for ticker in selected:
+                cursor_key = self._ticker_accession_cursor_key(ticker)
+                last_accession = str(self._get_cursor(session, cursor_key, "") or "").strip()
+                first_new_accession = ""
+                latest_seen_accession = ""
+                cursor_reached = False
                 cik = mapping[ticker]
                 url = SEC_SUBMISSIONS_URL.format(cik=cik)
                 data, status_code, err = self._request_json_with_retry(client, url)
@@ -536,13 +548,36 @@ class SecClient:
                     if status_code == 404:
                         atom_items, atom_error = self._fetch_atom_fallback(client, ticker=ticker, cik=cik)
                         if atom_items:
+                            filtered_atom: list[RawNewsItem] = []
+                            for atom_item in sorted(
+                                atom_items,
+                                key=lambda row: ensure_utc(row.published_at),
+                                reverse=True,
+                            ):
+                                atom_accession = str((atom_item.metadata or {}).get("accession") or "").strip()
+                                if atom_accession and not latest_seen_accession:
+                                    latest_seen_accession = atom_accession
+                                if last_accession and atom_accession and atom_accession == last_accession:
+                                    cursor_reached = True
+                                    break
+                                if ensure_utc(atom_item.published_at) < recent_cutoff:
+                                    skipped_old_filings += 1
+                                    continue
+                                filtered_atom.append(atom_item)
+                                if atom_accession and not first_new_accession:
+                                    first_new_accession = atom_accession
+
                             atom_fallback_tickers += 1
                             success_requests += 1
-                            items.extend(atom_items)
+                            items.extend(filtered_atom)
+                            if first_new_accession:
+                                self._set_cursor(session, cursor_key, first_new_accession)
+                            elif latest_seen_accession and (not last_accession or not cursor_reached):
+                                self._set_cursor(session, cursor_key, latest_seen_accession)
                             logger.warning(
                                 "SEC submissions 404 for %s, used ATOM fallback and got %s items",
                                 ticker,
-                                len(atom_items),
+                                len(filtered_atom),
                             )
                             continue
                     msg = f"{ticker}: {err or 'unknown_error'}"
@@ -568,11 +603,21 @@ class SecClient:
                     if form not in SUPPORTED_FORMS or not accession:
                         continue
 
+                    if not latest_seen_accession:
+                        latest_seen_accession = accession
+                    if last_accession and accession == last_accession:
+                        cursor_reached = True
+                        break
+
                     accession_plain = accession.replace("-", "")
                     archive_cik = cik.lstrip("0") or "0"
                     doc_name = doc or f"{accession}-index.html"
                     filing_url = f"https://www.sec.gov/Archives/edgar/data/{archive_cik}/{accession_plain}/{doc_name}"
-                    published = self._parse_published_at(acceptance_datetime, filing_date)
+                    published = ensure_utc(self._parse_published_at(acceptance_datetime, filing_date))
+                    if published < recent_cutoff:
+                        skipped_old_filings += 1
+                        continue
+
                     title = f"{ticker} filed {form}"
 
                     filing_text = ""
@@ -633,6 +678,15 @@ class SecClient:
                             },
                         )
                     )
+                    if not first_new_accession:
+                        first_new_accession = accession
+
+                if first_new_accession:
+                    self._set_cursor(session, cursor_key, first_new_accession)
+                elif latest_seen_accession and (not last_accession or not cursor_reached):
+                    # Bootstrap or re-anchor cursor to the newest visible filing so we do not
+                    # repeatedly ingest stale history when SEC recent window rotates.
+                    self._set_cursor(session, cursor_key, latest_seen_accession)
         unique: dict[str, RawNewsItem] = {}
         for item in items:
             unique[item.hash] = item
@@ -652,6 +706,8 @@ class SecClient:
                     "items": len(out_items),
                     "atom_fallback_tickers": atom_fallback_tickers,
                     "sec_earnings_items": sec_earnings_items,
+                    "recent_cutoff_days": int(self.settings.sec_recent_max_age_days),
+                    "skipped_old_filings": skipped_old_filings,
                 },
             )
 
@@ -668,5 +724,7 @@ class SecClient:
                 "items": len(out_items),
                 "atom_fallback_tickers": atom_fallback_tickers,
                 "sec_earnings_items": sec_earnings_items,
+                "recent_cutoff_days": int(self.settings.sec_recent_max_age_days),
+                "skipped_old_filings": skipped_old_filings,
             },
         )

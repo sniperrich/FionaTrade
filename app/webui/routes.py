@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_app_settings, get_db
 from app.core.config import Settings
-from app.core.utils import utc_now
+from app.core.utils import ensure_utc, utc_now
 from app.db.models import AgentRun, BacktestRun, EventEvidence, LiveTrade, RawItem, SourceStatus
 from app.services.runtime_control import RuntimeControlService
 
@@ -35,6 +35,22 @@ def _build_pager(total_count: int, page: int, per_page: int) -> dict:
         "has_next": page < total_pages,
         "start_item": start_item,
         "end_item": end_item,
+    }
+
+
+def _news_backfill_meta(
+    published_at,
+    ingested_at,
+    *,
+    threshold_minutes: int,
+) -> dict[str, int | bool | None]:
+    if not published_at or not ingested_at:
+        return {"historical_backfill": False, "backfill_delay_min": None}
+    delay_seconds = (ensure_utc(ingested_at) - ensure_utc(published_at)).total_seconds()
+    delay_minutes = max(0, int(delay_seconds // 60))
+    return {
+        "historical_backfill": delay_minutes >= max(1, threshold_minutes),
+        "backfill_delay_min": delay_minutes,
     }
 
 
@@ -72,17 +88,27 @@ def news_stream(
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=50, ge=10, le=200),
     session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
 ):
     total_count = session.execute(select(func.count(RawItem.id))).scalar_one()
     pager = _build_pager(total_count, page, per_page)
     rows = session.execute(
         select(RawItem)
-        .order_by(RawItem.id.desc())
+        .order_by(RawItem.published_at.desc(), RawItem.id.desc())
         .offset(pager["offset"])
         .limit(pager["per_page"])
     ).scalars().all()
-    latest_id = rows[0].id if rows else 0
+    latest_id = max((row.id for row in rows), default=0)
     oldest_id = rows[-1].id if rows else 0
+    backfill_threshold_minutes = max(1, int(settings.news_backfill_delay_minutes))
+    backfill_meta = {
+        row.id: _news_backfill_meta(
+            row.published_at,
+            row.ingested_at,
+            threshold_minutes=backfill_threshold_minutes,
+        )
+        for row in rows
+    }
     source_rows = session.execute(
         select(SourceStatus).order_by(SourceStatus.source_type.asc(), SourceStatus.display_name.asc())
     ).scalars().all()
@@ -110,6 +136,8 @@ def news_stream(
             "source_statuses": source_rows,
             "status_summary": status_summary,
             "source_names": source_names,
+            "news_backfill_delay_minutes": backfill_threshold_minutes,
+            "news_backfill_meta": backfill_meta,
             "pager": pager,
         },
     )

@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     llm_merge_system_prompt: bool = True
     sec_summary_model: str = "gemini-3-flash"
     sec_summary_max_chars: int = 1000
+    # Ignore SEC filings older than this age during incremental ingestion.
+    sec_recent_max_age_days: int = 14
     event_tradeability_filter_enabled: bool = True
     event_tradeability_min_score: int = 55
     normalization_merge_window_min: int = 0
@@ -105,6 +107,8 @@ class Settings(BaseSettings):
     # Staleness: news older than this many minutes is flagged STALE
     validation_stale_minutes: int = 120
     validation_corroboration_window_minutes: int = 180
+    # Mark news as historical backfill in UI/API when ingestion lag exceeds this threshold.
+    news_backfill_delay_minutes: int = 180
 
     earnings_calendar_auto_refresh: bool = True
     earnings_calendar_refresh_interval_hours: int = 24

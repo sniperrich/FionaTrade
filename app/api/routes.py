@@ -6,12 +6,12 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.exc import OperationalError
-from sqlalchemy import desc, distinct, func, or_, select
+from sqlalchemy import and_, desc, distinct, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.deps import get_app_settings, get_db
 from app.core.config import Settings
-from app.core.utils import utc_now
+from app.core.utils import ensure_utc, utc_now
 from app.backtest_engine.service import BacktestEngineService
 from app.db.database import is_sqlite_lock_error
 from app.db.models import BacktestRun, EntryPlan, EventEvidence, RawItem, SourceStatus, WorkerRunEvent
@@ -102,6 +102,19 @@ def _normalize_source_list(value: Any) -> list[str]:
     else:
         items = [str(value).strip().lower()]
     return [item for item in items if item]
+
+
+def _news_backfill_meta(
+    published_at: datetime | None,
+    ingested_at: datetime | None,
+    *,
+    threshold_minutes: int,
+) -> tuple[bool, int | None]:
+    if not published_at or not ingested_at:
+        return False, None
+    delay_seconds = (ensure_utc(ingested_at) - ensure_utc(published_at)).total_seconds()
+    delay_minutes = max(0, int(delay_seconds // 60))
+    return delay_minutes >= max(1, threshold_minutes), delay_minutes
 
 
 def _serialize_backtest_run(run: BacktestRun, include_detail: bool = False) -> dict[str, Any]:
@@ -241,6 +254,7 @@ def run_ingest(
 @router.get("/news")
 def list_news(
     session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
     limit: int = Query(default=200, ge=1, le=2000),
     since_id: int | None = Query(default=None, ge=0),
     before_id: int | None = Query(default=None, ge=1),
@@ -265,9 +279,10 @@ def list_news(
         mode = "older"
         stmt = stmt.where(RawItem.id < before_id).order_by(RawItem.id.desc()).limit(limit)
     else:
-        stmt = stmt.order_by(RawItem.id.desc()).limit(limit)
+        stmt = stmt.order_by(RawItem.published_at.desc(), RawItem.id.desc()).limit(limit)
 
     rows = session.execute(stmt).scalars().all()
+    backfill_threshold_minutes = max(1, int(settings.news_backfill_delay_minutes))
 
     latest_id = max((row.id for row in rows), default=since_id or 0)
     oldest_id = min((row.id for row in rows), default=before_id or 0)
@@ -280,16 +295,27 @@ def list_news(
         if q:
             keyword = f"%{q.strip()}%"
             more_stmt = more_stmt.where(or_(RawItem.title.ilike(keyword), RawItem.body.ilike(keyword)))
-        more_stmt = more_stmt.where(RawItem.id < oldest_id).limit(1)
+        if mode == "latest":
+            last_row = rows[-1]
+            more_stmt = more_stmt.where(
+                or_(
+                    RawItem.published_at < last_row.published_at,
+                    and_(RawItem.published_at == last_row.published_at, RawItem.id < last_row.id),
+                )
+            )
+        else:
+            more_stmt = more_stmt.where(RawItem.id < oldest_id)
+        more_stmt = more_stmt.limit(1)
         has_more_older = session.execute(more_stmt).first() is not None
 
-    return {
-        "mode": mode,
-        "latest_id": latest_id,
-        "oldest_id": oldest_id,
-        "has_more_older": has_more_older,
-        "count": len(rows),
-        "items": [
+    items_payload: list[dict[str, Any]] = []
+    for row in rows:
+        historical_backfill, backfill_delay_min = _news_backfill_meta(
+            row.published_at,
+            row.ingested_at,
+            threshold_minutes=backfill_threshold_minutes,
+        )
+        items_payload.append(
             {
                 "id": row.id,
                 "source": row.source,
@@ -301,9 +327,18 @@ def list_news(
                 "processed": row.processed,
                 "metadata": row.metadata_json or {},
                 "body_preview": (row.body or "")[:600],
+                "historical_backfill": historical_backfill,
+                "backfill_delay_min": backfill_delay_min,
             }
-            for row in rows
-        ],
+        )
+
+    return {
+        "mode": mode,
+        "latest_id": latest_id,
+        "oldest_id": oldest_id,
+        "has_more_older": has_more_older,
+        "count": len(rows),
+        "items": items_payload,
     }
 
 
@@ -1222,6 +1257,7 @@ def dashboard_snapshot(
     try:
         payload["news"] = list_news(
             session=session,
+            settings=settings,
             limit=6,
             since_id=None,
             before_id=None,
