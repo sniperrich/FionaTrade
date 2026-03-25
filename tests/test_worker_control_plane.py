@@ -114,6 +114,8 @@ def test_worker_runtime_snapshot_handles_naive_db_timestamps(session) -> None:
     assert snapshot["updated_at"]
     assert snapshot["worker"]["status"] == "ONLINE"
     assert snapshot["live_cycle"]["cycle_id"] == "naive1234"
+    assert snapshot["live_cycle"]["updated_at"].endswith("+00:00")
+    assert snapshot["recent_events"][0]["ts"].endswith("+00:00")
 
 
 def test_worker_history_snapshot_contains_runs_commands_and_events(session) -> None:

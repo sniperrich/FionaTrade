@@ -401,9 +401,9 @@ class WorkerRuntimeService:
             "completed_tickers": run.completed_tickers,
             "last_result": run.summary_json or None,
             "error": run.error_message,
-            "started_at": run.started_at.isoformat() if run.started_at else None,
-            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
-            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "started_at": self._dt_to_iso(run.started_at),
+            "updated_at": self._dt_to_iso(run.updated_at),
+            "finished_at": self._dt_to_iso(run.finished_at),
             "mode": run.trigger,
         }
 
@@ -417,7 +417,7 @@ class WorkerRuntimeService:
             "agent": event.agent,
             "message": event.message,
             "payload": event.payload_json or {},
-            "ts": event.created_at.isoformat() if event.created_at else None,
+            "ts": self._dt_to_iso(event.created_at),
             "run_key": event.run_key,
         }
 
@@ -427,9 +427,9 @@ class WorkerRuntimeService:
             "command_type": command.command_type,
             "status": command.status,
             "requested_by": command.requested_by,
-            "created_at": command.created_at.isoformat() if command.created_at else None,
-            "started_at": command.started_at.isoformat() if command.started_at else None,
-            "finished_at": command.finished_at.isoformat() if command.finished_at else None,
+            "created_at": self._dt_to_iso(command.created_at),
+            "started_at": self._dt_to_iso(command.started_at),
+            "finished_at": self._dt_to_iso(command.finished_at),
             "error": command.error_message,
         }
 
@@ -449,15 +449,19 @@ class WorkerRuntimeService:
             "completed_tickers": run.completed_tickers,
             "error": run.error_message,
             "summary": run.summary_json or {},
-            "started_at": run.started_at.isoformat() if run.started_at else None,
-            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
-            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "started_at": self._dt_to_iso(run.started_at),
+            "updated_at": self._dt_to_iso(run.updated_at),
+            "finished_at": self._dt_to_iso(run.finished_at),
         }
 
     def _ensure_utc_dt(self, value: datetime | None) -> datetime | None:
         if value is None:
             return None
         return ensure_utc(value)
+
+    def _dt_to_iso(self, value: datetime | None) -> str | None:
+        normalized = self._ensure_utc_dt(value)
+        return normalized.isoformat() if normalized is not None else None
 
     def _parse_iso_dt(self, value: Any) -> datetime | None:
         if isinstance(value, datetime):
