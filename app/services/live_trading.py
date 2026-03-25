@@ -216,7 +216,7 @@ class LiveTradingService:
             triggered_plan_tickers: set[str] = set()
             if not dry_run and self.settings.live_entry_planning_enabled:
                 self._update_run(session, run, stage="entry_plans", current_agent=None)
-                self._expire_outdated_entry_plans(session, tickers)
+                self._expire_outdated_entry_plans(session, tickers, run=run)
                 plan_eval = self._execute_active_entry_plans(
                     session=session,
                     broker=broker,
@@ -366,6 +366,34 @@ class LiveTradingService:
         )
         session.commit()
 
+    def _emit_plan_event(
+        self,
+        session: Session,
+        *,
+        run: WorkerRun | None,
+        stage: str,
+        ticker: str | None,
+        message: str,
+        level: str = "info",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if run is None:
+            return
+        normalized_payload = dict(payload or {})
+        normalized_payload.setdefault("event", stage)
+        self.runtime.add_event(
+            session,
+            "live_cycle",
+            message,
+            run=run,
+            level=level,
+            stage=stage,
+            ticker=ticker,
+            agent="entry_planner",
+            payload=normalized_payload,
+        )
+        session.flush()
+
     def _get_tickers(self) -> list[str]:
         tickers = list(self.settings.live_trading_tickers)
         if not tickers:
@@ -477,7 +505,13 @@ class LiveTradingService:
         )
         return plan
 
-    def _expire_outdated_entry_plans(self, session: Session, tickers: list[str]) -> None:
+    def _expire_outdated_entry_plans(
+        self,
+        session: Session,
+        tickers: list[str],
+        *,
+        run: WorkerRun | None = None,
+    ) -> None:
         now = datetime.now(timezone.utc)
         rows = session.execute(
             select(EntryPlan).where(
@@ -498,6 +532,19 @@ class LiveTradingService:
                 row.updated_at = now
                 row.trigger_reason = "entry plan expired before trigger"
                 changed = True
+                self._emit_plan_event(
+                    session,
+                    run=run,
+                    stage="entry_plan_expired",
+                    ticker=row.ticker,
+                    message=f"Entry plan #{row.id} expired before trigger",
+                    level="warn",
+                    payload={
+                        "plan_id": row.id,
+                        "status": "expired",
+                        "trigger_reason": row.trigger_reason,
+                    },
+                )
         if changed:
             session.flush()
 
@@ -769,6 +816,20 @@ class LiveTradingService:
                     market_session=msi["label"],
                     reasoning=f"Entry plan {plan.execution_mode} created for {planned_action}. {reasoning}",
                 )
+                self._emit_plan_event(
+                    session,
+                    run=run,
+                    stage="entry_plan_created",
+                    ticker=ticker,
+                    message=f"Entry plan #{plan.id} created: {plan.execution_mode} -> {plan.planned_action}",
+                    payload={
+                        "plan_id": plan.id,
+                        "status": "active",
+                        "execution_mode": plan.execution_mode,
+                        "planned_action": plan.planned_action,
+                        "target_pct": float(plan.target_pct or 0.0),
+                    },
+                )
                 return {
                     "ticker": ticker,
                     "action": "HOLD",
@@ -797,12 +858,26 @@ class LiveTradingService:
             return {"ticker": ticker, "action": "HOLD", "order_placed": False}
 
         if self.settings.live_entry_planning_enabled:
-            self._replace_active_entry_plans(
+            invalidated_count = self._replace_active_entry_plans(
                 session,
                 ticker,
                 new_status="INVALIDATED",
                 reason="immediate signal superseded pending entry plan",
             )
+            if invalidated_count > 0:
+                self._emit_plan_event(
+                    session,
+                    run=run,
+                    stage="entry_plan_invalidated",
+                    ticker=ticker,
+                    message=f"{invalidated_count} active entry plan(s) invalidated by immediate {desired_action}",
+                    level="warn",
+                    payload={
+                        "status": "invalidated",
+                        "count": invalidated_count,
+                        "immediate_action": desired_action,
+                    },
+                )
 
         return self._submit_order_for_action(
             session=session,
@@ -842,6 +917,19 @@ class LiveTradingService:
             try:
                 current_price = broker.get_latest_price(ticker)
             except Exception as exc:
+                self._emit_plan_event(
+                    session,
+                    run=run,
+                    stage="entry_plan_evaluated",
+                    ticker=ticker,
+                    message=f"Entry plan #{plan.id} skipped: latest price fetch failed",
+                    level="warn",
+                    payload={
+                        "plan_id": plan.id,
+                        "status": "price_fetch_failed",
+                        "error": str(exc),
+                    },
+                )
                 results.append(
                     {
                         "plan_id": plan.id,
@@ -853,6 +941,18 @@ class LiveTradingService:
                 )
                 continue
             if not current_price or current_price <= 0:
+                self._emit_plan_event(
+                    session,
+                    run=run,
+                    stage="entry_plan_evaluated",
+                    ticker=ticker,
+                    message=f"Entry plan #{plan.id} skipped: latest price unavailable",
+                    level="warn",
+                    payload={
+                        "plan_id": plan.id,
+                        "status": "price_unavailable",
+                    },
+                )
                 results.append(
                     {
                         "plan_id": plan.id,
@@ -869,6 +969,18 @@ class LiveTradingService:
                 msi=msi,
             )
             if not should_trigger:
+                self._emit_plan_event(
+                    session,
+                    run=run,
+                    stage="entry_plan_evaluated",
+                    ticker=ticker,
+                    message=f"Entry plan #{plan.id} waiting: {trigger_reason}",
+                    payload={
+                        "plan_id": plan.id,
+                        "status": "waiting",
+                        "trigger_reason": trigger_reason,
+                    },
+                )
                 results.append(
                     {
                         "plan_id": plan.id,
@@ -899,10 +1011,39 @@ class LiveTradingService:
                 plan.updated_at = datetime.now(timezone.utc)
                 plan.trigger_reason = trigger_reason[:1000]
                 triggered_tickers.add(ticker)
+                self._emit_plan_event(
+                    session,
+                    run=run,
+                    stage="entry_plan_triggered",
+                    ticker=ticker,
+                    message=f"Entry plan #{plan.id} triggered: {trigger_reason}",
+                    payload={
+                        "plan_id": plan.id,
+                        "status": "triggered",
+                        "trigger_reason": trigger_reason,
+                        "order_id": exec_result.get("order_id"),
+                        "action": exec_result.get("action") or plan.planned_action,
+                    },
+                )
             else:
                 # Keep ACTIVE so it can be evaluated again unless explicitly terminal.
                 plan.updated_at = datetime.now(timezone.utc)
                 plan.trigger_reason = f"trigger matched but order not placed: {exec_result.get('reason') or exec_result.get('error') or 'unknown'}"[:1000]
+                self._emit_plan_event(
+                    session,
+                    run=run,
+                    stage="entry_plan_trigger_failed",
+                    ticker=ticker,
+                    message=f"Entry plan #{plan.id} trigger matched but order failed",
+                    level="warn",
+                    payload={
+                        "plan_id": plan.id,
+                        "status": "trigger_failed",
+                        "trigger_reason": trigger_reason,
+                        "reason": exec_result.get("reason"),
+                        "error": exec_result.get("error"),
+                    },
+                )
             session.flush()
             results.append(
                 {

@@ -14,7 +14,7 @@ from app.core.config import Settings
 from app.core.utils import utc_now
 from app.backtest_engine.service import BacktestEngineService
 from app.db.database import is_sqlite_lock_error
-from app.db.models import BacktestRun, EntryPlan, EventEvidence, RawItem, SourceStatus
+from app.db.models import BacktestRun, EntryPlan, EventEvidence, RawItem, SourceStatus, WorkerRunEvent
 from app.monitoring.health import HealthAuditService
 from app.services.market_data import MarketDataService
 from app.services.runtime_control import RuntimeControlService
@@ -168,6 +168,27 @@ def _serialize_entry_plan(plan: EntryPlan) -> dict[str, Any]:
         "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
         "triggered_at": plan.triggered_at.isoformat() if plan.triggered_at else None,
         "cancelled_at": plan.cancelled_at.isoformat() if plan.cancelled_at else None,
+    }
+
+
+def _serialize_entry_plan_event(event: WorkerRunEvent) -> dict[str, Any]:
+    payload = dict(event.payload_json or {})
+    return {
+        "id": event.id,
+        "run_key": event.run_key,
+        "level": event.level,
+        "stage": event.stage,
+        "ticker": event.ticker,
+        "agent": event.agent,
+        "message": event.message,
+        "plan_id": payload.get("plan_id"),
+        "status": payload.get("status"),
+        "event": payload.get("event"),
+        "trigger_reason": payload.get("trigger_reason"),
+        "reason": payload.get("reason"),
+        "error": payload.get("error"),
+        "payload": payload,
+        "ts": event.created_at.isoformat() if event.created_at else None,
     }
 
 
@@ -815,6 +836,58 @@ def list_live_entry_plans(
     }
 
 
+@router.get("/live/plans/events")
+def list_live_entry_plan_events(
+    ticker: str | None = Query(default=None),
+    plan_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=60, ge=1, le=500),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    stage_filter = [
+        "entry_plan_created",
+        "entry_plan_expired",
+        "entry_plan_evaluated",
+        "entry_plan_triggered",
+        "entry_plan_trigger_failed",
+        "entry_plan_invalidated",
+        "entry_plan_cancelled",
+    ]
+    ticker_upper = ticker.upper().strip() if ticker else None
+    fetch_limit = limit if plan_id is None else min(500, max(limit * 6, limit))
+    stmt = (
+        select(WorkerRunEvent)
+        .where(
+            WorkerRunEvent.run_type == "live_cycle",
+            WorkerRunEvent.stage.in_(stage_filter),
+        )
+        .order_by(desc(WorkerRunEvent.created_at), desc(WorkerRunEvent.id))
+        .limit(fetch_limit)
+    )
+    if ticker_upper:
+        stmt = stmt.where(WorkerRunEvent.ticker == ticker_upper)
+    rows = session.execute(stmt).scalars().all()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row.payload_json or {})
+        row_plan_id = payload.get("plan_id")
+        if row_plan_id is not None:
+            try:
+                row_plan_id = int(row_plan_id)
+            except (TypeError, ValueError):
+                row_plan_id = None
+        if plan_id is not None and row_plan_id != plan_id:
+            continue
+        items.append(_serialize_entry_plan_event(row))
+        if len(items) >= limit:
+            break
+
+    return {
+        "count": len(items),
+        "items": items,
+    }
+
+
 @router.post("/live/plans/{plan_id}/cancel")
 def cancel_live_entry_plan(
     plan_id: int,
@@ -835,6 +908,22 @@ def cancel_live_entry_plan(
     plan.updated_at = utc_now()
     if not plan.trigger_reason:
         plan.trigger_reason = "cancelled from control plane"
+    WorkerRuntimeService().add_event(
+        session,
+        "live_cycle",
+        f"Entry plan #{plan.id} cancelled from control plane",
+        run=None,
+        level="warn",
+        stage="entry_plan_cancelled",
+        ticker=plan.ticker,
+        agent="control_plane",
+        payload={
+            "event": "entry_plan_cancelled",
+            "plan_id": plan.id,
+            "status": "cancelled",
+            "trigger_reason": plan.trigger_reason,
+        },
+    )
     session.flush()
     _cache_invalidate("live:")
     _cache_invalidate("ui:")
@@ -1179,6 +1268,7 @@ def live_snapshot(
         "orders": [],
         "trades": [],
         "plans": {"count": 0, "active_count": 0, "items": []},
+        "plan_events": {"count": 0, "items": []},
         "portfolio_history": None,
         "bars": None,
         "bar_cache": None,
@@ -1221,6 +1311,16 @@ def live_snapshot(
         )
     except Exception as exc:
         payload["errors"]["plans"] = str(exc)
+
+    try:
+        payload["plan_events"] = list_live_entry_plan_events(
+            ticker=trade_ticker,
+            plan_id=None,
+            limit=60,
+            session=session,
+        )
+    except Exception as exc:
+        payload["errors"]["plan_events"] = str(exc)
 
     try:
         payload["portfolio_history"] = portfolio_history(

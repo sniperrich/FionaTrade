@@ -4,7 +4,7 @@ from datetime import timedelta
 import pytest
 from fastapi import HTTPException
 
-from app.api.routes import set_live_enabled
+from app.api.routes import list_live_entry_plan_events, set_live_enabled
 from app.core.utils import utc_now
 from app.db.models import BacktestRun, WorkerCommand, WorkerRun
 from app.ingestion.service import IngestionService
@@ -157,6 +157,40 @@ def test_worker_history_snapshot_contains_runs_commands_and_events(session) -> N
     assert history["runs"][0]["run_key"] == "abcd1234"
     assert history["commands"][0]["command_type"] == COMMAND_RUN_LIVE_CYCLE
     assert history["events"][0]["message"] == "Cycle started"
+
+
+def test_list_live_entry_plan_events_filters_by_ticker_and_plan_id(session) -> None:
+    runtime = WorkerRuntimeService()
+    run = runtime.start_run(session, run_type="live_cycle", trigger="manual", run_key="planapi01")
+    runtime.add_event(
+        session,
+        "live_cycle",
+        "AAPL waiting pullback",
+        run=run,
+        stage="entry_plan_evaluated",
+        ticker="AAPL",
+        payload={"plan_id": 11, "status": "waiting", "trigger_reason": "waiting pullback"},
+    )
+    runtime.add_event(
+        session,
+        "live_cycle",
+        "MSFT triggered",
+        run=run,
+        stage="entry_plan_triggered",
+        ticker="MSFT",
+        payload={"plan_id": 12, "status": "triggered"},
+    )
+    session.commit()
+
+    aapl_only = list_live_entry_plan_events(ticker="AAPL", plan_id=None, limit=20, session=session)
+    assert aapl_only["count"] == 1
+    assert aapl_only["items"][0]["ticker"] == "AAPL"
+    assert aapl_only["items"][0]["plan_id"] == 11
+
+    plan_only = list_live_entry_plan_events(ticker=None, plan_id=12, limit=20, session=session)
+    assert plan_only["count"] == 1
+    assert plan_only["items"][0]["ticker"] == "MSFT"
+    assert plan_only["items"][0]["plan_id"] == 12
 
 
 def test_worker_reconciles_orphaned_running_state(session) -> None:

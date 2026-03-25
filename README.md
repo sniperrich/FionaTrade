@@ -96,7 +96,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | 路径 | 功能 |
 |------|------|
 | `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot + worker/queue 状态** |
-| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + worker history + local bar cache + ticker K-line + 成交历史翻页** |
+| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + worker history + local bar cache + ticker K-line + entry plan 面板 + entry plan trigger log + 成交历史翻页** |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**30s 自动拉新 + 源状态/报错 + 历史翻页** |
 | `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果与交易明细 |
@@ -154,6 +154,7 @@ tests/           pytest 测试集
 | POST | `/api/live/order` | 手动下单 |
 | GET | `/api/live/trades` | recent live trades |
 | GET | `/api/live/plans` | delayed entry plans |
+| GET | `/api/live/plans/events` | entry plan lifecycle/trigger events |
 | POST | `/api/live/plans/{plan_id}/cancel` | cancel active entry plan |
 | GET | `/api/live/positions` | Alpaca 当前持仓 |
 | GET | `/api/live/open_orders` | Alpaca 挂单 |
@@ -162,7 +163,7 @@ tests/           pytest 测试集
 | GET | `/api/live/runtime` | 当前 live runtime 状态：cycle stage / current ticker / current agent / recent events |
 | GET | `/api/live/bar_cache` | 本地 `bars_1m` 缓存状态：最新时间 / stale 情况 / source 分布 |
 | GET | `/api/ui/dashboard_snapshot` | Dashboard 聚合快照（health/live/positions/news/runs/chart） |
-| GET | `/api/ui/live_snapshot` | Live Trading 聚合快照（market/positions/orders/trades/runtime/bar_cache/chart） |
+| GET | `/api/ui/live_snapshot` | Live Trading 聚合快照（market/positions/orders/trades/plans/plan_events/runtime/bar_cache/chart） |
 
 > ⚠️ **JS 开发注意：**
 > - `market_session` 是字符串，不是对象
@@ -198,6 +199,7 @@ tests/           pytest 测试集
 > - live 下单前会检查本地 `Bar1m` 是否新鲜；若缓存缺失或过旧，会把该 ticker 记为 `stale_market_data` 并 suppress order
 > - PortfolioManager 现在可输出 `execution_mode + entry_plan`；当 action=HOLD 且 mode=WAIT_* 时，live 会创建 entry plan 并在后续 cycle 触发执行
 > - `/api/live/plans` 提供计划列表，`/api/live/plans/{plan_id}/cancel` 可手动取消 active 计划
+> - `/api/live/plans/events` 提供 entry plan 事件流（created/evaluated/triggered/trigger_failed/expired/cancelled），`/live` 页有独立 Trigger Log 卡片用于排障
 > - 一旦 live 已启用，只要 `python -m app.worker.supervisor` 还在运行，关闭浏览器不会停止 auto trading
 
 ---

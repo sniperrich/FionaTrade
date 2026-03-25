@@ -337,6 +337,16 @@
   </div>
 </div>
 
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">Entry Plan Trigger Log</div>
+    <span class="text-muted text-sm" id="entry-plan-events-updated">Waiting…</span>
+  </div>
+  <div id="entry-plan-events-body" class="stack">
+    <div class="empty-state">Loading trigger logs…</div>
+  </div>
+</div>
+
 <!-- Trade history -->
 <div class="card">
   <div class="section-header mb8">
@@ -375,7 +385,7 @@
 {% endblock %}
 {% block scripts %}
 <script>
-const LIVE_CACHE_PREFIX = 'ui:live_snapshot:v3:';
+const LIVE_CACHE_PREFIX = 'ui:live_snapshot:v4:';
 let liveTradesPage = 1;
 const LIVE_TRADES_PER_PAGE = 20;
 
@@ -633,6 +643,36 @@ async function loadEntryPlans(data=null){
     }).join('');
   } catch(e){
     document.getElementById('entry-plans-body').innerHTML=`<tr><td colspan="9" class="empty-state text-red">Entry plans unavailable: ${e.message}</td></tr>`;
+  }
+}
+
+async function loadEntryPlanEvents(data=null){
+  const ticker=(document.getElementById('hist-ticker-filter')?.value || '').trim().toUpperCase();
+  const url='/api/live/plans/events?limit=60'+(ticker?`&ticker=${encodeURIComponent(ticker)}`:'');
+  try{
+    const d=data || await apiFetch(url);
+    const items=(d.items||[]).slice(0,24);
+    document.getElementById('entry-plan-events-updated').textContent=`Updated ${new Date().toLocaleTimeString()} · ${d.count||0} events`;
+    if(!items.length){
+      document.getElementById('entry-plan-events-body').innerHTML='<div class="empty-state text-muted">No entry plan events yet</div>';
+      return;
+    }
+    document.getElementById('entry-plan-events-body').innerHTML=items.map(ev=>{
+      const planId = ev.plan_id != null ? `#${ev.plan_id}` : '#—';
+      const status = ev.status || ev.stage || 'event';
+      const detail = ev.trigger_reason || ev.reason || ev.error || ev.message || '—';
+      const meta = [ev.ticker, ev.stage, ev.run_key ? `cycle ${ev.run_key}` : null].filter(Boolean).join(' · ');
+      return `<div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+        <div class="flex-center gap8" style="justify-content:space-between;align-items:flex-start">
+          <div class="bold">${escapeHtml(planId)} ${statusBadge(status)}</div>
+          <div class="text-muted text-xs">${fmtAgo(ev.ts)}</div>
+        </div>
+        <div class="text-muted text-xs mt4">${escapeHtml(meta || 'entry plan')}</div>
+        <div class="mt4">${escapeHtml(detail)}</div>
+      </div>`;
+    }).join('');
+  } catch(e){
+    document.getElementById('entry-plan-events-body').innerHTML=`<div class="empty-state text-red">Entry plan logs unavailable: ${e.message}</div>`;
   }
 }
 
@@ -993,6 +1033,7 @@ function hydrateLiveSnapshot(snapshot){
   if(snapshot.orders) loadOpenOrders(snapshot.orders);
   if(snapshot.trades) loadTradeHistory(snapshot.trades);
   if(snapshot.plans) loadEntryPlans(snapshot.plans);
+  if(snapshot.plan_events) loadEntryPlanEvents(snapshot.plan_events);
   if(snapshot.market) loadMarketStatus(snapshot.market);
   if(snapshot.portfolio_history) loadPortfolioHistory(snapshot.portfolio_history);
   if(snapshot.bars) loadTickerChart(snapshot.bars);
@@ -1025,6 +1066,7 @@ async function refreshAll(){
       loadOpenOrders(),
       loadTradeHistory(),
       loadEntryPlans(),
+      loadEntryPlanEvents(),
       loadMarketStatus(),
       loadRuntimeStatus(),
       loadWorkerHistory(),
@@ -1042,6 +1084,7 @@ setInterval(loadRuntimeStatus,5000);
 setInterval(loadWorkerHistory,7000);
 setInterval(loadBarCacheStatus,10000);
 setInterval(loadEntryPlans,10000);
+setInterval(loadEntryPlanEvents,7000);
 setInterval(refreshAll,15000);
 </script>
 {% endblock %}

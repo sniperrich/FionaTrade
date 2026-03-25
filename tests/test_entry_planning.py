@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from app.db.models import EntryPlan, WorkerRunEvent
 from app.services.live_trading import LiveTradingService
-from app.db.models import EntryPlan
 
 
 def test_process_ticker_creates_and_replaces_wait_plan(session, settings, monkeypatch) -> None:
@@ -106,3 +106,65 @@ def test_execute_active_wait_until_open_plan_triggers_order(session, settings, m
     session.refresh(plan)
     assert plan.status == "TRIGGERED"
     assert plan.triggered_at is not None
+
+
+def test_execute_active_plan_emits_trigger_log_event(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+
+    plan = EntryPlan(
+        ticker="NVDA",
+        status="ACTIVE",
+        execution_mode="WAIT_UNTIL_OPEN",
+        planned_action="BUY",
+        target_pct=0.05,
+        trigger_json={},
+        valid_until=datetime.now(timezone.utc).replace(microsecond=0),
+    )
+    session.add(plan)
+    session.flush()
+    run = service.runtime.start_run(
+        session,
+        run_type="live_cycle",
+        trigger="manual",
+        run_key="planlog01",
+    )
+
+    monkeypatch.setattr(
+        service.market_data,
+        "is_ticker_cache_fresh",
+        lambda _session, _ticker, max_age_minutes=None: (True, 1.0),
+    )
+
+    class DummyBroker:
+        def get_latest_price(self, _ticker):
+            return 100.0
+
+        def get_position(self, _ticker):
+            return None
+
+        def get_open_orders(self, _ticker):
+            return []
+
+        def place_bracket_order(self, **kwargs):
+            return SimpleNamespace(success=True, order_id="ord-log-1", error=None)
+
+    service._execute_active_entry_plans(
+        session=session,
+        broker=DummyBroker(),
+        portfolio_value=100_000.0,
+        tickers=["NVDA"],
+        cycle_id="cycle-log",
+        msi={"label": "open", "tradeable": True, "et_time_str": "09:31 ET"},
+        run=run,
+    )
+
+    event = (
+        session.query(WorkerRunEvent)
+        .filter(WorkerRunEvent.run_key == "planlog01", WorkerRunEvent.stage == "entry_plan_triggered")
+        .order_by(WorkerRunEvent.id.desc())
+        .first()
+    )
+    assert event is not None
+    payload = event.payload_json or {}
+    assert payload.get("plan_id") == plan.id
+    assert payload.get("status") == "triggered"
