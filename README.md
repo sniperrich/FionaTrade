@@ -58,6 +58,9 @@ db     -> SQLite，统一保存状态、结果、行情缓存、运行态
 - supervisor 也会写 heartbeat，WebUI/API 能区分 “worker 挂了” 和 “根本没人守护”
 - live runtime 读取 `worker_runs / worker_run_events`，不再依赖进程内 runtime store
 - `MarketDataService` 统一 chart/cache/freshness/fallback/backfill
+- `live_cycle` 现在带进程内互斥：scheduled / manual / queued 三条路径不会再在同一 worker 内重叠执行
+- worker command pump 已拆成高优先级（live / bar refresh / ingestion / earnings）和低优先级（backtest）两条 lane，长 backtest 不再把 live 命令整段饿死
+- live 下单前会强制检查本地 `Bar1m` 新鲜度；超过 `LIVE_DATA_MAX_AGE_MINUTES` 只分析不下单
 - 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
 - SQLite 现在默认启用 `WAL + busy_timeout`，降低 worker/supervisor/backtest 并发写锁冲突
 - worker 启动时会自动清算遗留的 `RUNNING` 命令/运行/回测，避免重启后旧任务永久显示运行中
@@ -185,6 +188,9 @@ tests/           pytest 测试集
 > - worker runtime API 现在统一返回带 `+00:00` 的 UTC 时间；前端 “x ago” 不会再把 SQLite 的 naive UTC 误当成上海本地时间
 > - `live_cycle` 与高频 scheduler 现在走 `fast ingestion`：跳过 SEC 重扫描和 SEC summary LLM，避免把 live command queue 长时间堵死
 > - `Enable Live` 不再先排重型 ingestion；现在优先 `refresh_bars + live_cycle`
+> - 若已有一个 `live_cycle` 正在运行，新触发的 cycle 会返回 `live_cycle_in_progress` 并跳过，避免重叠分析/重复下单
+> - worker 现在优先消费 `run_live_cycle / refresh_bars / run_ingestion_validation / refresh_earnings_calendar`，backtest 放在低优先级 lane
+> - live 下单前会检查本地 `Bar1m` 是否新鲜；若缓存缺失或过旧，会把该 ticker 记为 `stale_market_data` 并 suppress order
 > - 一旦 live 已启用，只要 `python -m app.worker.supervisor` 还在运行，关闭浏览器不会停止 auto trading
 
 ---

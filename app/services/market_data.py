@@ -230,6 +230,28 @@ class MarketDataService:
             "tickers": per_ticker,
         }
 
+    def get_ticker_cache_age_minutes(self, session: Session, ticker: str) -> float | None:
+        latest_ts = session.execute(
+            select(func.max(Bar1m.ts)).where(Bar1m.ticker == ticker.upper())
+        ).scalar_one_or_none()
+        latest_ts = self._ensure_utc(latest_ts)
+        if latest_ts is None:
+            return None
+        return round((utc_now() - latest_ts).total_seconds() / 60.0, 1)
+
+    def is_ticker_cache_fresh(
+        self,
+        session: Session,
+        ticker: str,
+        *,
+        max_age_minutes: float | None = None,
+    ) -> tuple[bool, float | None]:
+        age_minutes = self.get_ticker_cache_age_minutes(session, ticker)
+        threshold = float(max_age_minutes or self.settings.live_data_max_age_minutes)
+        if age_minutes is None:
+            return False, None
+        return age_minutes <= threshold, age_minutes
+
     def refresh_bars(
         self,
         session: Session,

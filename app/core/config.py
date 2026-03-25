@@ -185,6 +185,8 @@ class Settings(BaseSettings):
     live_max_position_pct: float = 0.10
     # Allow order placement during pre-market session (default: False)
     live_allow_premarket: bool = False
+    # Refuse new live orders when local Bar1m cache is older than this threshold.
+    live_data_max_age_minutes: float = 20.0
 
     @field_validator("agent_tickers_override", "live_trading_tickers", mode="before")
     @classmethod

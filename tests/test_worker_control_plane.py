@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-
 import pytest
 from fastapi import HTTPException
 
@@ -10,9 +9,11 @@ from app.core.utils import utc_now
 from app.db.models import BacktestRun, WorkerCommand, WorkerRun
 from app.ingestion.service import IngestionService
 from app.ingestion.types import SourceCheck
+from app.services.live_trading import LiveTradingService, _LIVE_CYCLE_MUTEX
 from app.services.runtime_control import CONTROL_WORKER_HEARTBEAT, RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
+    COMMAND_RUN_BACKTEST,
     COMMAND_RUN_INGESTION,
     COMMAND_RUN_LIVE_CYCLE,
     WorkerRuntimeService,
@@ -96,6 +97,30 @@ def test_worker_runtime_snapshot_includes_worker_and_queue(session) -> None:
     assert queue["running"] == 1
     assert queue["open"] == 2
     assert any(row["id"] == pending.id for row in queue["recent"])
+
+
+def test_claim_next_command_prioritizes_live_commands_over_backtests(session) -> None:
+    runtime = WorkerRuntimeService()
+    runtime.queue_command(session, COMMAND_RUN_BACKTEST, payload={"trigger": "test"}, requested_by="pytest")
+    runtime.queue_command(session, COMMAND_REFRESH_BARS, payload={"trigger": "test"}, requested_by="pytest")
+    runtime.queue_command(session, COMMAND_RUN_LIVE_CYCLE, payload={"trigger": "test"}, requested_by="pytest")
+
+    claimed = runtime.claim_next_command(
+        session,
+        [COMMAND_RUN_BACKTEST, COMMAND_REFRESH_BARS, COMMAND_RUN_LIVE_CYCLE],
+    )
+
+    assert claimed is not None
+    assert claimed.command_type == COMMAND_RUN_LIVE_CYCLE
+
+
+def test_has_open_commands_detects_high_priority_backlog(session) -> None:
+    runtime = WorkerRuntimeService()
+    runtime.queue_command(session, COMMAND_RUN_LIVE_CYCLE, payload={"trigger": "test"}, requested_by="pytest")
+    assert runtime.has_open_commands(session, [COMMAND_RUN_LIVE_CYCLE]) is True
+
+    runtime.claim_next_command(session, [COMMAND_RUN_LIVE_CYCLE])
+    assert runtime.has_open_commands(session, [COMMAND_RUN_LIVE_CYCLE]) is True
 
 
 def test_worker_runtime_snapshot_handles_naive_db_timestamps(session) -> None:
@@ -246,3 +271,54 @@ def test_fast_ingestion_profile_skips_sec(session, settings) -> None:
     result = svc.run(session, profile="live_fast", tickers=["AAPL", "MSFT"])
     assert result.fetched == 0
     assert result.inserted == 0
+
+
+def test_live_cycle_skips_when_another_cycle_is_running(session, settings) -> None:
+    service = LiveTradingService(settings)
+    acquired = _LIVE_CYCLE_MUTEX.acquire(blocking=False)
+    assert acquired is True
+    try:
+        result = service.run_cycle(session, trigger="pytest")
+    finally:
+        _LIVE_CYCLE_MUTEX.release()
+
+    assert result["skipped"] is True
+    assert result["reason"] == "live_cycle_in_progress"
+
+
+def test_stale_market_data_suppresses_order_before_price_fetch(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+
+    class DummyGraph:
+        def run(self, _session, _ticker, context=None, progress_callback=None):
+            return {
+                "final_action": "BUY",
+                "final_position_pct": 0.05,
+                "final_reasoning": "positive catalyst",
+            }
+
+    class DummyBroker:
+        def get_latest_price(self, _ticker):
+            raise AssertionError("price fetch should not happen when cache is stale")
+
+    monkeypatch.setattr(service, "_get_agent_graph", lambda: DummyGraph())
+    monkeypatch.setattr(
+        service.market_data,
+        "is_ticker_cache_fresh",
+        lambda _session, _ticker, max_age_minutes=None: (False, 45.0),
+    )
+
+    result = service._process_ticker(
+        session,
+        DummyBroker(),
+        "AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="cycle123",
+        msi={"et_time_str": "09:45 ET", "label": "open"},
+        dry_run=False,
+        run=None,
+    )
+
+    assert result["order_placed"] is False
+    assert result["reason"] == "stale_market_data"
+    assert result["cache_age_minutes"] == 45.0

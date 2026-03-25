@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+import threading
 from typing import Any
 
 from sqlalchemy import desc, select
@@ -40,6 +41,7 @@ logger = get_app_logger()
 _MIN_SHARES = 1
 _STOP_LOSS_PCT = 0.05
 _TAKE_PROFIT_RATIO = 2.0
+_LIVE_CYCLE_MUTEX = threading.Lock()
 
 
 class LiveTradingService:
@@ -52,246 +54,257 @@ class LiveTradingService:
         self.runtime = WorkerRuntimeService()
 
     def run_cycle(self, session: Session, trigger: str = "scheduled") -> dict[str, Any]:
+        if not _LIVE_CYCLE_MUTEX.acquire(blocking=False):
+            logger.info("[live] Skipping cycle trigger=%s: another live cycle is already running", trigger)
+            return {
+                "skipped": True,
+                "reason": "live_cycle_in_progress",
+                "trigger": trigger,
+            }
+
         cycle_id = str(uuid.uuid4())[:8]
-        msi = market_session_info()
-        tickers = self._get_tickers()
-        tradeable = msi["tradeable"] or (
-            msi["label"] == "pre_market" and self.settings.live_allow_premarket
-        )
-        dry_run = not tradeable
+        try:
+            msi = market_session_info()
+            tickers = self._get_tickers()
+            tradeable = msi["tradeable"] or (
+                msi["label"] == "pre_market" and self.settings.live_allow_premarket
+            )
+            dry_run = not tradeable
 
-        run = self.runtime.start_run(
-            session,
-            run_type="live_cycle",
-            trigger=trigger,
-            run_key=cycle_id,
-            stage="starting",
-            status="RUNNING",
-            market_session=msi["label"],
-            dry_run=dry_run,
-            total_tickers=len(tickers),
-            completed_tickers=0,
-        )
-        self._emit_event(
-            session,
-            run,
-            f"Cycle {cycle_id} started",
-            stage="starting",
-            payload={"market_session": msi["label"], "total_tickers": len(tickers)},
-        )
-        logger.info("[live] Cycle %s started — %s", cycle_id, msi["context_string"])
-
-        if dry_run:
-            self._update_run(session, run, stage="analysis_only", current_agent=None)
+            run = self.runtime.start_run(
+                session,
+                run_type="live_cycle",
+                trigger=trigger,
+                run_key=cycle_id,
+                stage="starting",
+                status="RUNNING",
+                market_session=msi["label"],
+                dry_run=dry_run,
+                total_tickers=len(tickers),
+                completed_tickers=0,
+            )
             self._emit_event(
                 session,
                 run,
-                f"Cycle {cycle_id} running in analysis mode ({msi['label']})",
-                stage="analysis_only",
-                payload={"market_session": msi["label"]},
+                f"Cycle {cycle_id} started",
+                stage="starting",
+                payload={"market_session": msi["label"], "total_tickers": len(tickers)},
             )
-            logger.info(
-                "[live] Cycle %s market is %s — running in ANALYSIS mode (no orders)",
-                cycle_id,
-                msi["label"],
-            )
+            logger.info("[live] Cycle %s started — %s", cycle_id, msi["context_string"])
 
-        if not tickers:
-            summary = {"cycle_id": cycle_id, "error": "No tickers configured for live trading"}
+            if dry_run:
+                self._update_run(session, run, stage="analysis_only", current_agent=None)
+                self._emit_event(
+                    session,
+                    run,
+                    f"Cycle {cycle_id} running in analysis mode ({msi['label']})",
+                    stage="analysis_only",
+                    payload={"market_session": msi["label"]},
+                )
+                logger.info(
+                    "[live] Cycle %s market is %s — running in ANALYSIS mode (no orders)",
+                    cycle_id,
+                    msi["label"],
+                )
+
+            if not tickers:
+                summary = {"cycle_id": cycle_id, "error": "No tickers configured for live trading"}
+                self.runtime.finish_run(
+                    session,
+                    run,
+                    status="COMPLETED",
+                    stage="no_tickers",
+                    current_ticker=None,
+                    current_agent=None,
+                    total_tickers=0,
+                    completed_tickers=0,
+                    summary=summary,
+                    error_message=None,
+                )
+                self._emit_event(
+                    session,
+                    run,
+                    f"Cycle {cycle_id} skipped: no live tickers configured",
+                    level="warn",
+                    stage="no_tickers",
+                    payload={"reason": "no_tickers_configured"},
+                )
+                return summary
+
+            if not dry_run:
+                try:
+                    self._update_run(session, run, stage="bar_refresh", current_agent=None)
+                    self._refresh_bars(session, tickers)
+                except Exception as exc:
+                    self._emit_event(session, run, f"Cycle {cycle_id} bar refresh failed: {exc}", level="warn", stage="bar_refresh")
+                    logger.warning("[live] Bar refresh failed (continuing): %s", exc)
+
+            cycle_start = datetime.now(timezone.utc)
+            new_article_count = 0
+            try:
+                self._update_run(session, run, stage="ingestion", current_agent=None)
+                ingestion = IngestionService(self.settings)
+                ingestion.run(
+                    session,
+                    profile="live_fast",
+                    tickers=tickers,
+                )
+                new_article_count = count_new_raw_items(session, cycle_start)
+            except Exception as exc:
+                self._emit_event(session, run, f"Cycle {cycle_id} ingestion failed: {exc}", level="warn", stage="ingestion")
+                logger.warning("[live] Ingestion failed (continuing): %s", exc)
+
+            if not dry_run:
+                last_global_run = self._get_last_agent_run_time(session, ticker=None)
+                time_since_last = (
+                    (cycle_start - last_global_run).total_seconds() / 60 if last_global_run else 999
+                )
+                if new_article_count == 0 and time_since_last < 30:
+                    summary = {
+                        "cycle_id": cycle_id,
+                        "skipped": True,
+                        "reason": "no_new_articles",
+                        "new_articles": 0,
+                        "market_time": msi["et_time_str"],
+                        "run_key": run.run_key,
+                    }
+                    self.runtime.finish_run(
+                        session,
+                        run,
+                        status="COMPLETED",
+                        stage="skipped_no_news",
+                        current_ticker=None,
+                        current_agent=None,
+                        summary=summary,
+                    )
+                    self._emit_event(
+                        session,
+                        run,
+                        f"Cycle {cycle_id} skipped: no new articles",
+                        stage="skipped_no_news",
+                        payload={"reason": "no_new_articles"},
+                    )
+                    logger.info(
+                        "[live] Cycle %s: no new articles (last run %.0f min ago) — skipping agents",
+                        cycle_id,
+                        time_since_last,
+                    )
+                    return summary
+
+            broker = AlpacaBroker(self.settings)
+            portfolio_value = 100_000.0
+            try:
+                self._update_run(session, run, stage="broker_state", current_agent=None)
+                portfolio_value = broker.get_portfolio_value()
+            except Exception as exc:
+                if not dry_run:
+                    summary = {"cycle_id": cycle_id, "error": f"Broker error: {exc}", "run_key": run.run_key}
+                    self.runtime.finish_run(
+                        session,
+                        run,
+                        status="ERROR",
+                        stage="broker_error",
+                        error_message=f"Broker error: {exc}",
+                        summary=summary,
+                    )
+                    logger.error("[live] Cannot fetch portfolio value: %s", exc)
+                    return summary
+                logger.warning("[live] Broker unavailable in analysis mode: %s", exc)
+
+            results = []
+            for idx, ticker in enumerate(tickers, start=1):
+                try:
+                    self._update_run(
+                        session,
+                        run,
+                        stage="processing_ticker",
+                        current_ticker=ticker,
+                        current_agent="agent_graph",
+                        completed_tickers=idx - 1,
+                        total_tickers=len(tickers),
+                    )
+                    result = self._process_ticker(
+                        session,
+                        broker,
+                        ticker,
+                        portfolio_value,
+                        cycle_id,
+                        msi,
+                        dry_run=dry_run,
+                        run=run,
+                    )
+                    results.append(result)
+                    self._emit_event(
+                        session,
+                        run,
+                        f"{ticker} -> {result.get('action', 'HOLD')}",
+                        stage="ticker_completed",
+                        ticker=ticker,
+                        payload={
+                            "status": "ok" if not result.get("error") else "error",
+                            "action": result.get("action"),
+                            "order_placed": bool(result.get("order_placed")),
+                        },
+                    )
+                except Exception as exc:
+                    logger.exception("[live] Error processing %s: %s", ticker, exc)
+                    results.append({"ticker": ticker, "error": str(exc)})
+                    self._emit_event(
+                        session,
+                        run,
+                        f"{ticker} processing failed: {exc}",
+                        level="error",
+                        stage="ticker_failed",
+                        ticker=ticker,
+                    )
+                finally:
+                    self._update_run(session, run, completed_tickers=idx, total_tickers=len(tickers))
+
+            summary = {
+                "cycle_id": cycle_id,
+                "market_time": msi["et_time_str"],
+                "market_session": msi["label"],
+                "dry_run": dry_run,
+                "portfolio_value": portfolio_value,
+                "tickers_processed": len(tickers),
+                "new_articles": new_article_count,
+                "orders_placed": sum(1 for r in results if r.get("order_placed")),
+                "results": results,
+                "run_key": run.run_key,
+            }
+            logger.info(
+                "[live] Cycle %s done — %d/%d orders placed%s",
+                cycle_id,
+                summary["orders_placed"],
+                len(tickers),
+                " (ANALYSIS MODE)" if dry_run else "",
+            )
             self.runtime.finish_run(
                 session,
                 run,
                 status="COMPLETED",
-                stage="no_tickers",
+                stage="completed",
                 current_ticker=None,
                 current_agent=None,
-                total_tickers=0,
-                completed_tickers=0,
+                completed_tickers=len(tickers),
+                total_tickers=len(tickers),
                 summary=summary,
                 error_message=None,
             )
             self._emit_event(
                 session,
                 run,
-                f"Cycle {cycle_id} skipped: no live tickers configured",
-                level="warn",
-                stage="no_tickers",
-                payload={"reason": "no_tickers_configured"},
+                f"Cycle {cycle_id} completed: {summary['orders_placed']} orders",
+                stage="completed",
+                payload={"orders_placed": summary["orders_placed"], "dry_run": dry_run},
             )
+            try:
+                log_live_cycle(cycle_id, summary)
+            except Exception:
+                pass
             return summary
-
-        if not dry_run:
-            try:
-                self._update_run(session, run, stage="bar_refresh", current_agent=None)
-                self._refresh_bars(session, tickers)
-            except Exception as exc:
-                self._emit_event(session, run, f"Cycle {cycle_id} bar refresh failed: {exc}", level="warn", stage="bar_refresh")
-                logger.warning("[live] Bar refresh failed (continuing): %s", exc)
-
-        cycle_start = datetime.now(timezone.utc)
-        new_article_count = 0
-        try:
-            self._update_run(session, run, stage="ingestion", current_agent=None)
-            ingestion = IngestionService(self.settings)
-            ingestion.run(
-                session,
-                profile="live_fast",
-                tickers=tickers,
-            )
-            new_article_count = count_new_raw_items(session, cycle_start)
-        except Exception as exc:
-            self._emit_event(session, run, f"Cycle {cycle_id} ingestion failed: {exc}", level="warn", stage="ingestion")
-            logger.warning("[live] Ingestion failed (continuing): %s", exc)
-
-        if not dry_run:
-            last_global_run = self._get_last_agent_run_time(session, ticker=None)
-            time_since_last = (
-                (cycle_start - last_global_run).total_seconds() / 60 if last_global_run else 999
-            )
-            if new_article_count == 0 and time_since_last < 30:
-                summary = {
-                    "cycle_id": cycle_id,
-                    "skipped": True,
-                    "reason": "no_new_articles",
-                    "new_articles": 0,
-                    "market_time": msi["et_time_str"],
-                    "run_key": run.run_key,
-                }
-                self.runtime.finish_run(
-                    session,
-                    run,
-                    status="COMPLETED",
-                    stage="skipped_no_news",
-                    current_ticker=None,
-                    current_agent=None,
-                    summary=summary,
-                )
-                self._emit_event(
-                    session,
-                    run,
-                    f"Cycle {cycle_id} skipped: no new articles",
-                    stage="skipped_no_news",
-                    payload={"reason": "no_new_articles"},
-                )
-                logger.info(
-                    "[live] Cycle %s: no new articles (last run %.0f min ago) — skipping agents",
-                    cycle_id,
-                    time_since_last,
-                )
-                return summary
-
-        broker = AlpacaBroker(self.settings)
-        portfolio_value = 100_000.0
-        try:
-            self._update_run(session, run, stage="broker_state", current_agent=None)
-            portfolio_value = broker.get_portfolio_value()
-        except Exception as exc:
-            if not dry_run:
-                summary = {"cycle_id": cycle_id, "error": f"Broker error: {exc}", "run_key": run.run_key}
-                self.runtime.finish_run(
-                    session,
-                    run,
-                    status="ERROR",
-                    stage="broker_error",
-                    error_message=f"Broker error: {exc}",
-                    summary=summary,
-                )
-                logger.error("[live] Cannot fetch portfolio value: %s", exc)
-                return summary
-            logger.warning("[live] Broker unavailable in analysis mode: %s", exc)
-
-        results = []
-        for idx, ticker in enumerate(tickers, start=1):
-            try:
-                self._update_run(
-                    session,
-                    run,
-                    stage="processing_ticker",
-                    current_ticker=ticker,
-                    current_agent="agent_graph",
-                    completed_tickers=idx - 1,
-                    total_tickers=len(tickers),
-                )
-                result = self._process_ticker(
-                    session,
-                    broker,
-                    ticker,
-                    portfolio_value,
-                    cycle_id,
-                    msi,
-                    dry_run=dry_run,
-                    run=run,
-                )
-                results.append(result)
-                self._emit_event(
-                    session,
-                    run,
-                    f"{ticker} -> {result.get('action', 'HOLD')}",
-                    stage="ticker_completed",
-                    ticker=ticker,
-                    payload={
-                        "status": "ok" if not result.get("error") else "error",
-                        "action": result.get("action"),
-                        "order_placed": bool(result.get("order_placed")),
-                    },
-                )
-            except Exception as exc:
-                logger.exception("[live] Error processing %s: %s", ticker, exc)
-                results.append({"ticker": ticker, "error": str(exc)})
-                self._emit_event(
-                    session,
-                    run,
-                    f"{ticker} processing failed: {exc}",
-                    level="error",
-                    stage="ticker_failed",
-                    ticker=ticker,
-                )
-            finally:
-                self._update_run(session, run, completed_tickers=idx, total_tickers=len(tickers))
-
-        summary = {
-            "cycle_id": cycle_id,
-            "market_time": msi["et_time_str"],
-            "market_session": msi["label"],
-            "dry_run": dry_run,
-            "portfolio_value": portfolio_value,
-            "tickers_processed": len(tickers),
-            "new_articles": new_article_count,
-            "orders_placed": sum(1 for r in results if r.get("order_placed")),
-            "results": results,
-            "run_key": run.run_key,
-        }
-        logger.info(
-            "[live] Cycle %s done — %d/%d orders placed%s",
-            cycle_id,
-            summary["orders_placed"],
-            len(tickers),
-            " (ANALYSIS MODE)" if dry_run else "",
-        )
-        self.runtime.finish_run(
-            session,
-            run,
-            status="COMPLETED",
-            stage="completed",
-            current_ticker=None,
-            current_agent=None,
-            completed_tickers=len(tickers),
-            total_tickers=len(tickers),
-            summary=summary,
-            error_message=None,
-        )
-        self._emit_event(
-            session,
-            run,
-            f"Cycle {cycle_id} completed: {summary['orders_placed']} orders",
-            stage="completed",
-            payload={"orders_placed": summary["orders_placed"], "dry_run": dry_run},
-        )
-        try:
-            log_live_cycle(cycle_id, summary)
-        except Exception:
-            pass
-        return summary
+        finally:
+            _LIVE_CYCLE_MUTEX.release()
 
     def _update_run(self, session: Session, run: WorkerRun, **fields: Any) -> None:
         self.runtime.update_run(session, run, **fields)
@@ -496,6 +509,38 @@ class LiveTradingService:
         if run is not None:
             self.runtime.update_run(session, run, stage="pricing", current_ticker=ticker, current_agent=None)
             session.commit()
+        cache_is_fresh, cache_age_minutes = self.market_data.is_ticker_cache_fresh(
+            session,
+            ticker,
+            max_age_minutes=self.settings.live_data_max_age_minutes,
+        )
+        if not cache_is_fresh:
+            freshness_label = (
+                f"{cache_age_minutes:.1f}m old"
+                if cache_age_minutes is not None
+                else "missing"
+            )
+            self._record_live_trade(
+                session,
+                cycle_id=cycle_id,
+                ticker=ticker,
+                agent_run_id=agent_run_id,
+                action=desired_action,
+                quantity=0,
+                target_pct=target_pct,
+                order_id=None,
+                status="skipped",
+                et_time=msi["et_time_str"],
+                market_session=msi["label"],
+                reasoning=f"Local market data is stale ({freshness_label}); order suppressed",
+            )
+            return {
+                "ticker": ticker,
+                "action": desired_action,
+                "order_placed": False,
+                "reason": "stale_market_data",
+                "cache_age_minutes": cache_age_minutes,
+            }
         current_price = broker.get_latest_price(ticker)
         if not current_price or current_price <= 0:
             logger.warning("[live] No price for %s — skipping", ticker)

@@ -28,6 +28,8 @@ from app.services.worker_runtime import (
     COMMAND_RUN_BACKTEST,
     COMMAND_RUN_INGESTION,
     COMMAND_RUN_LIVE_CYCLE,
+    HIGH_PRIORITY_COMMAND_TYPES,
+    LOW_PRIORITY_COMMAND_TYPES,
     WorkerRuntimeService,
 )
 
@@ -215,19 +217,15 @@ def _reconcile_orphaned_state() -> None:
         logger.exception("[worker] orphaned state reconciliation failed: %s", exc)
 
 
-def _process_worker_commands() -> None:
+def _process_worker_commands(command_types: list[str], *, block_on_higher_priority: list[str] | None = None) -> None:
     try:
         while True:
             with db_session() as session:
+                if block_on_higher_priority and runtime.has_open_commands(session, block_on_higher_priority):
+                    return
                 command = runtime.claim_next_command(
                     session,
-                    [
-                        COMMAND_RUN_INGESTION,
-                        COMMAND_REFRESH_BARS,
-                        COMMAND_RUN_LIVE_CYCLE,
-                        COMMAND_REFRESH_EARNINGS,
-                        COMMAND_RUN_BACKTEST,
-                    ],
+                    command_types,
                 )
                 if command is None:
                     return
@@ -454,11 +452,22 @@ def _start_scheduler() -> BackgroundScheduler:
                 replace_existing=True,
             )
         sched.add_job(
-            _process_worker_commands,
+            lambda: _process_worker_commands(HIGH_PRIORITY_COMMAND_TYPES),
+            "interval",
+            seconds=3,
+            max_instances=1,
+            id="worker_commands_high",
+            replace_existing=True,
+        )
+        sched.add_job(
+            lambda: _process_worker_commands(
+                LOW_PRIORITY_COMMAND_TYPES,
+                block_on_higher_priority=HIGH_PRIORITY_COMMAND_TYPES,
+            ),
             "interval",
             seconds=5,
             max_instances=1,
-            id="worker_commands",
+            id="worker_commands_low",
             replace_existing=True,
         )
         sched.add_job(
@@ -525,7 +534,11 @@ def main() -> None:
         _scheduled_health_audit()
     if settings.earnings_calendar_auto_refresh:
         _scheduled_earnings_refresh()
-    _process_worker_commands()
+    _process_worker_commands(HIGH_PRIORITY_COMMAND_TYPES)
+    _process_worker_commands(
+        LOW_PRIORITY_COMMAND_TYPES,
+        block_on_higher_priority=HIGH_PRIORITY_COMMAND_TYPES,
+    )
 
     logger.info("Worker running: scheduler/background jobs active")
     while not _shutdown.is_set():

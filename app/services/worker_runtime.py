@@ -4,7 +4,7 @@ from datetime import datetime
 import uuid
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import case, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.core.utils import ensure_utc, utc_now
@@ -16,6 +16,22 @@ COMMAND_REFRESH_BARS = "refresh_bars"
 COMMAND_RUN_LIVE_CYCLE = "run_live_cycle"
 COMMAND_REFRESH_EARNINGS = "refresh_earnings_calendar"
 COMMAND_RUN_BACKTEST = "run_backtest"
+
+HIGH_PRIORITY_COMMAND_TYPES = [
+    COMMAND_RUN_LIVE_CYCLE,
+    COMMAND_REFRESH_BARS,
+    COMMAND_RUN_INGESTION,
+    COMMAND_REFRESH_EARNINGS,
+]
+LOW_PRIORITY_COMMAND_TYPES = [COMMAND_RUN_BACKTEST]
+
+COMMAND_PRIORITY = {
+    COMMAND_RUN_LIVE_CYCLE: 0,
+    COMMAND_REFRESH_BARS: 1,
+    COMMAND_RUN_INGESTION: 2,
+    COMMAND_REFRESH_EARNINGS: 3,
+    COMMAND_RUN_BACKTEST: 9,
+}
 
 
 class WorkerRuntimeService:
@@ -43,10 +59,15 @@ class WorkerRuntimeService:
         session: Session,
         command_types: list[str] | None = None,
     ) -> WorkerCommand | None:
+        priority_order = case(
+            COMMAND_PRIORITY,
+            value=WorkerCommand.command_type,
+            else_=50,
+        )
         stmt = (
             select(WorkerCommand)
             .where(WorkerCommand.status == "PENDING")
-            .order_by(WorkerCommand.created_at.asc(), WorkerCommand.id.asc())
+            .order_by(priority_order.asc(), WorkerCommand.created_at.asc(), WorkerCommand.id.asc())
             .limit(1)
         )
         if command_types:
@@ -252,6 +273,17 @@ class WorkerRuntimeService:
             "open": int(counts.get("PENDING", 0) + counts.get("RUNNING", 0)),
             "recent": [self._serialize_command(row) for row in rows],
         }
+
+    def has_open_commands(self, session: Session, command_types: list[str]) -> bool:
+        if not command_types:
+            return False
+        open_count = session.execute(
+            select(func.count(WorkerCommand.id)).where(
+                WorkerCommand.command_type.in_(command_types),
+                WorkerCommand.status.in_(["PENDING", "RUNNING"]),
+            )
+        ).scalar_one()
+        return int(open_count or 0) > 0
 
     def worker_status_snapshot(self, session: Session) -> dict[str, Any]:
         return {
