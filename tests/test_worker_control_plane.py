@@ -8,6 +8,8 @@ from fastapi import HTTPException
 from app.api.routes import set_live_enabled
 from app.core.utils import utc_now
 from app.db.models import BacktestRun, WorkerCommand, WorkerRun
+from app.ingestion.service import IngestionService
+from app.ingestion.types import SourceCheck
 from app.services.runtime_control import CONTROL_WORKER_HEARTBEAT, RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
@@ -198,7 +200,6 @@ def test_set_live_enabled_queues_commands_when_worker_and_supervisor_online(sess
     assert result["enabled"] is True
     commands = session.query(WorkerCommand).order_by(WorkerCommand.id.asc()).all()
     assert [command.command_type for command in commands] == [
-        "run_ingestion_validation",
         "refresh_bars",
         "run_live_cycle",
     ]
@@ -215,6 +216,7 @@ def test_set_live_enabled_disables_and_cancels_pending_live_commands(session, se
     runtime.queue_command(session, COMMAND_RUN_INGESTION, payload={"trigger": "enable_live"}, requested_by="pytest")
     runtime.queue_command(session, COMMAND_REFRESH_BARS, payload={"trigger": "enable_live"}, requested_by="pytest")
     runtime.queue_command(session, COMMAND_RUN_LIVE_CYCLE, payload={"trigger": "enable_live"}, requested_by="pytest")
+    runtime.queue_command(session, COMMAND_RUN_INGESTION, payload={"trigger": "api"}, requested_by="pytest")
 
     result = set_live_enabled(body={"enabled": False}, session=session, settings=settings)
 
@@ -222,8 +224,25 @@ def test_set_live_enabled_disables_and_cancels_pending_live_commands(session, se
     assert "Cancelled 3 pending live commands" in result["message"]
 
     commands = session.query(WorkerCommand).order_by(WorkerCommand.id.asc()).all()
-    assert [command.status for command in commands] == ["CANCELLED", "CANCELLED", "CANCELLED"]
+    assert [command.status for command in commands] == ["CANCELLED", "CANCELLED", "CANCELLED", "PENDING"]
 
     queue = runtime.command_queue_snapshot(session)
-    assert queue["pending"] == 0
+    assert queue["pending"] == 1
     assert queue["cancelled"] == 3
+
+
+def test_fast_ingestion_profile_skips_sec(session, settings) -> None:
+    svc = IngestionService(settings)
+
+    def _sec_fetch(_session):
+        raise AssertionError("SEC fetch should not run in fast profile")
+
+    svc.sec.fetch = _sec_fetch  # type: ignore[method-assign]
+    svc.rss.fetch = lambda: ([], [])  # type: ignore[method-assign]
+    svc.rss.fetch_ticker_news = lambda tickers: ([], [])  # type: ignore[method-assign]
+    svc.finnhub.fetch = lambda: ([], SourceCheck(source_key="finnhub", source_name="finnhub", source_type="news", display_name="Finnhub", status="ONLINE"))  # type: ignore[method-assign]
+    svc.earnings_release.fetch_recent = lambda _session: ([], SourceCheck(source_key="earnings_release", source_name="earnings_release", source_type="earnings", display_name="Earnings Release", status="ONLINE"))  # type: ignore[method-assign]
+
+    result = svc.run(session, profile="live_fast", tickers=["AAPL", "MSFT"])
+    assert result.fetched == 0
+    assert result.inserted == 0

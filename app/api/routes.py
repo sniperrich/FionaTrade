@@ -1224,12 +1224,6 @@ def set_live_enabled(
         write_control.set_live_enabled(write_session, settings, enabled, source="api")
         cancelled_commands = 0
         if enabled and not local_was_enabled:
-            write_runtime.queue_command(
-                write_session,
-                COMMAND_RUN_INGESTION,
-                payload={"trigger": "enable_live"},
-                requested_by="api",
-            )
             today = utc_now().strftime("%Y-%m-%d")
             tomorrow = (utc_now() + timedelta(days=1)).strftime("%Y-%m-%d")
             write_runtime.queue_command(
@@ -1256,6 +1250,7 @@ def set_live_enabled(
                 write_session,
                 command_types=[COMMAND_RUN_INGESTION, COMMAND_REFRESH_BARS, COMMAND_RUN_LIVE_CYCLE],
                 reason="live trading disabled from control plane",
+                trigger="enable_live",
             )
         return {
             "was_enabled": local_was_enabled,

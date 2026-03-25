@@ -42,25 +42,47 @@ class IngestionService:
         rows = session.execute(select(RawItem.title).where(RawItem.ingested_at >= cutoff)).all()
         return {normalize_title(r[0]) for r in rows}
 
-    def _collect(self, session: Session) -> tuple[list[RawNewsItem], list[SourceCheck]]:
+    def _live_tickers(self, requested: list[str] | None = None) -> list[str]:
+        if requested:
+            return [str(t).upper().strip() for t in requested if str(t).strip()]
+        preferred = list(self.settings.live_trading_tickers or list(self.settings.agent_tickers_override or []))
+        if preferred:
+            return [str(t).upper().strip() for t in preferred if str(t).strip()]
+        max_tickers = self.settings.ticker_rss_max_tickers
+        if max_tickers > 0:
+            return list(self.settings.sp100_tickers[:max_tickers])
+        return list(self.settings.sp100_tickers)
+
+    def _collect(
+        self,
+        session: Session,
+        *,
+        profile: str = "full",
+        tickers: list[str] | None = None,
+    ) -> tuple[list[RawNewsItem], list[SourceCheck]]:
         items: list[RawNewsItem] = []
         checks: list[SourceCheck] = []
+        fast_profile = profile in {"fast", "live_fast", "scheduled_fast"}
 
-        sec_items, sec_check = self.sec.fetch(session)
-        items.extend(sec_items)
-        checks.append(sec_check)
+        if not fast_profile:
+            sec_items, sec_check = self.sec.fetch(session)
+            items.extend(sec_items)
+            checks.append(sec_check)
 
         rss_items, rss_checks = self.rss.fetch()
         items.extend(rss_items)
         checks.extend(rss_checks)
 
         # Per-ticker Yahoo Finance RSS (ticker-specific headlines, tier 1)
-        max_tickers = self.settings.ticker_rss_max_tickers
-        tickers_to_fetch = (
-            self.settings.sp100_tickers[:max_tickers]
-            if max_tickers > 0
-            else self.settings.sp100_tickers
-        )
+        if fast_profile:
+            tickers_to_fetch = self._live_tickers(tickers)
+        else:
+            max_tickers = self.settings.ticker_rss_max_tickers
+            tickers_to_fetch = (
+                self.settings.sp100_tickers[:max_tickers]
+                if max_tickers > 0
+                else self.settings.sp100_tickers
+            )
         ticker_rss_items, ticker_rss_checks = self.rss.fetch_ticker_news(tickers_to_fetch)
         items.extend(ticker_rss_items)
         checks.extend(ticker_rss_checks)
@@ -192,8 +214,14 @@ class IngestionService:
             raw_item_ids=raw_ids,
         )
 
-    def run(self, session: Session) -> IngestionResult:
-        fetched_items, checks = self._collect(session)
+    def run(
+        self,
+        session: Session,
+        *,
+        profile: str = "full",
+        tickers: list[str] | None = None,
+    ) -> IngestionResult:
+        fetched_items, checks = self._collect(session, profile=profile, tickers=tickers)
         return self.persist_items(session, fetched_items, checks)
 
     def refresh_macro_indicators(self, session: Session) -> dict:

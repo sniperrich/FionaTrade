@@ -92,6 +92,7 @@ class WorkerRuntimeService:
         *,
         command_types: list[str],
         reason: str,
+        trigger: str | None = None,
     ) -> int:
         rows = session.execute(
             select(WorkerCommand)
@@ -101,6 +102,11 @@ class WorkerRuntimeService:
             )
             .order_by(WorkerCommand.created_at.asc(), WorkerCommand.id.asc())
         ).scalars().all()
+        if trigger is not None:
+            rows = [
+                row for row in rows
+                if str((row.payload_json or {}).get("trigger") or "") == trigger
+            ]
         now = utc_now()
         for row in rows:
             row.status = "CANCELLED"

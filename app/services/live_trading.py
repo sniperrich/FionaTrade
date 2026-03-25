@@ -133,7 +133,11 @@ class LiveTradingService:
         try:
             self._update_run(session, run, stage="ingestion", current_agent=None)
             ingestion = IngestionService(self.settings)
-            ingestion.run(session)
+            ingestion.run(
+                session,
+                profile="live_fast",
+                tickers=tickers,
+            )
             new_article_count = count_new_raw_items(session, cycle_start)
         except Exception as exc:
             self._emit_event(session, run, f"Cycle {cycle_id} ingestion failed: {exc}", level="warn", stage="ingestion")

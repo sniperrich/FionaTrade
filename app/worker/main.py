@@ -51,7 +51,11 @@ def _is_live_enabled() -> bool:
 def _scheduled_ingestion() -> None:
     try:
         with db_session() as session:
-            ingest_result = IngestionService(settings).run(session)
+            ingest_result = IngestionService(settings).run(
+                session,
+                profile="scheduled_fast",
+                tickers=market_data.tracked_tickers(),
+            )
             log_writeout(
                 "ingestion_tick",
                 {
@@ -246,7 +250,11 @@ def _execute_claimed_command(command_id: int) -> None:
                 if not _is_live_enabled() and str(payload.get("trigger")) == "enable_live":
                     result = {"skipped": True, "reason": "live_disabled"}
                 else:
-                    ingest_result = IngestionService(settings).run(session)
+                    ingest_result = IngestionService(settings).run(
+                        session,
+                        profile=str(payload.get("profile", "full") or "full"),
+                        tickers=payload.get("tickers"),
+                    )
                     result = {
                         "fetched": ingest_result.fetched,
                         "inserted": ingest_result.inserted,
