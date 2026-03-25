@@ -25,6 +25,7 @@ class AgentState(TypedDict, total=False):
     final_action: str      # BUY | SHORT | SELL | HOLD
     final_position_pct: float
     final_reasoning: str
+    execution_plan: dict[str, Any]
 
     # Execution metadata
     error: str | None

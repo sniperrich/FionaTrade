@@ -319,6 +319,24 @@
   </div>
 </div>
 
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">Entry Plans</div>
+    <span class="text-muted text-sm" id="entry-plans-updated">Waiting…</span>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>ID</th><th>Ticker</th><th>Mode</th><th>Planned Action</th>
+        <th class="num">Target %</th><th>Valid Until</th><th>Status</th><th>Trigger</th><th></th>
+      </tr></thead>
+      <tbody id="entry-plans-body">
+        <tr><td colspan="9" class="empty-state">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <!-- Trade history -->
 <div class="card">
   <div class="section-header mb8">
@@ -586,6 +604,48 @@ async function loadTradeHistory(data=null){
       </div></td></tr>`;
     }).join('');
   } catch(e){}
+}
+
+async function loadEntryPlans(data=null){
+  try{
+    const d=data || await apiFetch('/api/live/plans?limit=100');
+    const rows=d.items||[];
+    document.getElementById('entry-plans-updated').textContent=`Updated ${new Date().toLocaleTimeString()} · active ${d.active_count||0}`;
+    if(!rows.length){
+      document.getElementById('entry-plans-body').innerHTML='<tr><td colspan="9" class="empty-state text-muted">No entry plans</td></tr>';
+      return;
+    }
+    document.getElementById('entry-plans-body').innerHTML=rows.map(plan=>{
+      const trigger=plan.trigger||{};
+      const triggerText = Object.entries(trigger).map(([k,v])=>`${k}=${v}`).join(', ');
+      const canCancel = String(plan.status||'').toUpperCase() === 'ACTIVE';
+      return `<tr>
+        <td class="mono text-xs">${plan.id}</td>
+        <td class="bold">${escapeHtml(plan.ticker || '—')}</td>
+        <td><span class="badge badge-purple">${escapeHtml(plan.execution_mode || '—')}</span></td>
+        <td>${actionBadge(plan.planned_action || 'HOLD')}</td>
+        <td class="num">${((plan.target_pct||0) * 100).toFixed(1)}%</td>
+        <td class="text-muted text-xs">${plan.valid_until ? fmtAgo(plan.valid_until) : '—'}</td>
+        <td>${statusBadge(plan.status || '—')}</td>
+        <td class="text-muted text-xs">${escapeHtml(triggerText || plan.trigger_reason || '—')}</td>
+        <td>${canCancel ? `<button class="btn btn-ghost btn-xs" onclick="cancelEntryPlan(${plan.id})">Cancel</button>` : '—'}</td>
+      </tr>`;
+    }).join('');
+  } catch(e){
+    document.getElementById('entry-plans-body').innerHTML=`<tr><td colspan="9" class="empty-state text-red">Entry plans unavailable: ${e.message}</td></tr>`;
+  }
+}
+
+async function cancelEntryPlan(planId){
+  if(!confirm(`Cancel entry plan ${planId}?`)) return;
+  try{
+    const d=await apiFetch(`/api/live/plans/${planId}/cancel`, {method:'POST'});
+    clearViewCache(LIVE_CACHE_PREFIX);
+    toast(d.message || `Cancelled plan ${planId}`,'success');
+    setTimeout(refreshAll,1000);
+  } catch(e){
+    toast('Error: '+e.message,'error');
+  }
 }
 
 function updateLiveTradesPager(count, hasMore){
@@ -932,6 +992,7 @@ function hydrateLiveSnapshot(snapshot){
   if(snapshot.positions) loadPositions(snapshot.positions);
   if(snapshot.orders) loadOpenOrders(snapshot.orders);
   if(snapshot.trades) loadTradeHistory(snapshot.trades);
+  if(snapshot.plans) loadEntryPlans(snapshot.plans);
   if(snapshot.market) loadMarketStatus(snapshot.market);
   if(snapshot.portfolio_history) loadPortfolioHistory(snapshot.portfolio_history);
   if(snapshot.bars) loadTickerChart(snapshot.bars);
@@ -963,6 +1024,7 @@ async function refreshAll(){
       loadPositions(),
       loadOpenOrders(),
       loadTradeHistory(),
+      loadEntryPlans(),
       loadMarketStatus(),
       loadRuntimeStatus(),
       loadWorkerHistory(),
@@ -979,6 +1041,7 @@ refreshAll();
 setInterval(loadRuntimeStatus,5000);
 setInterval(loadWorkerHistory,7000);
 setInterval(loadBarCacheStatus,10000);
+setInterval(loadEntryPlans,10000);
 setInterval(refreshAll,15000);
 </script>
 {% endblock %}

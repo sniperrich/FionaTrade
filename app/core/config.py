@@ -187,6 +187,11 @@ class Settings(BaseSettings):
     live_allow_premarket: bool = False
     # Refuse new live orders when local Bar1m cache is older than this threshold.
     live_data_max_age_minutes: float = 20.0
+    # Entry-planning controls (Live First v1).
+    live_entry_planning_enabled: bool = True
+    live_entry_plan_default_valid_minutes: int = 180
+    live_entry_plan_breakout_lookback_min: int = 15
+    live_entry_plan_default_pullback_pct: float = 0.5
 
     @field_validator("agent_tickers_override", "live_trading_tickers", mode="before")
     @classmethod

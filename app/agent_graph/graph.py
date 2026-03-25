@@ -187,6 +187,7 @@ class AgentGraph:
         state["final_action"] = meta.get("action", result.signal)
         state["final_position_pct"] = meta.get("position_pct", 0.0)
         state["final_reasoning"] = result.reasoning
+        state["execution_plan"] = dict(meta.get("execution_plan") or {})
         if progress_callback:
             progress_callback({"stage": "portfolio_manager_completed", "agent": "portfolio_manager", "message": f"{ticker}: final {state['final_action']} {state['final_position_pct'] * 100:.1f}%"})
         return state
@@ -240,6 +241,7 @@ class AgentGraph:
             state.setdefault("final_action", "HOLD")
             state.setdefault("final_position_pct", 0.0)
             state.setdefault("final_reasoning", f"Graph error: {exc}")
+            state.setdefault("execution_plan", {})
 
         elapsed = time.perf_counter() - start_time
         self._persist_run(session, ticker, state, elapsed)

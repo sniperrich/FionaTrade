@@ -14,7 +14,7 @@ from app.core.config import Settings
 from app.core.utils import utc_now
 from app.backtest_engine.service import BacktestEngineService
 from app.db.database import is_sqlite_lock_error
-from app.db.models import BacktestRun, EventEvidence, RawItem, SourceStatus
+from app.db.models import BacktestRun, EntryPlan, EventEvidence, RawItem, SourceStatus
 from app.monitoring.health import HealthAuditService
 from app.services.market_data import MarketDataService
 from app.services.runtime_control import RuntimeControlService
@@ -149,6 +149,26 @@ def _serialize_backtest_run(run: BacktestRun, include_detail: bool = False) -> d
         payload["equity_curve"] = run.equity_curve or []
         payload["trade_log"] = run.trade_log or []
     return payload
+
+
+def _serialize_entry_plan(plan: EntryPlan) -> dict[str, Any]:
+    return {
+        "id": plan.id,
+        "ticker": plan.ticker,
+        "status": plan.status,
+        "execution_mode": plan.execution_mode,
+        "planned_action": plan.planned_action,
+        "target_pct": plan.target_pct,
+        "trigger": plan.trigger_json or {},
+        "anchor_price": plan.anchor_price,
+        "valid_until": plan.valid_until.isoformat() if plan.valid_until else None,
+        "trigger_reason": plan.trigger_reason,
+        "agent_run_id": plan.agent_run_id,
+        "created_at": plan.created_at.isoformat() if plan.created_at else None,
+        "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
+        "triggered_at": plan.triggered_at.isoformat() if plan.triggered_at else None,
+        "cancelled_at": plan.cancelled_at.isoformat() if plan.cancelled_at else None,
+    }
 
 
 @router.get("/health")
@@ -774,6 +794,57 @@ def list_live_trades(
     ]
 
 
+@router.get("/live/plans")
+def list_live_entry_plans(
+    ticker: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    stmt = select(EntryPlan).order_by(desc(EntryPlan.updated_at), desc(EntryPlan.id)).limit(limit)
+    if ticker:
+        stmt = stmt.where(EntryPlan.ticker == ticker.upper().strip())
+    if status:
+        stmt = stmt.where(EntryPlan.status == status.upper().strip())
+    rows = session.execute(stmt).scalars().all()
+    active_count = sum(1 for row in rows if (row.status or "").upper() == "ACTIVE")
+    return {
+        "count": len(rows),
+        "active_count": active_count,
+        "items": [_serialize_entry_plan(row) for row in rows],
+    }
+
+
+@router.post("/live/plans/{plan_id}/cancel")
+def cancel_live_entry_plan(
+    plan_id: int,
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    plan = session.get(EntryPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"entry plan {plan_id} not found")
+    status = (plan.status or "").upper()
+    if status != "ACTIVE":
+        return {
+            "success": False,
+            "message": f"Entry plan {plan_id} is already {status or 'UNKNOWN'}",
+            "plan": _serialize_entry_plan(plan),
+        }
+    plan.status = "CANCELLED"
+    plan.cancelled_at = utc_now()
+    plan.updated_at = utc_now()
+    if not plan.trigger_reason:
+        plan.trigger_reason = "cancelled from control plane"
+    session.flush()
+    _cache_invalidate("live:")
+    _cache_invalidate("ui:")
+    return {
+        "success": True,
+        "message": f"Cancelled entry plan {plan_id}",
+        "plan": _serialize_entry_plan(plan),
+    }
+
+
 @router.get("/live/positions")
 def live_positions(
     settings: Settings = Depends(get_app_settings),
@@ -1107,6 +1178,7 @@ def live_snapshot(
         "positions": None,
         "orders": [],
         "trades": [],
+        "plans": {"count": 0, "active_count": 0, "items": []},
         "portfolio_history": None,
         "bars": None,
         "bar_cache": None,
@@ -1139,6 +1211,16 @@ def live_snapshot(
         )
     except Exception as exc:
         payload["errors"]["trades"] = str(exc)
+
+    try:
+        payload["plans"] = list_live_entry_plans(
+            ticker=trade_ticker,
+            status=None,
+            limit=100,
+            session=session,
+        )
+    except Exception as exc:
+        payload["errors"]["plans"] = str(exc)
 
     try:
         payload["portfolio_history"] = portfolio_history(

@@ -48,6 +48,14 @@ Return a JSON object with these exact fields:
 {{
   "action": "<BUY|SHORT|SELL|HOLD>",
   "position_pct": <float 0.0-0.20, percentage of portfolio to allocate>,
+  "execution_mode": "<IMMEDIATE|WAIT_PULLBACK|WAIT_BREAKOUT_CONFIRMATION|WAIT_UNTIL_OPEN|NO_TRADE>",
+  "planned_action": "<BUY|SHORT|SELL|HOLD>",
+  "valid_for_minutes": <int 5-1440>,
+  "entry_plan": {{
+    "pullback_pct": <float optional>,
+    "breakout_lookback_min": <int optional>,
+    "notes": "<optional short note>"
+  }},
   "conviction": "<HIGH|MEDIUM|LOW>",
   "supporting_agents": ["<agent1>", "<agent2>"],
   "dissenting_agents": ["<agent1>"],
@@ -69,6 +77,8 @@ IMPORTANT RULES:
 10. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
 11. If we already hold a profitable position and agents are mixed, prefer HOLD over reversal
 12. It is FINE to return HOLD — do not force trades just because risk is approved
+13. If direction is clear but timing is poor, use action=HOLD with execution_mode in WAIT_* and set planned_action accordingly
+14. Use execution_mode=IMMEDIATE for direct entries, NO_TRADE when the setup should be ignored entirely
 """
 
 
@@ -167,9 +177,51 @@ class PortfolioManagerAgent(BaseAgent):
             if not risk_approved:
                 action = "HOLD"
 
-            position_pct = min(float(parsed.get("position_pct", 0.0)), max_pct)
+            raw_position_pct = min(float(parsed.get("position_pct", 0.0)), max_pct)
+            position_pct = raw_position_pct
             if action in ("HOLD", "SELL"):
                 position_pct = 0.0
+
+            execution_mode = str(parsed.get("execution_mode", "") or "").upper().strip()
+            if execution_mode not in (
+                "IMMEDIATE",
+                "WAIT_PULLBACK",
+                "WAIT_BREAKOUT_CONFIRMATION",
+                "WAIT_UNTIL_OPEN",
+                "NO_TRADE",
+            ):
+                execution_mode = "IMMEDIATE" if action in ("BUY", "SHORT", "SELL") else "NO_TRADE"
+
+            planned_action = str(parsed.get("planned_action", action) or action).upper().strip()
+            if planned_action not in ("BUY", "SHORT", "SELL", "HOLD"):
+                planned_action = action
+
+            default_valid = max(5, int(getattr(self.settings, "live_entry_plan_default_valid_minutes", 180)))
+            valid_for_minutes = int(parsed.get("valid_for_minutes", default_valid) or default_valid)
+            valid_for_minutes = max(5, min(valid_for_minutes, 1440))
+
+            raw_entry_plan = parsed.get("entry_plan")
+            if not isinstance(raw_entry_plan, dict):
+                raw_entry_plan = {}
+
+            # Keep execution mode consistent with final decision semantics.
+            if not risk_approved:
+                execution_mode = "NO_TRADE"
+                planned_action = "HOLD"
+                raw_entry_plan = {}
+                valid_for_minutes = default_valid
+                planned_position_pct = 0.0
+            elif action == "HOLD" and execution_mode == "IMMEDIATE":
+                execution_mode = "NO_TRADE"
+                planned_position_pct = 0.0
+            elif action in ("BUY", "SHORT", "SELL") and execution_mode.startswith("WAIT_"):
+                # Waiting mode must be expressed as HOLD + planned_action.
+                planned_action = action
+                action = "HOLD"
+                position_pct = 0.0
+                planned_position_pct = raw_position_pct
+            else:
+                planned_position_pct = raw_position_pct if execution_mode.startswith("WAIT_") else 0.0
 
             return AgentSignal(
                 agent_name=self.name,
@@ -184,6 +236,13 @@ class PortfolioManagerAgent(BaseAgent):
                     "dissenting_agents": parsed.get("dissenting_agents", []),
                     "entry_rationale": parsed.get("entry_rationale", ""),
                     "exit_criteria": parsed.get("exit_criteria", ""),
+                    "execution_plan": {
+                        "execution_mode": execution_mode,
+                        "planned_action": planned_action,
+                        "planned_position_pct": planned_position_pct,
+                        "valid_for_minutes": valid_for_minutes,
+                        "entry_plan": raw_entry_plan,
+                    },
                 },
             )
 

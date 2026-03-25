@@ -30,7 +30,7 @@ from app.broker.alpaca import AlpacaBroker
 from app.core.config import Settings
 from app.core.logging import get_app_logger, log_live_cycle
 from app.core.market_hours import market_session_info
-from app.db.models import AgentRun, Bar1m, LiveTrade, WorkerRun
+from app.db.models import AgentRun, Bar1m, EntryPlan, LiveTrade, WorkerRun
 from app.ingestion.service import IngestionService
 from app.services.market_data import MarketDataService
 from app.services.worker_runtime import WorkerRuntimeService
@@ -42,6 +42,7 @@ _MIN_SHARES = 1
 _STOP_LOSS_PCT = 0.05
 _TAKE_PROFIT_RATIO = 2.0
 _LIVE_CYCLE_MUTEX = threading.Lock()
+_WAIT_MODES = {"WAIT_PULLBACK", "WAIT_BREAKOUT_CONFIRMATION", "WAIT_UNTIL_OPEN"}
 
 
 class LiveTradingService:
@@ -211,9 +212,36 @@ class LiveTradingService:
                     return summary
                 logger.warning("[live] Broker unavailable in analysis mode: %s", exc)
 
+            plan_results: list[dict[str, Any]] = []
+            triggered_plan_tickers: set[str] = set()
+            if not dry_run and self.settings.live_entry_planning_enabled:
+                self._update_run(session, run, stage="entry_plans", current_agent=None)
+                self._expire_outdated_entry_plans(session, tickers)
+                plan_eval = self._execute_active_entry_plans(
+                    session=session,
+                    broker=broker,
+                    portfolio_value=portfolio_value,
+                    tickers=tickers,
+                    cycle_id=cycle_id,
+                    msi=msi,
+                    run=run,
+                )
+                plan_results = plan_eval["results"]
+                triggered_plan_tickers = set(plan_eval["triggered_tickers"])
+
             results = []
             for idx, ticker in enumerate(tickers, start=1):
                 try:
+                    if ticker in triggered_plan_tickers:
+                        results.append(
+                            {
+                                "ticker": ticker,
+                                "action": "HOLD",
+                                "order_placed": False,
+                                "reason": "entry_plan_triggered_this_cycle",
+                            }
+                        )
+                        continue
                     self._update_run(
                         session,
                         run,
@@ -268,8 +296,11 @@ class LiveTradingService:
                 "portfolio_value": portfolio_value,
                 "tickers_processed": len(tickers),
                 "new_articles": new_article_count,
-                "orders_placed": sum(1 for r in results if r.get("order_placed")),
+                "orders_placed": sum(1 for r in results if r.get("order_placed")) + sum(1 for r in plan_results if r.get("order_placed")),
+                "plans_triggered": sum(1 for r in plan_results if r.get("order_placed")),
+                "plans_evaluated": len(plan_results),
                 "results": results,
+                "plan_results": plan_results,
                 "run_key": run.run_key,
             }
             logger.info(
@@ -340,6 +371,206 @@ class LiveTradingService:
         if not tickers:
             tickers = list(self.settings.agent_tickers_override or [])
         return [t.upper() for t in tickers if t]
+
+    def _latest_cached_close(self, session: Session, ticker: str) -> float | None:
+        row = session.execute(
+            select(Bar1m.close).where(Bar1m.ticker == ticker).order_by(desc(Bar1m.ts)).limit(1)
+        ).first()
+        if not row:
+            return None
+        try:
+            return float(row[0])
+        except Exception:
+            return None
+
+    def _extract_execution_plan(self, state: dict[str, Any]) -> dict[str, Any]:
+        plan = state.get("execution_plan")
+        if not isinstance(plan, dict):
+            return {}
+        execution_mode = str(plan.get("execution_mode", "") or "").upper().strip()
+        planned_action = str(plan.get("planned_action", "") or "").upper().strip()
+        valid_for_minutes = int(
+            plan.get("valid_for_minutes", getattr(self.settings, "live_entry_plan_default_valid_minutes", 180)) or 180
+        )
+        valid_for_minutes = max(5, min(valid_for_minutes, 1440))
+        planned_position_pct = float(plan.get("planned_position_pct", 0.0) or 0.0)
+        planned_position_pct = max(0.0, min(planned_position_pct, float(self.settings.live_max_position_pct)))
+        entry_plan = plan.get("entry_plan")
+        if not isinstance(entry_plan, dict):
+            entry_plan = {}
+        if execution_mode not in _WAIT_MODES and execution_mode not in ("IMMEDIATE", "NO_TRADE"):
+            execution_mode = "NO_TRADE"
+        if planned_action not in ("BUY", "SHORT", "SELL", "HOLD"):
+            planned_action = "HOLD"
+        return {
+            "execution_mode": execution_mode,
+            "planned_action": planned_action,
+            "planned_position_pct": planned_position_pct,
+            "valid_for_minutes": valid_for_minutes,
+            "entry_plan": entry_plan,
+        }
+
+    def _replace_active_entry_plans(
+        self,
+        session: Session,
+        ticker: str,
+        *,
+        new_status: str,
+        reason: str,
+        replaced_by_id: int | None = None,
+        exclude_plan_id: int | None = None,
+    ) -> int:
+        stmt = select(EntryPlan).where(
+            EntryPlan.ticker == ticker,
+            EntryPlan.status == "ACTIVE",
+        )
+        if exclude_plan_id is not None:
+            stmt = stmt.where(EntryPlan.id != exclude_plan_id)
+        rows = session.execute(stmt).scalars().all()
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            row.status = new_status
+            row.trigger_reason = reason[:1000]
+            row.replaced_by_id = replaced_by_id
+            row.updated_at = now
+            if new_status == "CANCELLED":
+                row.cancelled_at = now
+        if rows:
+            session.flush()
+        return len(rows)
+
+    def _upsert_entry_plan(
+        self,
+        session: Session,
+        *,
+        ticker: str,
+        agent_run_id: int | None,
+        execution_mode: str,
+        planned_action: str,
+        target_pct: float,
+        entry_plan: dict[str, Any],
+        valid_for_minutes: int,
+        anchor_price: float | None,
+        reason: str,
+    ) -> EntryPlan:
+        plan = EntryPlan(
+            ticker=ticker,
+            agent_run_id=agent_run_id,
+            status="ACTIVE",
+            execution_mode=execution_mode,
+            planned_action=planned_action,
+            target_pct=target_pct,
+            trigger_json=entry_plan,
+            anchor_price=anchor_price,
+            valid_until=datetime.now(timezone.utc) + timedelta(minutes=valid_for_minutes),
+            trigger_reason=reason[:1000],
+        )
+        session.add(plan)
+        session.flush()
+        self._replace_active_entry_plans(
+            session,
+            ticker,
+            new_status="REPLACED",
+            reason="superseded by newer entry plan",
+            replaced_by_id=plan.id,
+            exclude_plan_id=plan.id,
+        )
+        return plan
+
+    def _expire_outdated_entry_plans(self, session: Session, tickers: list[str]) -> None:
+        now = datetime.now(timezone.utc)
+        rows = session.execute(
+            select(EntryPlan).where(
+                EntryPlan.ticker.in_(tickers),
+                EntryPlan.status == "ACTIVE",
+                EntryPlan.valid_until.is_not(None),
+            )
+        ).scalars().all()
+        changed = False
+        for row in rows:
+            valid_until = row.valid_until
+            if valid_until is None:
+                continue
+            if valid_until.tzinfo is None:
+                valid_until = valid_until.replace(tzinfo=timezone.utc)
+            if valid_until < now:
+                row.status = "EXPIRED"
+                row.updated_at = now
+                row.trigger_reason = "entry plan expired before trigger"
+                changed = True
+        if changed:
+            session.flush()
+
+    def _price_breakout_range(
+        self,
+        session: Session,
+        ticker: str,
+        lookback_min: int,
+    ) -> tuple[float | None, float | None]:
+        rows = session.execute(
+            select(Bar1m.high, Bar1m.low)
+            .where(Bar1m.ticker == ticker)
+            .order_by(desc(Bar1m.ts))
+            .limit(max(3, lookback_min))
+        ).all()
+        if not rows:
+            return None, None
+        highs = [float(row[0]) for row in rows]
+        lows = [float(row[1]) for row in rows]
+        return max(highs), min(lows)
+
+    def _evaluate_entry_plan_trigger(
+        self,
+        session: Session,
+        plan: EntryPlan,
+        *,
+        current_price: float,
+        msi: dict[str, Any],
+    ) -> tuple[bool, str]:
+        mode = str(plan.execution_mode or "").upper()
+        action = str(plan.planned_action or "").upper()
+        trigger = dict(plan.trigger_json or {})
+
+        if mode == "WAIT_UNTIL_OPEN":
+            if msi.get("label") == "open" and bool(msi.get("tradeable")):
+                return True, "regular session is open"
+            return False, f"waiting for regular open (current={msi.get('label')})"
+
+        if mode == "WAIT_PULLBACK":
+            pullback_pct = float(trigger.get("pullback_pct", self.settings.live_entry_plan_default_pullback_pct) or 0.0)
+            pullback_pct = max(0.05, min(pullback_pct, 10.0))
+            anchor = float(plan.anchor_price or 0.0)
+            if anchor <= 0:
+                return False, "missing anchor price"
+            if action == "BUY":
+                threshold = anchor * (1 - pullback_pct / 100.0)
+                if current_price <= threshold:
+                    return True, f"price {current_price:.2f} <= pullback threshold {threshold:.2f}"
+                return False, f"waiting pullback to <= {threshold:.2f} (now {current_price:.2f})"
+            if action in ("SHORT", "SELL"):
+                threshold = anchor * (1 + pullback_pct / 100.0)
+                if current_price >= threshold:
+                    return True, f"price {current_price:.2f} >= short pullback threshold {threshold:.2f}"
+                return False, f"waiting bounce to >= {threshold:.2f} (now {current_price:.2f})"
+            return False, f"unsupported planned_action={action} for pullback mode"
+
+        if mode == "WAIT_BREAKOUT_CONFIRMATION":
+            lookback_min = int(trigger.get("breakout_lookback_min", self.settings.live_entry_plan_breakout_lookback_min) or 15)
+            lookback_min = max(5, min(lookback_min, 120))
+            range_high, range_low = self._price_breakout_range(session, plan.ticker, lookback_min)
+            if range_high is None or range_low is None:
+                return False, "missing breakout range bars"
+            if action == "BUY":
+                if current_price >= range_high:
+                    return True, f"price {current_price:.2f} >= breakout high {range_high:.2f}"
+                return False, f"waiting breakout above {range_high:.2f} (now {current_price:.2f})"
+            if action in ("SHORT", "SELL"):
+                if current_price <= range_low:
+                    return True, f"price {current_price:.2f} <= breakdown low {range_low:.2f}"
+                return False, f"waiting breakdown below {range_low:.2f} (now {current_price:.2f})"
+            return False, f"unsupported planned_action={action} for breakout mode"
+
+        return False, f"unsupported execution mode={mode}"
 
     def _refresh_bars(self, session: Session, tickers: list[str]) -> None:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -467,6 +698,7 @@ class LiveTradingService:
         desired_action = (state.get("final_action") or "HOLD").upper()
         target_pct = float(state.get("final_position_pct") or 0.0)
         reasoning = (state.get("final_reasoning") or "")[:500]
+        execution_plan = self._extract_execution_plan(state)
         if run is not None:
             self.runtime.update_run(session, run, stage="decision_ready", current_ticker=ticker, current_agent="portfolio_manager")
             session.commit()
@@ -486,7 +718,7 @@ class LiveTradingService:
         except Exception:
             pass
 
-        if desired_action == "HOLD" or dry_run:
+        if dry_run:
             status = "analysis" if dry_run else "skipped"
             self._record_live_trade(
                 session,
@@ -502,10 +734,205 @@ class LiveTradingService:
                 market_session=msi["label"],
                 reasoning=reasoning,
             )
-            if dry_run:
-                return {"ticker": ticker, "action": desired_action, "order_placed": False, "dry_run": True, "reasoning": reasoning}
+            return {"ticker": ticker, "action": desired_action, "order_placed": False, "dry_run": True, "reasoning": reasoning}
+
+        if desired_action == "HOLD" and self.settings.live_entry_planning_enabled:
+            mode = execution_plan.get("execution_mode", "NO_TRADE")
+            planned_action = execution_plan.get("planned_action", "HOLD")
+            if mode in _WAIT_MODES and planned_action in ("BUY", "SHORT", "SELL"):
+                plan = self._upsert_entry_plan(
+                    session,
+                    ticker=ticker,
+                    agent_run_id=agent_run_id,
+                    execution_mode=mode,
+                    planned_action=planned_action,
+                    target_pct=min(
+                        float(execution_plan.get("planned_position_pct", 0.0) or target_pct),
+                        self.settings.live_max_position_pct,
+                    ),
+                    entry_plan=dict(execution_plan.get("entry_plan") or {}),
+                    valid_for_minutes=int(execution_plan.get("valid_for_minutes", self.settings.live_entry_plan_default_valid_minutes)),
+                    anchor_price=self._latest_cached_close(session, ticker),
+                    reason=reasoning,
+                )
+                self._record_live_trade(
+                    session,
+                    cycle_id=cycle_id,
+                    ticker=ticker,
+                    agent_run_id=agent_run_id,
+                    action="HOLD",
+                    quantity=0,
+                    target_pct=0,
+                    order_id=None,
+                    status="planned",
+                    et_time=msi["et_time_str"],
+                    market_session=msi["label"],
+                    reasoning=f"Entry plan {plan.execution_mode} created for {planned_action}. {reasoning}",
+                )
+                return {
+                    "ticker": ticker,
+                    "action": "HOLD",
+                    "order_placed": False,
+                    "plan_created": True,
+                    "plan_id": plan.id,
+                    "plan_mode": plan.execution_mode,
+                    "planned_action": plan.planned_action,
+                }
+
+        if desired_action == "HOLD":
+            self._record_live_trade(
+                session,
+                cycle_id=cycle_id,
+                ticker=ticker,
+                agent_run_id=agent_run_id,
+                action=desired_action,
+                quantity=0,
+                target_pct=0,
+                order_id=None,
+                status="skipped",
+                et_time=msi["et_time_str"],
+                market_session=msi["label"],
+                reasoning=reasoning,
+            )
             return {"ticker": ticker, "action": "HOLD", "order_placed": False}
 
+        if self.settings.live_entry_planning_enabled:
+            self._replace_active_entry_plans(
+                session,
+                ticker,
+                new_status="INVALIDATED",
+                reason="immediate signal superseded pending entry plan",
+            )
+
+        return self._submit_order_for_action(
+            session=session,
+            broker=broker,
+            ticker=ticker,
+            desired_action=desired_action,
+            target_pct=target_pct,
+            portfolio_value=portfolio_value,
+            cycle_id=cycle_id,
+            msi=msi,
+            agent_run_id=agent_run_id,
+            reasoning=reasoning,
+            run=run,
+        )
+
+    def _execute_active_entry_plans(
+        self,
+        *,
+        session: Session,
+        broker: AlpacaBroker,
+        portfolio_value: float,
+        tickers: list[str],
+        cycle_id: str,
+        msi: dict[str, Any],
+        run: WorkerRun | None,
+    ) -> dict[str, Any]:
+        rows = session.execute(
+            select(EntryPlan).where(
+                EntryPlan.status == "ACTIVE",
+                EntryPlan.ticker.in_(tickers),
+            ).order_by(EntryPlan.created_at.asc(), EntryPlan.id.asc())
+        ).scalars().all()
+        results: list[dict[str, Any]] = []
+        triggered_tickers: set[str] = set()
+        for plan in rows:
+            ticker = plan.ticker
+            try:
+                current_price = broker.get_latest_price(ticker)
+            except Exception as exc:
+                results.append(
+                    {
+                        "plan_id": plan.id,
+                        "ticker": ticker,
+                        "order_placed": False,
+                        "reason": "price_fetch_failed",
+                        "error": str(exc),
+                    }
+                )
+                continue
+            if not current_price or current_price <= 0:
+                results.append(
+                    {
+                        "plan_id": plan.id,
+                        "ticker": ticker,
+                        "order_placed": False,
+                        "reason": "price_unavailable",
+                    }
+                )
+                continue
+            should_trigger, trigger_reason = self._evaluate_entry_plan_trigger(
+                session,
+                plan,
+                current_price=float(current_price),
+                msi=msi,
+            )
+            if not should_trigger:
+                results.append(
+                    {
+                        "plan_id": plan.id,
+                        "ticker": ticker,
+                        "order_placed": False,
+                        "reason": "not_triggered",
+                        "trigger_reason": trigger_reason,
+                    }
+                )
+                continue
+
+            exec_result = self._submit_order_for_action(
+                session=session,
+                broker=broker,
+                ticker=ticker,
+                desired_action=plan.planned_action,
+                target_pct=float(plan.target_pct or 0.0),
+                portfolio_value=portfolio_value,
+                cycle_id=cycle_id,
+                msi=msi,
+                agent_run_id=plan.agent_run_id,
+                reasoning=f"Triggered entry plan #{plan.id}: {trigger_reason}",
+                run=run,
+            )
+            if exec_result.get("order_placed"):
+                plan.status = "TRIGGERED"
+                plan.triggered_at = datetime.now(timezone.utc)
+                plan.updated_at = datetime.now(timezone.utc)
+                plan.trigger_reason = trigger_reason[:1000]
+                triggered_tickers.add(ticker)
+            else:
+                # Keep ACTIVE so it can be evaluated again unless explicitly terminal.
+                plan.updated_at = datetime.now(timezone.utc)
+                plan.trigger_reason = f"trigger matched but order not placed: {exec_result.get('reason') or exec_result.get('error') or 'unknown'}"[:1000]
+            session.flush()
+            results.append(
+                {
+                    "plan_id": plan.id,
+                    "ticker": ticker,
+                    "order_placed": bool(exec_result.get("order_placed")),
+                    "trigger_reason": trigger_reason,
+                    "execution_result": exec_result,
+                }
+            )
+        return {
+            "results": results,
+            "triggered_tickers": sorted(triggered_tickers),
+        }
+
+    def _submit_order_for_action(
+        self,
+        *,
+        session: Session,
+        broker: AlpacaBroker,
+        ticker: str,
+        desired_action: str,
+        target_pct: float,
+        portfolio_value: float,
+        cycle_id: str,
+        msi: dict[str, Any],
+        agent_run_id: int | None,
+        reasoning: str,
+        run: WorkerRun | None,
+    ) -> dict[str, Any]:
         if run is not None:
             self.runtime.update_run(session, run, stage="pricing", current_ticker=ticker, current_agent=None)
             session.commit()
@@ -515,11 +942,7 @@ class LiveTradingService:
             max_age_minutes=self.settings.live_data_max_age_minutes,
         )
         if not cache_is_fresh:
-            freshness_label = (
-                f"{cache_age_minutes:.1f}m old"
-                if cache_age_minutes is not None
-                else "missing"
-            )
+            freshness_label = f"{cache_age_minutes:.1f}m old" if cache_age_minutes is not None else "missing"
             self._record_live_trade(
                 session,
                 cycle_id=cycle_id,
@@ -541,6 +964,7 @@ class LiveTradingService:
                 "reason": "stale_market_data",
                 "cache_age_minutes": cache_age_minutes,
             }
+
         current_price = broker.get_latest_price(ticker)
         if not current_price or current_price <= 0:
             logger.warning("[live] No price for %s — skipping", ticker)
@@ -648,7 +1072,6 @@ class LiveTradingService:
             take_profit_price=tp_price,
             stop_loss_price=stop_price,
         )
-
         status = "submitted" if result.success else "error"
         self._record_live_trade(
             session,
@@ -665,7 +1088,6 @@ class LiveTradingService:
             reasoning=reasoning,
             error=result.error,
         )
-
         return {
             "ticker": ticker,
             "action": order_action,

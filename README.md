@@ -61,6 +61,8 @@ db     -> SQLite，统一保存状态、结果、行情缓存、运行态
 - `live_cycle` 现在带进程内互斥：scheduled / manual / queued 三条路径不会再在同一 worker 内重叠执行
 - worker command pump 已拆成高优先级（live / bar refresh / ingestion / earnings）和低优先级（backtest）两条 lane，长 backtest 不再把 live 命令整段饿死
 - live 下单前会强制检查本地 `Bar1m` 新鲜度；超过 `LIVE_DATA_MAX_AGE_MINUTES` 只分析不下单
+- live entry planning 已接入：`HOLD` 可附带 `WAIT_*` 计划（pullback / breakout / until_open），worker 在后续 cycle 自动触发
+- 同一 ticker 只保留一个 active entry plan（Replace Old），新计划会替换旧计划
 - 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
 - SQLite 现在默认启用 `WAL + busy_timeout`，降低 worker/supervisor/backtest 并发写锁冲突
 - worker 启动时会自动清算遗留的 `RUNNING` 命令/运行/回测，避免重启后旧任务永久显示运行中
@@ -150,6 +152,9 @@ tests/           pytest 测试集
 | POST | `/api/live/set_enabled` | 写入共享 runtime control，并给 worker 排队 live backfill/cycle |
 | POST | `/api/live/cycle` | 给 worker 排队一次 live cycle |
 | POST | `/api/live/order` | 手动下单 |
+| GET | `/api/live/trades` | recent live trades |
+| GET | `/api/live/plans` | delayed entry plans |
+| POST | `/api/live/plans/{plan_id}/cancel` | cancel active entry plan |
 | GET | `/api/live/positions` | Alpaca 当前持仓 |
 | GET | `/api/live/open_orders` | Alpaca 挂单 |
 | GET | `/api/live/portfolio_history` | Alpaca 权益曲线 |
@@ -191,6 +196,8 @@ tests/           pytest 测试集
 > - 若已有一个 `live_cycle` 正在运行，新触发的 cycle 会返回 `live_cycle_in_progress` 并跳过，避免重叠分析/重复下单
 > - worker 现在优先消费 `run_live_cycle / refresh_bars / run_ingestion_validation / refresh_earnings_calendar`，backtest 放在低优先级 lane
 > - live 下单前会检查本地 `Bar1m` 是否新鲜；若缓存缺失或过旧，会把该 ticker 记为 `stale_market_data` 并 suppress order
+> - PortfolioManager 现在可输出 `execution_mode + entry_plan`；当 action=HOLD 且 mode=WAIT_* 时，live 会创建 entry plan 并在后续 cycle 触发执行
+> - `/api/live/plans` 提供计划列表，`/api/live/plans/{plan_id}/cancel` 可手动取消 active 计划
 > - 一旦 live 已启用，只要 `python -m app.worker.supervisor` 还在运行，关闭浏览器不会停止 auto trading
 
 ---

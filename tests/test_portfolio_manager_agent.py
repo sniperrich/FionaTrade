@@ -84,6 +84,25 @@ class TestPortfolioManagerHoldDecision:
             result = agent.analyze(session, "META", _build_context())
         assert result.signal == "NO_SIGNAL"
 
+    def test_wait_execution_plan_preserves_planned_position(self, settings, session):
+        agent = _make_agent(settings)
+        llm_resp = (
+            '{"action":"BUY","position_pct":0.07,"execution_mode":"WAIT_PULLBACK",'
+            '"planned_action":"BUY","valid_for_minutes":180,"entry_plan":{"pullback_pct":0.6},'
+            '"conviction":"MEDIUM","supporting_agents":["news_sentiment","macro_analyst"],'
+            '"dissenting_agents":["technicals"],"entry_rationale":"wait pullback",'
+            '"exit_criteria":"stop","reasoning":"good catalyst but entry stretched"}'
+        )
+        with patch.object(agent, "_call_llm", return_value=llm_resp):
+            result = agent.analyze(session, "AAPL", _build_context())
+
+        assert result.signal == "HOLD"
+        assert result.metadata["position_pct"] == 0.0
+        plan = result.metadata["execution_plan"]
+        assert plan["execution_mode"] == "WAIT_PULLBACK"
+        assert plan["planned_action"] == "BUY"
+        assert abs(float(plan["planned_position_pct"]) - 0.07) < 1e-9
+
 
 class TestPortfolioManagerWeightedConfidence:
     def test_weighted_confidence_calculation(self, settings, session):
