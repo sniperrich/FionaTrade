@@ -15,6 +15,9 @@ pip install -e .[dev]
 cp .env.example .env
 nano .env   # 填写 FINNHUB_API_KEY / LLM_API_KEY / ALPACA_API_KEY
 
+# 一键本地启动（自动同时拉起 Web + Worker Supervisor）
+./run_local.sh
+
 # Web（只负责 API + UI）
 uvicorn app.main:app --host 0.0.0.0 --port 6888 --reload
 
@@ -24,6 +27,12 @@ python -m app.worker.supervisor
 # 访问 WebUI
 open http://localhost:6888
 ```
+
+说明：
+- `run_local.sh` 会优先使用当前已激活的 conda 环境
+- 如果当前没激活 conda 环境，它会自动尝试 `CONDA_ENV_NAME`，默认值是 `FionaTrade`
+- 需要改端口时可这样运行：`PORT=6999 ./run_local.sh`
+- 停止时直接 `Ctrl+C`
 
 ---
 
