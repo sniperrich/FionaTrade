@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+from fastapi import HTTPException
+
+from app.api.routes import set_live_enabled
 from app.core.utils import utc_now
 from app.db.models import BacktestRun, WorkerCommand, WorkerRun
 from app.services.runtime_control import CONTROL_WORKER_HEARTBEAT, RuntimeControlService
@@ -166,3 +170,28 @@ def test_worker_reconciles_orphaned_running_state(session) -> None:
     assert reconciled_backtest.status == "FAILED"
     assert reconciled_backtest.metrics["phase"] == "failed"
     assert "worker restarted" in reconciled_backtest.metrics["error"]
+
+
+def test_set_live_enabled_rejects_when_worker_or_supervisor_offline(session, settings) -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        set_live_enabled(body={"enabled": True}, session=session, settings=settings)
+
+    assert excinfo.value.status_code == 409
+    assert "worker is offline or stale" in str(excinfo.value.detail)
+
+
+def test_set_live_enabled_queues_commands_when_worker_and_supervisor_online(session, settings) -> None:
+    control = RuntimeControlService()
+    now = utc_now() - timedelta(minutes=1)
+    control.touch_worker_heartbeat(session, pid=2001, started_at=now, extra={"configured_tickers": ["AAPL"]})
+    control.touch_supervisor_heartbeat(session, pid=2002, started_at=now, extra={"child_pid": 2001})
+
+    result = set_live_enabled(body={"enabled": True}, session=session, settings=settings)
+
+    assert result["enabled"] is True
+    commands = session.query(WorkerCommand).order_by(WorkerCommand.id.asc()).all()
+    assert [command.command_type for command in commands] == [
+        "run_ingestion_validation",
+        "refresh_bars",
+        "run_live_cycle",
+    ]

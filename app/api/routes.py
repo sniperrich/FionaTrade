@@ -1155,6 +1155,27 @@ def set_live_enabled(
     was_enabled = control.get_live_enabled(session, settings)
     enabled = bool(body.get("enabled", True))
     has_tickers = bool(settings.live_trading_tickers or list(settings.agent_tickers_override or []))
+    worker_status = control.get_worker_status(session)
+    supervisor_status = control.get_supervisor_status(session)
+
+    if enabled:
+        if not worker_status.get("online"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "worker is offline or stale; start `python -m app.worker.supervisor` "
+                    "or use `./run_local.sh` before enabling live trading"
+                ),
+            )
+        if not supervisor_status.get("online"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "worker supervisor is offline or stale; start `python -m app.worker.supervisor` "
+                    "or use `./run_local.sh` before enabling live trading"
+                ),
+            )
+
     control.set_live_enabled(session, settings, enabled, source="api")
     if enabled and not was_enabled:
         runtime.queue_command(
@@ -1201,6 +1222,6 @@ def set_live_enabled(
                 "No live tickers are configured yet. "
                 if enabled and not has_tickers else ""
             )
-            + "Worker must be running to execute queued jobs. Closing the browser does not stop auto trading."
+            + "Worker and supervisor are online. Closing the browser does not stop auto trading."
         ),
     }

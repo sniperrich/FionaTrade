@@ -31,6 +31,8 @@ open http://localhost:6888
 说明：
 - `run_local.sh` 会优先使用当前已激活的 conda 环境
 - 如果当前没激活 conda 环境，它会自动尝试 `CONDA_ENV_NAME`，默认值是 `FionaTrade`
+- `run_local.sh` 现在会自动探测常见 Miniconda/Anaconda 安装路径，并把输出写到 `logs/web.local.log` / `logs/supervisor.local.log`
+- 若 supervisor 在启动后几秒内退出，脚本会直接报错，不再出现“只有 web 起了、worker 没起来”的假成功
 - 需要改端口时可这样运行：`PORT=6999 ./run_local.sh`
 - 停止时直接 `Ctrl+C`
 
@@ -175,6 +177,7 @@ tests/           pytest 测试集
 > - 若 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 都为空，live cycle 会明确显示 `no live tickers configured`
 > - 模板页面脚本必须放在 `base.html` 的 `{% block scripts %}` 中，不能直接内联在 `content` 里，否则会先于全局工具函数执行
 > - `Enable Live` 现在是 DB 共享开关，worker 不运行时只会看到 queued command，不会真的执行
+> - `Enable Live` 现在会先检查 worker + supervisor heartbeat；若后台不在线，会直接返回 `409`，阻止出现“按钮打开了但实际上没有执行进程”的假成功
 > - 一旦 live 已启用，只要 `python -m app.worker.supervisor` 还在运行，关闭浏览器不会停止 auto trading
 
 ---
@@ -253,6 +256,7 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 - `CNBC / Yahoo / Yahoo Finance RSS` 会被降成二级确认源；`Reuters/Bloomberg/SEC/company` 这类仍可作为 primary evidence
 - `trade tracker / what's going on with / why are ... trading / returns to haunt / preview / long-term potential / top movers / market chatter / recap` 这类 follow-up/commentary 标题会被降级或直接过滤
 - 纯 secondary-only 的事件不会通过 validation 成为可交易 primary event，也会在 tradeability gate 被挡掉
+- RSS/SEC/Finnhub source status 在写入 `source_status` 前会先按 `source_key` 聚合，避免同域多 feed 触发 SQLite `UNIQUE constraint failed: source_status.source_key`
 
 当前实现仍然是事件回测，不是 AgentGraph 全链回测。
 

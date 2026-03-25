@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -80,7 +81,51 @@ class IngestionService:
 
     def _persist_source_checks(self, session: Session, checks: list[SourceCheck]) -> None:
         now = utc_now()
+        merged_checks: dict[str, SourceCheck] = {}
+        grouped: dict[str, list[SourceCheck]] = defaultdict(list)
         for check in checks:
+            grouped[check.source_key].append(check)
+
+        for source_key, group in grouped.items():
+            first = group[0]
+            online_checks = [check for check in group if check.status == "ONLINE"]
+            offline_checks = [check for check in group if check.status == "OFFLINE"]
+            merged_details = {
+                "checks": [
+                    {
+                        "status": check.status,
+                        "display_name": check.display_name,
+                        "error_message": check.error_message,
+                        "details": check.details or {},
+                    }
+                    for check in group
+                ],
+                "online_count": len(online_checks),
+                "offline_count": len(offline_checks),
+            }
+            if online_checks:
+                winner = online_checks[0]
+                status = "ONLINE"
+                error_message = None
+                merged_details["summary"] = "at least one feed on this source is healthy"
+            else:
+                winner = first
+                status = "OFFLINE"
+                errors = [check.error_message for check in offline_checks if check.error_message]
+                error_message = " | ".join(dict.fromkeys(errors))[:4000] if errors else None
+                merged_details["summary"] = "all feeds on this source are failing"
+
+            merged_checks[source_key] = SourceCheck(
+                source_key=source_key,
+                source_name=winner.source_name,
+                source_type=winner.source_type,
+                display_name=winner.display_name,
+                status=status,
+                error_message=error_message,
+                details=merged_details,
+            )
+
+        for check in merged_checks.values():
             row = session.execute(
                 select(SourceStatus).where(SourceStatus.source_key == check.source_key)
             ).scalar_one_or_none()

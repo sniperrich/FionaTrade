@@ -50,3 +50,39 @@ def test_ingestion_persists_source_status(session, settings):
     assert rows[1].source_key == "sec"
     assert rows[1].status == "OFFLINE"
     assert rows[1].error_message == "timeout"
+
+
+def test_ingestion_merges_duplicate_source_checks_by_source_key(session, settings):
+    svc = IngestionService(settings)
+
+    checks = [
+        SourceCheck(
+            source_key="rss:feeds.bbci.co.uk",
+            source_name="bbc",
+            source_type="rss",
+            display_name="RSS BBC (feeds.bbci.co.uk)",
+            status="ONLINE",
+            details={"feed": "https://feeds.bbci.co.uk/news/world/rss.xml", "items": 12},
+        ),
+        SourceCheck(
+            source_key="rss:feeds.bbci.co.uk",
+            source_name="bbc",
+            source_type="rss",
+            display_name="RSS BBC (feeds.bbci.co.uk)",
+            status="OFFLINE",
+            error_message="xml parse error",
+            details={"feed": "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml"},
+        ),
+    ]
+
+    svc._persist_source_checks(session, checks)  # noqa: SLF001
+    session.flush()
+
+    rows = session.query(SourceStatus).filter(SourceStatus.source_key == "rss:feeds.bbci.co.uk").all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.status == "ONLINE"
+    assert row.error_message is None
+    assert row.details_json["online_count"] == 1
+    assert row.details_json["offline_count"] == 1
+    assert len(row.details_json["checks"]) == 2
