@@ -33,6 +33,7 @@ open http://localhost:6888
 - 如果当前没激活 conda 环境，它会自动尝试 `CONDA_ENV_NAME`，默认值是 `FionaTrade`
 - `run_local.sh` 现在会自动探测常见 Miniconda/Anaconda 安装路径，并把输出写到 `logs/web.local.log` / `logs/supervisor.local.log`
 - 若 supervisor 在启动后几秒内退出，脚本会直接报错，不再出现“只有 web 起了、worker 没起来”的假成功
+- 已修复 Bash 变量展开坑：中文标点紧邻 `$WEB_PID` 这类变量时会被误判成更长变量名，当前脚本已统一改成 `${VAR}` 写法
 - 需要改端口时可这样运行：`PORT=6999 ./run_local.sh`
 - 停止时直接 `Ctrl+C`
 

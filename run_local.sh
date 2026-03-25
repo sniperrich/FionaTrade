@@ -109,15 +109,15 @@ fi
 
 run_in_env web uvicorn app.main:app --host "$HOST" --port "$PORT" --reload
 WEB_PID="$RUN_CHILD_PID"
-log "Web 已启动，PID=$WEB_PID，地址: http://127.0.0.1:$PORT"
+log "Web 已启动，PID=${WEB_PID}，地址: http://127.0.0.1:${PORT}"
 ensure_alive web "$WEB_PID" 3
 
 run_in_env supervisor python -m app.worker.supervisor
 SUPERVISOR_PID="$RUN_CHILD_PID"
-log "Worker supervisor 已启动，PID=$SUPERVISOR_PID"
+log "Worker supervisor 已启动，PID=${SUPERVISOR_PID}"
 ensure_alive supervisor "$SUPERVISOR_PID" 3
 
-log "日志文件: $LOG_DIR/web.local.log / $LOG_DIR/supervisor.local.log"
+log "日志文件: ${LOG_DIR}/web.local.log / ${LOG_DIR}/supervisor.local.log"
 log "按 Ctrl+C 可同时停止 web 和 supervisor。"
 
 while true; do
