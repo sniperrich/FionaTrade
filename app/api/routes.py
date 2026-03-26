@@ -10,12 +10,13 @@ from sqlalchemy import and_, desc, distinct, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.deps import get_app_settings, get_db
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.core.utils import ensure_utc, utc_now
 from app.backtest_engine.service import BacktestEngineService
 from app.db.database import is_sqlite_lock_error
 from app.db.models import BacktestRun, EntryPlan, EventEvidence, RawItem, SourceStatus, WorkerRunEvent
 from app.monitoring.health import HealthAuditService
+from app.services.env_settings import EnvSettingsService
 from app.services.market_data import MarketDataService
 from app.services.runtime_control import RuntimeControlService
 from app.services.worker_runtime import (
@@ -248,6 +249,54 @@ def run_ingest(
         "command_id": command.id,
         "command_type": command.command_type,
         "message": "Ingestion job queued for worker",
+    }
+
+
+@router.get("/settings/editable")
+def get_editable_settings(
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    snapshot = EnvSettingsService().snapshot(settings)
+    snapshot["worker_restart_required"] = True
+    snapshot["web_hot_reload"] = True
+    return snapshot
+
+
+@router.post("/settings/editable")
+def save_editable_settings(
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    updates = body.get("updates") or {}
+    extra_updates = body.get("extra_updates") or ""
+    if not isinstance(updates, dict):
+        raise HTTPException(status_code=400, detail="updates must be an object")
+    if extra_updates is not None and not isinstance(extra_updates, str):
+        raise HTTPException(status_code=400, detail="extra_updates must be a string")
+
+    service = EnvSettingsService()
+    try:
+        result = service.apply_updates(updates=updates, extra_updates_text=extra_updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    get_settings.cache_clear()
+    refreshed = get_settings()
+    _cache_invalidate("health:")
+    _cache_invalidate("live:")
+    _cache_invalidate("ui:")
+    _cache_invalidate("settings:")
+
+    return {
+        "saved": True,
+        "env_file": result.get("env_file"),
+        "written_keys": result.get("written_keys", []),
+        "settings": service.snapshot(refreshed).get("editable", {}),
+        "web_hot_reload": True,
+        "worker_restart_required": True,
+        "message": (
+            "Saved to .env. Web API will use new values on next request; "
+            "worker/supervisor should be restarted to fully apply background-task settings."
+        ),
     }
 
 

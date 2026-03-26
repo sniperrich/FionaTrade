@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from pathlib import Path
+import re
+from typing import Any
+
+from app.core.config import Settings
+
+_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+class EnvSettingsService:
+    """Read/write selected runtime configuration into project .env."""
+
+    BOOL_KEYS = {
+        "ENABLE_SEC",
+        "ENABLE_RSS",
+        "ENABLE_FINNHUB",
+        "ENABLE_EARNINGS_RELEASE_SOURCE",
+        "LIVE_TRADING_ENABLED",
+        "LIVE_ALLOW_PREMARKET",
+    }
+    INT_KEYS = {
+        "POLL_INTERVAL_SECONDS",
+        "LIVE_CYCLE_INTERVAL_SECONDS",
+        "MIN_TRADE_CONFIDENCE",
+    }
+    FLOAT_KEYS = {
+        "LIVE_MAX_POSITION_PCT",
+        "LIVE_DATA_MAX_AGE_MINUTES",
+    }
+    CSV_UPPER_KEYS = {
+        "LIVE_TRADING_TICKERS",
+        "AGENT_TICKERS_OVERRIDE",
+    }
+    KEY_ORDER = [
+        "LIVE_TRADING_TICKERS",
+        "AGENT_TICKERS_OVERRIDE",
+        "POLL_INTERVAL_SECONDS",
+        "LIVE_CYCLE_INTERVAL_SECONDS",
+        "MIN_TRADE_CONFIDENCE",
+        "LIVE_MAX_POSITION_PCT",
+        "LIVE_DATA_MAX_AGE_MINUTES",
+        "LIVE_TRADING_ENABLED",
+        "LIVE_ALLOW_PREMARKET",
+        "ENABLE_SEC",
+        "ENABLE_RSS",
+        "ENABLE_FINNHUB",
+        "ENABLE_EARNINGS_RELEASE_SOURCE",
+        "LLM_MODEL",
+        "LLM_BASE_URL",
+    ]
+
+    def __init__(self, env_path: Path | None = None):
+        self.env_path = env_path or (Path(__file__).resolve().parents[2] / ".env")
+
+    def snapshot(self, settings: Settings) -> dict[str, Any]:
+        return {
+            "env_file": str(self.env_path),
+            "editable": {
+                "LIVE_TRADING_TICKERS": ",".join(settings.live_trading_tickers or []),
+                "AGENT_TICKERS_OVERRIDE": ",".join(settings.agent_tickers_override or []),
+                "POLL_INTERVAL_SECONDS": settings.poll_interval_seconds,
+                "LIVE_CYCLE_INTERVAL_SECONDS": settings.live_cycle_interval_seconds,
+                "MIN_TRADE_CONFIDENCE": settings.min_trade_confidence,
+                "LIVE_MAX_POSITION_PCT": settings.live_max_position_pct,
+                "LIVE_DATA_MAX_AGE_MINUTES": settings.live_data_max_age_minutes,
+                "LIVE_TRADING_ENABLED": settings.live_trading_enabled,
+                "LIVE_ALLOW_PREMARKET": settings.live_allow_premarket,
+                "ENABLE_SEC": settings.enable_sec,
+                "ENABLE_RSS": settings.enable_rss,
+                "ENABLE_FINNHUB": settings.enable_finnhub,
+                "ENABLE_EARNINGS_RELEASE_SOURCE": settings.enable_earnings_release_source,
+                "LLM_MODEL": settings.llm_model,
+                "LLM_BASE_URL": settings.llm_base_url,
+            },
+            "key_order": self.KEY_ORDER,
+        }
+
+    @staticmethod
+    def _line_key(line: str) -> str | None:
+        raw = line.strip()
+        if not raw or raw.startswith("#"):
+            return None
+        if raw.startswith("export "):
+            raw = raw[len("export "):].strip()
+        if "=" not in raw:
+            return None
+        key = raw.split("=", 1)[0].strip()
+        if not _ENV_KEY_RE.match(key):
+            return None
+        return key
+
+    @staticmethod
+    def _normalize_csv_upper(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            parts = value.split(",")
+        elif isinstance(value, Iterable):
+            parts = [str(item) for item in value]
+        else:
+            parts = [str(value)]
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            token = str(part).strip().upper()
+            if not token or token in seen:
+                continue
+            cleaned.append(token)
+            seen.add(token)
+        return ",".join(cleaned)
+
+    def _normalize_value(self, key: str, value: Any) -> str:
+        if key in self.CSV_UPPER_KEYS:
+            return self._normalize_csv_upper(value)
+        if key in self.BOOL_KEYS:
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"1", "true", "yes", "y", "on"}:
+                    return "true"
+                if normalized in {"0", "false", "no", "n", "off"}:
+                    return "false"
+                raise ValueError(f"{key} expects boolean value")
+            return "true" if bool(value) else "false"
+        if key in self.INT_KEYS:
+            try:
+                return str(int(value))
+            except Exception as exc:
+                raise ValueError(f"{key} expects integer value") from exc
+        if key in self.FLOAT_KEYS:
+            try:
+                return str(float(value))
+            except Exception as exc:
+                raise ValueError(f"{key} expects numeric value") from exc
+        return str(value).strip() if value is not None else ""
+
+    @staticmethod
+    def _validate_env_key(key: str) -> str:
+        normalized = str(key or "").strip().upper()
+        if not _ENV_KEY_RE.match(normalized):
+            raise ValueError(f"invalid env key: {key!r}")
+        return normalized
+
+    def _parse_extra_updates(self, text: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for lineno, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise ValueError(f"extra_updates line {lineno} must be KEY=VALUE")
+            key, value = line.split("=", 1)
+            env_key = self._validate_env_key(key)
+            out[env_key] = value.strip()
+        return out
+
+    def apply_updates(self, updates: dict[str, Any], extra_updates_text: str = "") -> dict[str, Any]:
+        if not isinstance(updates, dict):
+            raise ValueError("updates must be an object")
+
+        normalized_updates: dict[str, str] = {}
+        for raw_key, raw_value in updates.items():
+            env_key = self._validate_env_key(str(raw_key))
+            normalized_updates[env_key] = self._normalize_value(env_key, raw_value)
+
+        if extra_updates_text:
+            normalized_updates.update(self._parse_extra_updates(extra_updates_text))
+
+        if not normalized_updates:
+            return {
+                "env_file": str(self.env_path),
+                "written_keys": [],
+                "created": not self.env_path.exists(),
+            }
+
+        env_existed = self.env_path.exists()
+        existing_lines = self.env_path.read_text(encoding="utf-8").splitlines() if env_existed else []
+        key_to_index: dict[str, int] = {}
+        for idx, line in enumerate(existing_lines):
+            key = self._line_key(line)
+            if key and key not in key_to_index:
+                key_to_index[key] = idx
+
+        for key, value in normalized_updates.items():
+            new_line = f"{key}={value}"
+            if key in key_to_index:
+                existing_lines[key_to_index[key]] = new_line
+            else:
+                existing_lines.append(new_line)
+
+        rendered = "\n".join(existing_lines).strip("\n") + "\n"
+        self.env_path.write_text(rendered, encoding="utf-8")
+        return {
+            "env_file": str(self.env_path),
+            "written_keys": list(normalized_updates.keys()),
+            "created": not env_existed,
+        }

@@ -100,7 +100,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页** |
 | `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果与交易明细 |
-| `/settings` | 配置信息 |
+| `/settings` | 配置控制台：可视化增删 ticker、编辑常用 env、保存到 `.env` |
 
 ---
 
@@ -150,6 +150,8 @@ tests/           pytest 测试集
 | GET | `/api/backtests/{run_id}` | 单个回测详情：params / metrics / equity_curve / trade_log |
 | POST | `/api/backtests/run` | 给 worker 排队一条 backtest 任务 |
 | POST | `/api/live/set_enabled` | 写入共享 runtime control，并给 worker 排队 live backfill/cycle |
+| GET | `/api/settings/editable` | 返回可编辑的 `.env` 配置快照 |
+| POST | `/api/settings/editable` | 保存配置到 `.env`（支持额外 `KEY=VALUE` 覆盖） |
 | POST | `/api/live/cycle` | 给 worker 排队一次 live cycle |
 | POST | `/api/live/order` | 手动下单 |
 | GET | `/api/live/trades` | recent live trades |
@@ -191,6 +193,7 @@ tests/           pytest 测试集
 > - `Enable Live` 现在是 DB 共享开关，worker 不运行时只会看到 queued command，不会真的执行
 > - `Enable Live` 现在会先检查 worker + supervisor heartbeat；若后台不在线，会直接返回 `409`，阻止出现“按钮打开了但实际上没有执行进程”的假成功
 > - `Disable Live` 现在会取消尚未执行的 live 相关命令，避免关闭后旧的 `refresh_bars / live_cycle / ingestion` 继续跑
+> - `/settings` 页面已支持写入 `.env`；保存后 web 端会热加载，worker/supervisor 需要重启才能完全应用后台参数变更
 > - `/api/live/set_enabled` 现在会按当前数据库连接重试写入；若 SQLite 仍被长事务占住，会返回 `503 database is busy`，而不是直接 500
 > - worker 遇到短时 SQLite 锁时会把受影响的 `RUNNING` command 重新排回 `PENDING`，避免残留假运行状态
 > - worker runtime API 现在统一返回带 `+00:00` 的 UTC 时间；前端 “x ago” 不会再把 SQLite 的 naive UTC 误当成上海本地时间

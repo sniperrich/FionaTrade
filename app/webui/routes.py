@@ -13,6 +13,7 @@ from app.api.deps import get_app_settings, get_db
 from app.core.config import Settings
 from app.core.utils import ensure_utc, utc_now
 from app.db.models import AgentRun, BacktestRun, EventEvidence, LiveTrade, RawItem, SourceStatus
+from app.services.env_settings import EnvSettingsService
 from app.services.runtime_control import RuntimeControlService
 
 templates = Jinja2Templates(directory="templates")
@@ -147,12 +148,14 @@ def news_stream(
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, settings: Settings = Depends(get_app_settings)):
+    editable_snapshot = EnvSettingsService().snapshot(settings)
     return templates.TemplateResponse(
         "settings.html",
         {
             "request": request,
             "title": "Settings",
             "settings": settings,
+            "settings_editor": editable_snapshot,
         },
     )
 

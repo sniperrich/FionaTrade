@@ -1,8 +1,102 @@
 {% extends "base.html" %}
 {% block content %}
+{% set ed = settings_editor.editable if settings_editor else {} %}
 <div class="page-header">
   <div class="page-title">Settings</div>
-  <div class="page-sub">Runtime configuration — edit <code>.env</code> to change values</div>
+  <div class="page-sub">Runtime configuration and .env editor</div>
+</div>
+
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="card-title" style="margin:0">Config Editor（写入 .env）</div>
+    <span class="text-muted text-sm">支持增删 ticker 与常用参数编辑</span>
+  </div>
+  <div class="text-muted text-sm mb12">
+    保存后 Web 会热加载新配置；Worker/Supervisor 需要重启才能完全应用后台任务参数。
+  </div>
+
+  <form id="settings-editor-form">
+    <div class="form-row mb12" style="grid-template-columns:1fr 1fr">
+      <div class="form-group">
+        <label>LIVE_TRADING_TICKERS</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="live-ticker-input" placeholder="AAPL" style="text-transform:uppercase" />
+          <button type="button" class="btn btn-ghost btn-sm" onclick="addTicker('live')">添加</button>
+        </div>
+        <input type="hidden" id="cfg-live-trading-tickers" value="{{ ed.get('LIVE_TRADING_TICKERS', '') }}" />
+        <div id="live-ticker-chips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+      <div class="form-group">
+        <label>AGENT_TICKERS_OVERRIDE</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="agent-ticker-input" placeholder="NVDA" style="text-transform:uppercase" />
+          <button type="button" class="btn btn-ghost btn-sm" onclick="addTicker('agent')">添加</button>
+        </div>
+        <input type="hidden" id="cfg-agent-tickers-override" value="{{ ed.get('AGENT_TICKERS_OVERRIDE', '') }}" />
+        <div id="agent-ticker-chips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+    </div>
+
+    <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div class="form-group">
+        <label>POLL_INTERVAL_SECONDS</label>
+        <input type="number" min="10" step="1" id="cfg-poll-interval" value="{{ ed.get('POLL_INTERVAL_SECONDS', settings.poll_interval_seconds) }}" />
+      </div>
+      <div class="form-group">
+        <label>LIVE_CYCLE_INTERVAL_SECONDS</label>
+        <input type="number" min="30" step="1" id="cfg-live-cycle-interval" value="{{ ed.get('LIVE_CYCLE_INTERVAL_SECONDS', settings.live_cycle_interval_seconds) }}" />
+      </div>
+      <div class="form-group">
+        <label>MIN_TRADE_CONFIDENCE</label>
+        <input type="number" min="0" max="100" step="1" id="cfg-min-trade-confidence" value="{{ ed.get('MIN_TRADE_CONFIDENCE', settings.min_trade_confidence) }}" />
+      </div>
+    </div>
+
+    <div class="form-row mb12" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+      <div class="form-group">
+        <label>LIVE_MAX_POSITION_PCT</label>
+        <input type="number" min="0" max="1" step="0.01" id="cfg-live-max-position" value="{{ ed.get('LIVE_MAX_POSITION_PCT', settings.live_max_position_pct) }}" />
+      </div>
+      <div class="form-group">
+        <label>LIVE_DATA_MAX_AGE_MINUTES</label>
+        <input type="number" min="1" step="1" id="cfg-live-data-max-age" value="{{ ed.get('LIVE_DATA_MAX_AGE_MINUTES', settings.live_data_max_age_minutes) }}" />
+      </div>
+    </div>
+
+    <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <label><input type="checkbox" id="cfg-live-enabled" {% if ed.get('LIVE_TRADING_ENABLED', settings.live_trading_enabled) %}checked{% endif %} /> LIVE_TRADING_ENABLED</label>
+      <label><input type="checkbox" id="cfg-live-allow-premarket" {% if ed.get('LIVE_ALLOW_PREMARKET', settings.live_allow_premarket) %}checked{% endif %} /> LIVE_ALLOW_PREMARKET</label>
+      <label><input type="checkbox" id="cfg-enable-sec" {% if ed.get('ENABLE_SEC', settings.enable_sec) %}checked{% endif %} /> ENABLE_SEC</label>
+      <label><input type="checkbox" id="cfg-enable-rss" {% if ed.get('ENABLE_RSS', settings.enable_rss) %}checked{% endif %} /> ENABLE_RSS</label>
+      <label><input type="checkbox" id="cfg-enable-finnhub" {% if ed.get('ENABLE_FINNHUB', settings.enable_finnhub) %}checked{% endif %} /> ENABLE_FINNHUB</label>
+      <label><input type="checkbox" id="cfg-enable-earnings" {% if ed.get('ENABLE_EARNINGS_RELEASE_SOURCE', settings.enable_earnings_release_source) %}checked{% endif %} /> ENABLE_EARNINGS_RELEASE_SOURCE</label>
+    </div>
+
+    <div class="form-row mb12" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+      <div class="form-group">
+        <label>LLM_MODEL</label>
+        <input type="text" id="cfg-llm-model" value="{{ ed.get('LLM_MODEL', settings.llm_model) }}" />
+      </div>
+      <div class="form-group">
+        <label>LLM_BASE_URL</label>
+        <input type="text" id="cfg-llm-base-url" value="{{ ed.get('LLM_BASE_URL', settings.llm_base_url) }}" />
+      </div>
+    </div>
+
+    <div class="form-group mb12">
+      <label>额外 ENV 覆盖（可选）</label>
+      <textarea id="cfg-extra-updates" rows="5" placeholder="例如：\nFINNHUB_API_KEY=xxxx\nLLM_API_KEY=sk-xxxx"></textarea>
+      <div class="text-muted text-xs">每行一个 KEY=VALUE，支持你想改的其它 env 配置。</div>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button type="submit" class="btn btn-primary">保存到 .env</button>
+      <button type="button" class="btn btn-ghost" onclick="reloadEditableSettings()">从后端刷新</button>
+      <span class="text-muted text-sm mono">{{ settings_editor.env_file if settings_editor else '.env' }}</span>
+    </div>
+  </form>
+
+  <div id="settings-save-result" class="mt8 text-sm"></div>
 </div>
 
 <div class="grid g2">
@@ -109,4 +203,162 @@
     <div class="mono text-sm" style="padding:4px 0">{{ settings.database_url }}</div>
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let liveTickers = [];
+let agentTickers = [];
+
+function parseCsvTickers(raw){
+  return [...new Set(String(raw||'').split(',').map(s=>s.trim().toUpperCase()).filter(Boolean))];
+}
+
+function syncTickerHidden(){
+  document.getElementById('cfg-live-trading-tickers').value = liveTickers.join(',');
+  document.getElementById('cfg-agent-tickers-override').value = agentTickers.join(',');
+}
+
+function renderTickerChips(kind){
+  const list = kind === 'live' ? liveTickers : agentTickers;
+  const container = document.getElementById(kind === 'live' ? 'live-ticker-chips' : 'agent-ticker-chips');
+  if(!list.length){
+    container.innerHTML = '<span class="text-muted text-xs">未设置</span>';
+    return;
+  }
+  container.innerHTML = list.map(t => `
+    <span class="badge badge-accent" style="display:inline-flex;align-items:center;gap:6px">
+      ${escapeHtml(t)}
+      <button type="button" class="btn btn-ghost btn-xs" onclick="removeTicker('${kind}','${t}')">×</button>
+    </span>
+  `).join('');
+}
+
+function addTicker(kind){
+  const input = document.getElementById(kind === 'live' ? 'live-ticker-input' : 'agent-ticker-input');
+  const token = String(input.value || '').trim().toUpperCase();
+  if(!token) return;
+  if(!/^[A-Z.\-]{1,10}$/.test(token)){
+    toast('Ticker 格式不合法', 'error');
+    return;
+  }
+  const list = kind === 'live' ? liveTickers : agentTickers;
+  if(!list.includes(token)) list.push(token);
+  input.value = '';
+  syncTickerHidden();
+  renderTickerChips(kind);
+}
+
+function removeTicker(kind, ticker){
+  if(kind === 'live') liveTickers = liveTickers.filter(t => t !== ticker);
+  else agentTickers = agentTickers.filter(t => t !== ticker);
+  syncTickerHidden();
+  renderTickerChips(kind);
+}
+
+function applyEditorSettings(payload){
+  const ed = payload?.editable || {};
+  liveTickers = parseCsvTickers(ed.LIVE_TRADING_TICKERS || '');
+  agentTickers = parseCsvTickers(ed.AGENT_TICKERS_OVERRIDE || '');
+  syncTickerHidden();
+  renderTickerChips('live');
+  renderTickerChips('agent');
+
+  document.getElementById('cfg-poll-interval').value = ed.POLL_INTERVAL_SECONDS ?? '';
+  document.getElementById('cfg-live-cycle-interval').value = ed.LIVE_CYCLE_INTERVAL_SECONDS ?? '';
+  document.getElementById('cfg-min-trade-confidence').value = ed.MIN_TRADE_CONFIDENCE ?? '';
+  document.getElementById('cfg-live-max-position').value = ed.LIVE_MAX_POSITION_PCT ?? '';
+  document.getElementById('cfg-live-data-max-age').value = ed.LIVE_DATA_MAX_AGE_MINUTES ?? '';
+
+  document.getElementById('cfg-live-enabled').checked = !!ed.LIVE_TRADING_ENABLED;
+  document.getElementById('cfg-live-allow-premarket').checked = !!ed.LIVE_ALLOW_PREMARKET;
+  document.getElementById('cfg-enable-sec').checked = !!ed.ENABLE_SEC;
+  document.getElementById('cfg-enable-rss').checked = !!ed.ENABLE_RSS;
+  document.getElementById('cfg-enable-finnhub').checked = !!ed.ENABLE_FINNHUB;
+  document.getElementById('cfg-enable-earnings').checked = !!ed.ENABLE_EARNINGS_RELEASE_SOURCE;
+
+  document.getElementById('cfg-llm-model').value = ed.LLM_MODEL ?? '';
+  document.getElementById('cfg-llm-base-url').value = ed.LLM_BASE_URL ?? '';
+}
+
+async function reloadEditableSettings(){
+  try{
+    const resp = await apiFetch('/api/settings/editable', { timeout: 12000 });
+    applyEditorSettings(resp);
+    toast('设置已从后端刷新', 'success');
+  }catch(e){
+    toast(`刷新失败: ${e.message}`, 'error');
+  }
+}
+
+async function saveSettings(e){
+  e.preventDefault();
+  syncTickerHidden();
+  const updates = {
+    LIVE_TRADING_TICKERS: document.getElementById('cfg-live-trading-tickers').value,
+    AGENT_TICKERS_OVERRIDE: document.getElementById('cfg-agent-tickers-override').value,
+    POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
+    LIVE_CYCLE_INTERVAL_SECONDS: document.getElementById('cfg-live-cycle-interval').value,
+    MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
+    LIVE_MAX_POSITION_PCT: document.getElementById('cfg-live-max-position').value,
+    LIVE_DATA_MAX_AGE_MINUTES: document.getElementById('cfg-live-data-max-age').value,
+    LIVE_TRADING_ENABLED: document.getElementById('cfg-live-enabled').checked,
+    LIVE_ALLOW_PREMARKET: document.getElementById('cfg-live-allow-premarket').checked,
+    ENABLE_SEC: document.getElementById('cfg-enable-sec').checked,
+    ENABLE_RSS: document.getElementById('cfg-enable-rss').checked,
+    ENABLE_FINNHUB: document.getElementById('cfg-enable-finnhub').checked,
+    ENABLE_EARNINGS_RELEASE_SOURCE: document.getElementById('cfg-enable-earnings').checked,
+    LLM_MODEL: document.getElementById('cfg-llm-model').value.trim(),
+    LLM_BASE_URL: document.getElementById('cfg-llm-base-url').value.trim(),
+  };
+
+  const extra_updates = document.getElementById('cfg-extra-updates').value;
+  const resultEl = document.getElementById('settings-save-result');
+  resultEl.textContent = '保存中...';
+  resultEl.className = 'mt8 text-sm text-muted';
+
+  try{
+    const resp = await apiFetch('/api/settings/editable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates, extra_updates }),
+      timeout: 20000,
+    });
+    resultEl.textContent = `${resp.message || '保存成功'} 已写入 keys: ${(resp.written_keys || []).join(', ')}`;
+    resultEl.className = 'mt8 text-sm';
+    clearViewCache('ui:');
+    toast('配置已保存到 .env', 'success');
+    if(resp.settings){
+      applyEditorSettings({ editable: resp.settings });
+    }
+    if(resp.worker_restart_required){
+      toast('请重启 worker/supervisor 以完全生效', 'warn');
+    }
+  }catch(err){
+    resultEl.textContent = `保存失败: ${err.message}`;
+    resultEl.className = 'mt8 text-sm text-red';
+    toast(`保存失败: ${err.message}`, 'error');
+  }
+}
+
+applyEditorSettings({ editable: {
+  LIVE_TRADING_TICKERS: document.getElementById('cfg-live-trading-tickers').value,
+  AGENT_TICKERS_OVERRIDE: document.getElementById('cfg-agent-tickers-override').value,
+  POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
+  LIVE_CYCLE_INTERVAL_SECONDS: document.getElementById('cfg-live-cycle-interval').value,
+  MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
+  LIVE_MAX_POSITION_PCT: document.getElementById('cfg-live-max-position').value,
+  LIVE_DATA_MAX_AGE_MINUTES: document.getElementById('cfg-live-data-max-age').value,
+  LIVE_TRADING_ENABLED: document.getElementById('cfg-live-enabled').checked,
+  LIVE_ALLOW_PREMARKET: document.getElementById('cfg-live-allow-premarket').checked,
+  ENABLE_SEC: document.getElementById('cfg-enable-sec').checked,
+  ENABLE_RSS: document.getElementById('cfg-enable-rss').checked,
+  ENABLE_FINNHUB: document.getElementById('cfg-enable-finnhub').checked,
+  ENABLE_EARNINGS_RELEASE_SOURCE: document.getElementById('cfg-enable-earnings').checked,
+  LLM_MODEL: document.getElementById('cfg-llm-model').value,
+  LLM_BASE_URL: document.getElementById('cfg-llm-base-url').value,
+}});
+
+document.getElementById('settings-editor-form').addEventListener('submit', saveSettings);
+</script>
 {% endblock %}
