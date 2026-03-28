@@ -173,3 +173,43 @@ def test_progress_callback_runs_on_caller_thread_only(settings, session_factory)
 
     graph.run(session, "AAPL", progress_callback=progress_callback)
     assert callback_thread_ids == {main_thread_id}
+
+
+def test_fast_path_uses_cached_macro_and_fundamentals(settings, session_factory):
+    session, factory = session_factory
+    _add_bars(session, "AAPL")
+    graph = AgentGraph(settings, session_factory=factory)
+
+    def _raise_if_called(*_args, **_kwargs):
+        raise AssertionError("macro/fundamentals agent should be skipped in fast-path cache hit")
+
+    graph.macro.analyze = _raise_if_called
+    graph.fundamentals.analyze = _raise_if_called
+    graph.news._call_llm = lambda *_a, **_kw: _LLM_NEWS
+    graph.risk._call_llm = lambda *_a, **_kw: _LLM_RISK
+    graph.portfolio._call_llm = lambda *_a, **_kw: _LLM_PM
+
+    state = graph.run(
+        session,
+        "AAPL",
+        context={
+            "fast_path_skip_macro_fund": True,
+            "cached_macro_signal": {
+                "agent_name": "macro_analyst",
+                "signal": "BUY",
+                "confidence": 68,
+                "reasoning": "cached macro",
+            },
+            "cached_fund_signal": {
+                "agent_name": "fundamentals",
+                "signal": "BUY",
+                "confidence": 66,
+                "reasoning": "cached fundamentals",
+            },
+        },
+    )
+
+    assert state.get("used_cached_macro") is True
+    assert state.get("used_cached_fundamentals") is True
+    assert state["macro_analyst_result"]["reasoning"] == "cached macro"
+    assert state["fundamentals_result"]["reasoning"] == "cached fundamentals"

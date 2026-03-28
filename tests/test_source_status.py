@@ -39,7 +39,7 @@ def test_ingestion_persists_source_status(session, settings):
         ),
     ]
 
-    svc._collect = lambda _session: ([item], checks)  # noqa: SLF001
+    svc._collect = lambda _session, **_kwargs: ([item], checks)  # noqa: SLF001
     svc.run(session)
 
     rows = session.query(SourceStatus).order_by(SourceStatus.source_key.asc()).all()

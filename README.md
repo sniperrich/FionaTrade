@@ -37,6 +37,21 @@ open http://localhost:6888
 - 需要改端口时可这样运行：`PORT=6999 ./run_local.sh`
 - 停止时直接 `Ctrl+C`
 
+### SQLite -> Postgres 迁移
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --sqlite-url sqlite:///./fionatrade.db \
+  --postgres-url postgresql+psycopg://USER:PASS@HOST:5432/fionatrade \
+  --truncate-target
+```
+
+说明：
+- 脚本按表分批迁移（主键升序 chunk）
+- 默认会阻止“迁移期间仍有 live/backtest 正在写库”的情况
+- 如需强制跳过该保护，可加 `--allow-active-writes`（不推荐）
+- 迁移后会自动输出逐表 `source/target` 行数校验与抽样一致性结果
+
 ---
 
 ## 架构
@@ -46,7 +61,7 @@ open http://localhost:6888
 ```text
 web    -> FastAPI + Jinja UI + command/control API
 worker -> APScheduler + ingestion + live cycle + backfill + command pump
-db     -> SQLite，统一保存状态、结果、行情缓存、运行态
+db     -> SQLite/Postgres，统一保存状态、结果、行情缓存、运行态
 ```
 
 关键点：
@@ -65,6 +80,7 @@ db     -> SQLite，统一保存状态、结果、行情缓存、运行态
 - 同一 ticker 只保留一个 active entry plan（Replace Old），新计划会替换旧计划
 - 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
 - SQLite 现在默认启用 `WAL + busy_timeout`，降低 worker/supervisor/backtest 并发写锁冲突
+- 已支持 PostgreSQL 单库运行（推荐 live/backtest 并发场景使用 Postgres）
 - worker 启动时会自动清算遗留的 `RUNNING` 命令/运行/回测，避免重启后旧任务永久显示运行中
 - `CNBC / Yahoo` 现在统一视为 **secondary confirmation sources**：可做 corroboration，但不会再作为单独 primary trigger 使用
 - 回测默认已打开 **同 ticker + 同有效事件类型 + 同日去重**（`backtest_dedup_same_day_event=true`）
@@ -87,7 +103,18 @@ AgentRun 写入 DB
 LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 ```
 
-**Agent 权重：** 技术 30% · 新闻 25% · 基本面 25% · 宏观 20%
+**Agent 权重（收缩版默认）：** 新闻 60% · 技术 20% · 宏观 10% · 基本面 10%
+
+**Live 调度（收缩版默认）：**
+- 事件驱动优先：有新增可交易事件才跑完整决策
+- 无新增事件时仅 10 分钟兜底触发一次 fast-path
+- fast-path 复用 Macro/Fund TTL 缓存（默认 60/120 分钟）
+
+**资金确认层（软门槛）：**
+- 输出 `flow_score(0-100)` + `flow_bucket(HIGH/MEDIUM/LOW/WEAK)` + `position_multiplier`
+- `>=70→1.00`, `55-69→0.80`, `40-54→0.60`, `<40→0.35`
+- 最终仓位 = `portfolio_position_pct * position_multiplier`
+- `flow_score<40` 时 BUY/SHORT 会降级为 `WAIT_BREAKOUT_CONFIRMATION`（软降级，不是一刀切禁入）
 
 **风控限制（硬编码）：** 最大仓位 20% · 日亏损上限 3% · 最少 2 个信号共识
 
@@ -250,6 +277,18 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 或直接点击 `/live` 页面右上角的 **▶ Enable Live** 按钮。
 
 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 现在兼容 CSV 和 JSON 数组两种写法。
+
+收缩升级新增配置（`/settings` 可直接改）：
+- `LIVE_EVENT_DRIVEN_MODE=true`
+- `LIVE_FALLBACK_CYCLE_SECONDS=600`
+- `LIVE_FAST_PATH_MACRO_TTL_MIN=60`
+- `LIVE_FAST_PATH_FUND_TTL_MIN=120`
+- `FLOW_CONFIRMATION_ENABLED=true`
+- `FLOW_CONFIRMATION_SOFT_GATE=true`
+- `AGENT_WEIGHT_NEWS=0.60`
+- `AGENT_WEIGHT_TECHNICALS=0.20`
+- `AGENT_WEIGHT_MACRO=0.10`
+- `AGENT_WEIGHT_FUNDAMENTALS=0.10`
 
 > Enable Live 现在不会再让 Web 进程直接起后台线程。
 > 它会写入共享 `runtime_controls`，再给 worker 排队 `refresh_bars + live_cycle`。

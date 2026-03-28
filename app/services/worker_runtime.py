@@ -426,6 +426,30 @@ class WorkerRuntimeService:
                 "updated_at": None,
                 "finished_at": None,
                 "mode": None,
+                "skipped_reason": None,
+                "run_mode": None,
+                "event_driven_mode": None,
+                "flow": {},
+            }
+        summary = run.summary_json if isinstance(run.summary_json, dict) else {}
+        flow: dict[str, Any] = {}
+        for row in summary.get("results", []) if isinstance(summary, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            ticker = str(row.get("ticker") or "").upper().strip()
+            if not ticker:
+                continue
+            flow_score = row.get("flow_score")
+            position_multiplier = row.get("position_multiplier")
+            used_cached_macro = row.get("used_cached_macro")
+            used_cached_fundamentals = row.get("used_cached_fundamentals")
+            if flow_score is None and position_multiplier is None and used_cached_macro is None and used_cached_fundamentals is None:
+                continue
+            flow[ticker] = {
+                "flow_score": flow_score,
+                "position_multiplier": position_multiplier,
+                "used_cached_macro": used_cached_macro,
+                "used_cached_fundamentals": used_cached_fundamentals,
             }
         return {
             "cycle_id": run.run_key,
@@ -437,12 +461,16 @@ class WorkerRuntimeService:
             "dry_run": run.dry_run,
             "total_tickers": run.total_tickers,
             "completed_tickers": run.completed_tickers,
-            "last_result": run.summary_json or None,
+            "last_result": summary or None,
             "error": run.error_message,
             "started_at": self._dt_to_iso(run.started_at),
             "updated_at": self._dt_to_iso(run.updated_at),
             "finished_at": self._dt_to_iso(run.finished_at),
             "mode": run.trigger,
+            "skipped_reason": summary.get("reason"),
+            "run_mode": summary.get("run_mode"),
+            "event_driven_mode": summary.get("event_driven_mode"),
+            "flow": flow,
         }
 
     def _serialize_event(self, event: WorkerRunEvent) -> dict[str, Any]:
@@ -508,15 +536,5 @@ class WorkerRuntimeService:
             return None
         try:
             return ensure_utc(datetime.fromisoformat(value))
-        except ValueError:
-            return None
-
-    def _parse_iso_dt(self, value: Any) -> datetime | None:
-        if isinstance(value, datetime):
-            return value
-        if not value or not isinstance(value, str):
-            return None
-        try:
-            return datetime.fromisoformat(value)
         except ValueError:
             return None

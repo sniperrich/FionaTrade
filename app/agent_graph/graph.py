@@ -58,6 +58,11 @@ class AgentGraph:
         ticker = state["ticker"]
         context = state.get("context", {})
         as_of = context.get("as_of")
+        fast_skip = bool(context.get("fast_path_skip_macro_fund"))
+        cached_macro = context.get("cached_macro_signal")
+        cached_fund = context.get("cached_fund_signal")
+        used_cached_macro = False
+        used_cached_fundamentals = False
 
         # Score any unscored past runs to keep performance data fresh
         try:
@@ -84,11 +89,19 @@ class AgentGraph:
             make_session = SessionLocal
 
         parallel_agents = [
-            (self.macro, "macro_analyst_result"),
             (self.news, "news_sentiment_result"),
-            (self.fundamentals, "fundamentals_result"),
             (self.technicals, "technicals_result"),
         ]
+        if fast_skip and isinstance(cached_macro, dict) and cached_macro:
+            state["macro_analyst_result"] = dict(cached_macro)
+            used_cached_macro = True
+        else:
+            parallel_agents.append((self.macro, "macro_analyst_result"))
+        if fast_skip and isinstance(cached_fund, dict) and cached_fund:
+            state["fundamentals_result"] = dict(cached_fund)
+            used_cached_fundamentals = True
+        else:
+            parallel_agents.append((self.fundamentals, "fundamentals_result"))
 
         def _run_agent_with_own_session(agent, result_key):
             """Run a single agent in its own DB session."""
@@ -153,6 +166,8 @@ class AgentGraph:
             "fundamentals": state.get("fundamentals_result", {}),
             "technicals": state.get("technicals_result", {}),
         }
+        state["used_cached_macro"] = used_cached_macro
+        state["used_cached_fundamentals"] = used_cached_fundamentals
         return state
 
     def _run_risk_manager(

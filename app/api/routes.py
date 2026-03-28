@@ -13,7 +13,7 @@ from app.api.deps import get_app_settings, get_db
 from app.core.config import Settings, get_settings
 from app.core.utils import ensure_utc, utc_now
 from app.backtest_engine.service import BacktestEngineService
-from app.db.database import is_sqlite_lock_error
+from app.db.database import db_backend_name, db_connection_ok, is_sqlite_lock_error
 from app.db.models import BacktestRun, EntryPlan, EventEvidence, RawItem, SourceStatus, WorkerRunEvent
 from app.monitoring.health import HealthAuditService
 from app.services.env_settings import EnvSettingsService
@@ -222,6 +222,8 @@ def health(
         "status": audit["status"],
         "app": settings.app_name,
         "time": utc_now(),
+        "db_backend": db_backend_name(),
+        "db_connection_ok": db_connection_ok(),
         "llm_configured": llm_configured,
         "llm_model": settings.llm_model if llm_configured else None,
         "llm_base_url": settings.llm_base_url if llm_configured else None,
@@ -679,6 +681,11 @@ def list_agent_runs(
                 "technicals_result": r.technicals_output,
                 "risk_result": r.risk_output,
                 "portfolio_result": r.portfolio_output,
+                "flow_score": ((r.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("flow_score"),
+                "position_multiplier": ((r.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("position_multiplier"),
+                "used_cached_macro": ((r.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("used_cached_macro"),
+                "used_cached_fundamentals": ((r.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("used_cached_fundamentals"),
+                "fast_path": ((r.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("fast_path"),
             }
             for r in rows
         ]
@@ -712,6 +719,11 @@ def get_agent_run(
         "technicals_result": row.technicals_output,
         "risk_result": row.risk_output,
         "portfolio_result": row.portfolio_output,
+        "flow_score": ((row.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("flow_score"),
+        "position_multiplier": ((row.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("position_multiplier"),
+        "used_cached_macro": ((row.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("used_cached_macro"),
+        "used_cached_fundamentals": ((row.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("used_cached_fundamentals"),
+        "fast_path": ((row.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("fast_path"),
     }
 
 

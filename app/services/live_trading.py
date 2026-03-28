@@ -25,13 +25,15 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
+from app.analysis.taxonomy import is_follow_up_commentary
 from app.agent_graph.graph import AgentGraph
 from app.broker.alpaca import AlpacaBroker
 from app.core.config import Settings
 from app.core.logging import get_app_logger, log_live_cycle
 from app.core.market_hours import market_session_info
-from app.db.models import AgentRun, Bar1m, EntryPlan, LiveTrade, WorkerRun
+from app.db.models import AgentRun, Bar1m, EntryPlan, LiveTrade, RawItem, WorkerRun
 from app.ingestion.service import IngestionService
+from app.services.capital_confirmation import CapitalConfirmationService
 from app.services.market_data import MarketDataService
 from app.services.worker_runtime import WorkerRuntimeService
 from app.tools.news import count_new_raw_items
@@ -53,6 +55,7 @@ class LiveTradingService:
         self._agent_graph: AgentGraph | None = None
         self.market_data = MarketDataService(settings)
         self.runtime = WorkerRuntimeService()
+        self.capital_confirmation = CapitalConfirmationService()
 
     def run_cycle(self, session: Session, trigger: str = "scheduled") -> dict[str, Any]:
         if not _LIVE_CYCLE_MUTEX.acquire(blocking=False):
@@ -142,6 +145,9 @@ class LiveTradingService:
 
             cycle_start = datetime.now(timezone.utc)
             new_article_count = 0
+            new_tradeable_count = 0
+            event_driven_mode = bool(getattr(self.settings, "live_event_driven_mode", True))
+            run_mode = "full_graph"
             try:
                 self._update_run(session, run, stage="ingestion", current_agent=None)
                 ingestion = IngestionService(self.settings)
@@ -151,29 +157,37 @@ class LiveTradingService:
                     tickers=tickers,
                 )
                 new_article_count = count_new_raw_items(session, cycle_start)
+                new_tradeable_count = self._count_new_tradeable_articles(
+                    session,
+                    since=cycle_start,
+                    tickers=tickers,
+                )
             except Exception as exc:
                 self._emit_event(session, run, f"Cycle {cycle_id} ingestion failed: {exc}", level="warn", stage="ingestion")
                 logger.warning("[live] Ingestion failed (continuing): %s", exc)
 
-            if not dry_run:
+            if not dry_run and event_driven_mode:
                 last_global_run = self._get_last_agent_run_time(session, ticker=None)
                 time_since_last = (
                     (cycle_start - last_global_run).total_seconds() / 60 if last_global_run else 999
                 )
-                if new_article_count == 0 and time_since_last < 30:
+                fallback_minutes = max(1.0, float(getattr(self.settings, "live_fallback_cycle_seconds", 600)) / 60.0)
+                if new_tradeable_count == 0 and time_since_last < fallback_minutes:
                     summary = {
                         "cycle_id": cycle_id,
                         "skipped": True,
-                        "reason": "no_new_articles",
-                        "new_articles": 0,
+                        "reason": "no_new_tradeable_event",
+                        "new_articles": int(new_article_count),
+                        "new_tradeable_articles": int(new_tradeable_count),
                         "market_time": msi["et_time_str"],
                         "run_key": run.run_key,
+                        "event_driven_mode": True,
                     }
                     self.runtime.finish_run(
                         session,
                         run,
                         status="COMPLETED",
-                        stage="skipped_no_news",
+                        stage="skipped_no_tradeable_event",
                         current_ticker=None,
                         current_agent=None,
                         summary=summary,
@@ -181,16 +195,28 @@ class LiveTradingService:
                     self._emit_event(
                         session,
                         run,
-                        f"Cycle {cycle_id} skipped: no new articles",
-                        stage="skipped_no_news",
-                        payload={"reason": "no_new_articles"},
+                        f"Cycle {cycle_id} skipped: no new tradeable event",
+                        stage="skipped_no_tradeable_event",
+                        payload={"reason": "no_new_tradeable_event"},
                     )
                     logger.info(
-                        "[live] Cycle %s: no new articles (last run %.0f min ago) — skipping agents",
+                        "[live] Cycle %s: no new tradeable event (last run %.0f min ago, fallback %.0f min) — skipping agents",
                         cycle_id,
                         time_since_last,
+                        fallback_minutes,
                     )
                     return summary
+                if new_tradeable_count == 0:
+                    run_mode = "fast_path"
+                    self._emit_event(
+                        session,
+                        run,
+                        f"Cycle {cycle_id} fallback tick: no new tradeable event, running fast-path",
+                        stage="fallback_fast_path",
+                        payload={"reason": "fallback_tick_no_tradeable_event"},
+                    )
+                else:
+                    run_mode = "full_graph"
 
             broker = AlpacaBroker(self.settings)
             portfolio_value = 100_000.0
@@ -260,6 +286,7 @@ class LiveTradingService:
                         msi,
                         dry_run=dry_run,
                         run=run,
+                        fast_path=(run_mode == "fast_path"),
                     )
                     results.append(result)
                     self._emit_event(
@@ -296,6 +323,9 @@ class LiveTradingService:
                 "portfolio_value": portfolio_value,
                 "tickers_processed": len(tickers),
                 "new_articles": new_article_count,
+                "new_tradeable_articles": new_tradeable_count,
+                "event_driven_mode": event_driven_mode,
+                "run_mode": run_mode,
                 "orders_placed": sum(1 for r in results if r.get("order_placed")) + sum(1 for r in plan_results if r.get("order_placed")),
                 "plans_triggered": sum(1 for r in plan_results if r.get("order_placed")),
                 "plans_evaluated": len(plan_results),
@@ -646,6 +676,99 @@ class LiveTradingService:
         except Exception:
             return None
 
+    def _get_cached_agent_output(
+        self,
+        session: Session,
+        *,
+        ticker: str,
+        field: str,
+        ttl_minutes: int,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        ttl_minutes = max(1, int(ttl_minutes))
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=ttl_minutes)
+        try:
+            stmt = (
+                select(AgentRun)
+                .where(
+                    AgentRun.ticker == ticker.upper(),
+                    AgentRun.status == "COMPLETED",
+                    AgentRun.created_at >= cutoff,
+                )
+                .order_by(desc(AgentRun.created_at), desc(AgentRun.id))
+                .limit(1)
+            )
+            row = session.execute(stmt).scalar_one_or_none()
+            if row is None:
+                return None, False
+            value = getattr(row, field, None)
+            if isinstance(value, dict) and value:
+                return dict(value), True
+        except Exception:
+            return None, False
+        return None, False
+
+    def _annotate_agent_run(
+        self,
+        session: Session,
+        *,
+        agent_run_id: int | None,
+        updates: dict[str, Any],
+    ) -> None:
+        if not agent_run_id:
+            return
+        try:
+            row = session.get(AgentRun, agent_run_id)
+            if row is None:
+                return
+            portfolio = dict(row.portfolio_output or {})
+            metadata = dict(portfolio.get("metadata") or {})
+            live_meta = dict(metadata.get("live_runtime") or {})
+            live_meta.update({k: v for k, v in updates.items() if v is not None})
+            metadata["live_runtime"] = live_meta
+            portfolio["metadata"] = metadata
+            row.portfolio_output = portfolio
+            session.flush()
+        except Exception:
+            logger.debug("[live] failed to annotate agent run %s", agent_run_id)
+
+    def _count_new_tradeable_articles(
+        self,
+        session: Session,
+        *,
+        since: datetime,
+        tickers: list[str],
+    ) -> int:
+        rows = session.execute(
+            select(RawItem).where(RawItem.ingested_at >= since).order_by(desc(RawItem.ingested_at))
+        ).scalars().all()
+        if not rows:
+            return 0
+        ticker_set = {t.upper() for t in tickers if t}
+        count = 0
+        for row in rows:
+            title = (row.title or "").strip()
+            body = (row.body or "")[:2000]
+            combined = f"{title}\n{body}"
+            if is_follow_up_commentary(combined):
+                continue
+            if ticker_set and not self._raw_item_mentions_any_ticker(row, ticker_set):
+                continue
+            count += 1
+        return count
+
+    @staticmethod
+    def _raw_item_mentions_any_ticker(raw: RawItem, ticker_set: set[str]) -> bool:
+        meta = raw.metadata_json or {}
+        meta_ticker = str(meta.get("ticker") or "").upper().strip()
+        if meta_ticker and meta_ticker in ticker_set:
+            return True
+        title = (raw.title or "").upper()
+        body = (raw.body or "").upper()
+        for ticker in ticker_set:
+            if ticker and (ticker in title or ticker in body):
+                return True
+        return False
+
     def _get_agent_graph(self) -> AgentGraph:
         if self._agent_graph is None:
             self._agent_graph = AgentGraph(self.settings)
@@ -709,6 +832,7 @@ class LiveTradingService:
         msi: dict,
         dry_run: bool = False,
         run: WorkerRun | None = None,
+        fast_path: bool = False,
     ) -> dict[str, Any]:
         graph = self._get_agent_graph()
 
@@ -737,6 +861,24 @@ class LiveTradingService:
 
         last_run_at = self._get_last_agent_run_time(session, ticker=ticker)
         graph_context: dict[str, Any] = {"last_agent_run_at": last_run_at} if last_run_at else {}
+        if fast_path:
+            macro_cache, used_cached_macro = self._get_cached_agent_output(
+                session,
+                ticker=ticker,
+                field="macro_output",
+                ttl_minutes=int(getattr(self.settings, "live_fast_path_macro_ttl_min", 60)),
+            )
+            fund_cache, used_cached_fund = self._get_cached_agent_output(
+                session,
+                ticker=ticker,
+                field="fundamentals_output",
+                ttl_minutes=int(getattr(self.settings, "live_fast_path_fund_ttl_min", 120)),
+            )
+            graph_context["fast_path_skip_macro_fund"] = True
+            graph_context["cached_macro_signal"] = macro_cache
+            graph_context["cached_fund_signal"] = fund_cache
+            graph_context["used_cached_macro"] = used_cached_macro
+            graph_context["used_cached_fundamentals"] = used_cached_fund
         if dry_run:
             graph_context["dry_run"] = True
             graph_context["market_session"] = msi["label"]
@@ -746,6 +888,8 @@ class LiveTradingService:
         target_pct = float(state.get("final_position_pct") or 0.0)
         reasoning = (state.get("final_reasoning") or "")[:500]
         execution_plan = self._extract_execution_plan(state)
+        used_cached_macro = bool(state.get("used_cached_macro", graph_context.get("used_cached_macro", False)))
+        used_cached_fund = bool(state.get("used_cached_fundamentals", graph_context.get("used_cached_fundamentals", False)))
         if run is not None:
             self.runtime.update_run(session, run, stage="decision_ready", current_ticker=ticker, current_agent="portfolio_manager")
             session.commit()
@@ -765,6 +909,48 @@ class LiveTradingService:
         except Exception:
             pass
 
+        flow_info: dict[str, Any] = {
+            "flow_score": None,
+            "flow_bucket": None,
+            "position_multiplier": None,
+        }
+        if (
+            not dry_run
+            and bool(getattr(self.settings, "flow_confirmation_enabled", True))
+            and desired_action in {"BUY", "SHORT"}
+        ):
+            flow = self.capital_confirmation.evaluate(
+                session,
+                ticker=ticker,
+                direction=desired_action,
+            )
+            multiplier = float(flow.get("position_multiplier", 1.0) or 1.0)
+            if bool(getattr(self.settings, "flow_confirmation_soft_gate", True)):
+                target_pct = max(0.0, min(self.settings.live_max_position_pct, target_pct * multiplier))
+
+            flow_score = int(flow.get("flow_score", 50) or 50)
+            flow_info = {
+                "flow_score": flow_score,
+                "flow_bucket": flow.get("flow_bucket"),
+                "position_multiplier": multiplier,
+            }
+            reasoning = (
+                f"{reasoning} | flow={flow_score} bucket={flow.get('flow_bucket')} x{multiplier:.2f}"
+            )[:1000]
+            if flow_score < 40:
+                planned_action = desired_action
+                desired_action = "HOLD"
+                execution_plan = {
+                    "execution_mode": "WAIT_BREAKOUT_CONFIRMATION",
+                    "planned_action": planned_action,
+                    "planned_position_pct": target_pct,
+                    "valid_for_minutes": int(getattr(self.settings, "live_entry_plan_default_valid_minutes", 180)),
+                    "entry_plan": {
+                        "breakout_lookback_min": int(getattr(self.settings, "live_entry_plan_breakout_lookback_min", 15)),
+                        "notes": "flow_score_below_40",
+                    },
+                }
+
         if dry_run:
             status = "analysis" if dry_run else "skipped"
             self._record_live_trade(
@@ -781,7 +967,26 @@ class LiveTradingService:
                 market_session=msi["label"],
                 reasoning=reasoning,
             )
-            return {"ticker": ticker, "action": desired_action, "order_placed": False, "dry_run": True, "reasoning": reasoning}
+            self._annotate_agent_run(
+                session,
+                agent_run_id=agent_run_id,
+                updates={
+                    "used_cached_macro": used_cached_macro,
+                    "used_cached_fundamentals": used_cached_fund,
+                    **flow_info,
+                    "fast_path": fast_path,
+                },
+            )
+            return {
+                "ticker": ticker,
+                "action": desired_action,
+                "order_placed": False,
+                "dry_run": True,
+                "reasoning": reasoning,
+                "used_cached_macro": used_cached_macro,
+                "used_cached_fundamentals": used_cached_fund,
+                **flow_info,
+            }
 
         if desired_action == "HOLD" and self.settings.live_entry_planning_enabled:
             mode = execution_plan.get("execution_mode", "NO_TRADE")
@@ -830,6 +1035,17 @@ class LiveTradingService:
                         "target_pct": float(plan.target_pct or 0.0),
                     },
                 )
+                self._annotate_agent_run(
+                    session,
+                    agent_run_id=agent_run_id,
+                    updates={
+                        "used_cached_macro": used_cached_macro,
+                        "used_cached_fundamentals": used_cached_fund,
+                        **flow_info,
+                        "fast_path": fast_path,
+                        "entry_plan_mode": plan.execution_mode,
+                    },
+                )
                 return {
                     "ticker": ticker,
                     "action": "HOLD",
@@ -838,6 +1054,9 @@ class LiveTradingService:
                     "plan_id": plan.id,
                     "plan_mode": plan.execution_mode,
                     "planned_action": plan.planned_action,
+                    "used_cached_macro": used_cached_macro,
+                    "used_cached_fundamentals": used_cached_fund,
+                    **flow_info,
                 }
 
         if desired_action == "HOLD":
@@ -855,7 +1074,24 @@ class LiveTradingService:
                 market_session=msi["label"],
                 reasoning=reasoning,
             )
-            return {"ticker": ticker, "action": "HOLD", "order_placed": False}
+            self._annotate_agent_run(
+                session,
+                agent_run_id=agent_run_id,
+                updates={
+                    "used_cached_macro": used_cached_macro,
+                    "used_cached_fundamentals": used_cached_fund,
+                    **flow_info,
+                    "fast_path": fast_path,
+                },
+            )
+            return {
+                "ticker": ticker,
+                "action": "HOLD",
+                "order_placed": False,
+                "used_cached_macro": used_cached_macro,
+                "used_cached_fundamentals": used_cached_fund,
+                **flow_info,
+            }
 
         if self.settings.live_entry_planning_enabled:
             invalidated_count = self._replace_active_entry_plans(
@@ -879,7 +1115,7 @@ class LiveTradingService:
                     },
                 )
 
-        return self._submit_order_for_action(
+        order_result = self._submit_order_for_action(
             session=session,
             broker=broker,
             ticker=ticker,
@@ -892,6 +1128,26 @@ class LiveTradingService:
             reasoning=reasoning,
             run=run,
         )
+        order_result.update(
+            {
+                "used_cached_macro": used_cached_macro,
+                "used_cached_fundamentals": used_cached_fund,
+                **flow_info,
+                "fast_path": fast_path,
+            }
+        )
+        self._annotate_agent_run(
+            session,
+            agent_run_id=agent_run_id,
+            updates={
+                "used_cached_macro": used_cached_macro,
+                "used_cached_fundamentals": used_cached_fund,
+                **flow_info,
+                "fast_path": fast_path,
+                "final_target_pct": target_pct,
+            },
+        )
+        return order_result
 
     def _execute_active_entry_plans(
         self,

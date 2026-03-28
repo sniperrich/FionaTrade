@@ -291,18 +291,19 @@ def build_performance_context(
 def compute_dynamic_weights(
     session: Session,
     as_of: datetime | None = None,
+    base_weights: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Compute dynamic agent weights based on recent performance.
 
-    Base weights: news=45%, macro=25%, technicals=15%, fundamentals=15%.
+    Base weights default to: news=60%, technicals=20%, macro=10%, fundamentals=10%.
     Adjusted ±10% based on recent scores. Weights always sum to 1.0.
     """
-    base_weights = {
-        "technicals": 0.15,
-        "news_sentiment": 0.45,
-        "fundamentals": 0.15,
-        "macro_analyst": 0.25,
-    }
+    base_weights = dict(base_weights or {
+        "technicals": 0.20,
+        "news_sentiment": 0.60,
+        "fundamentals": 0.10,
+        "macro_analyst": 0.10,
+    })
 
     adjustments = {}
     for agent_name, base_w in base_weights.items():

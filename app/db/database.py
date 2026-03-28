@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
@@ -60,3 +60,20 @@ def is_sqlite_lock_error(exc: Exception) -> bool:
         return False
     message = str(exc).lower()
     return "database is locked" in message or "database table is locked" in message
+
+
+def db_backend_name() -> str:
+    if settings.database_url.startswith("sqlite"):
+        return "sqlite"
+    if settings.database_url.startswith("postgresql") or settings.database_url.startswith("postgres"):
+        return "postgresql"
+    return "unknown"
+
+
+def db_connection_ok() -> bool:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        return False

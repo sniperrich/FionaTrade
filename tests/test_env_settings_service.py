@@ -50,3 +50,28 @@ def test_env_settings_apply_updates_validates_extra_format(tmp_path: Path):
 
     with pytest.raises(ValueError, match="must be KEY=VALUE"):
         svc.apply_updates(updates={}, extra_updates_text="BROKEN_LINE")
+
+
+def test_env_settings_apply_updates_supports_event_driven_and_weights(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LIVE_EVENT_DRIVEN_MODE=false\nAGENT_WEIGHT_NEWS=0.45\n", encoding="utf-8")
+    svc = EnvSettingsService(env_path=env_file)
+    svc.apply_updates(
+        updates={
+            "LIVE_EVENT_DRIVEN_MODE": True,
+            "LIVE_FALLBACK_CYCLE_SECONDS": 900,
+            "FLOW_CONFIRMATION_ENABLED": "true",
+            "AGENT_WEIGHT_NEWS": "0.6",
+            "AGENT_WEIGHT_TECHNICALS": 0.2,
+            "AGENT_WEIGHT_MACRO": 0.1,
+            "AGENT_WEIGHT_FUNDAMENTALS": 0.1,
+        }
+    )
+    rendered = env_file.read_text(encoding="utf-8")
+    assert "LIVE_EVENT_DRIVEN_MODE=true" in rendered
+    assert "LIVE_FALLBACK_CYCLE_SECONDS=900" in rendered
+    assert "FLOW_CONFIRMATION_ENABLED=true" in rendered
+    assert "AGENT_WEIGHT_NEWS=0.6" in rendered
+    assert "AGENT_WEIGHT_TECHNICALS=0.2" in rendered
+    assert "AGENT_WEIGHT_MACRO=0.1" in rendered
+    assert "AGENT_WEIGHT_FUNDAMENTALS=0.1" in rendered

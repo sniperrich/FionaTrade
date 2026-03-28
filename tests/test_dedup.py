@@ -31,7 +31,7 @@ def test_ingestion_dedup_title_and_hash(session, settings):
         source_tier=1,
     )
 
-    svc._collect = lambda _session: ([item1, item2], [])  # noqa: SLF001
+    svc._collect = lambda _session, **_kwargs: ([item1, item2], [])  # noqa: SLF001
     result = svc.run(session)
 
     assert result.inserted == 1

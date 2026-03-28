@@ -168,3 +168,58 @@ def test_execute_active_plan_emits_trigger_log_event(session, settings, monkeypa
     payload = event.payload_json or {}
     assert payload.get("plan_id") == plan.id
     assert payload.get("status") == "triggered"
+
+
+def test_flow_soft_gate_downgrades_to_wait_breakout(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+
+    class DummyGraph:
+        def run(self, _session, _ticker, context=None, progress_callback=None):
+            return {
+                "final_action": "BUY",
+                "final_position_pct": 0.10,
+                "final_reasoning": "news catalyst strong",
+                "execution_plan": {"execution_mode": "IMMEDIATE"},
+            }
+
+    monkeypatch.setattr(service, "_get_agent_graph", lambda: DummyGraph())
+    monkeypatch.setattr(service, "_latest_cached_close", lambda _session, _ticker: 100.0)
+    monkeypatch.setattr(
+        service.capital_confirmation,
+        "evaluate",
+        lambda _session, ticker, direction: {
+            "flow_score": 30,
+            "flow_bucket": "WEAK",
+            "position_multiplier": 0.35,
+        },
+    )
+
+    class DummyBroker:
+        pass
+
+    result = service._process_ticker(
+        session,
+        DummyBroker(),
+        "AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="flowgate1",
+        msi={"et_time_str": "10:10 ET", "label": "open", "tradeable": True},
+        dry_run=False,
+        run=None,
+    )
+
+    assert result["action"] == "HOLD"
+    assert result["plan_created"] is True
+    assert result["plan_mode"] == "WAIT_BREAKOUT_CONFIRMATION"
+    assert result["flow_score"] == 30
+    assert abs(float(result["position_multiplier"]) - 0.35) < 1e-9
+
+    latest_plan = (
+        session.query(EntryPlan)
+        .filter(EntryPlan.ticker == "AAPL", EntryPlan.status == "ACTIVE")
+        .order_by(EntryPlan.id.desc())
+        .first()
+    )
+    assert latest_plan is not None
+    assert latest_plan.execution_mode == "WAIT_BREAKOUT_CONFIRMATION"
+    assert abs(float(latest_plan.target_pct) - 0.035) < 1e-9

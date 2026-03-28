@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+from app.db.models import AgentRun, WorkerRun
+from app.services.live_trading import LiveTradingService
+
+
+def _market_open() -> dict:
+    return {
+        "label": "open",
+        "tradeable": True,
+        "et_time_str": "09:35 ET",
+        "context_string": "US market open",
+    }
+
+
+def test_event_driven_cycle_skips_without_new_tradeable_event(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_trading_tickers": ["AAPL"],
+            "live_event_driven_mode": True,
+            "live_fallback_cycle_seconds": 600,
+            "live_entry_planning_enabled": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+
+    monkeypatch.setattr("app.services.live_trading.market_session_info", _market_open)
+    monkeypatch.setattr(service, "_refresh_bars", lambda _session, _tickers: None)
+    monkeypatch.setattr("app.services.live_trading.IngestionService.run", lambda *_args, **_kwargs: {"ok": True})
+    monkeypatch.setattr("app.services.live_trading.count_new_raw_items", lambda _session, _since: 0)
+    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers: 0)
+    monkeypatch.setattr(
+        service,
+        "_get_last_agent_run_time",
+        lambda _session, ticker=None: datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+
+    result = service.run_cycle(session, trigger="pytest")
+    assert result["skipped"] is True
+    assert result["reason"] == "no_new_tradeable_event"
+    assert result["event_driven_mode"] is True
+
+    latest = (
+        session.query(WorkerRun)
+        .filter(WorkerRun.run_type == "live_cycle")
+        .order_by(WorkerRun.id.desc())
+        .first()
+    )
+    assert latest is not None
+    assert latest.stage == "skipped_no_tradeable_event"
+
+
+def test_event_driven_cycle_uses_fast_path_on_fallback_tick(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_trading_tickers": ["AAPL"],
+            "live_event_driven_mode": True,
+            "live_fallback_cycle_seconds": 600,
+            "live_entry_planning_enabled": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    captured_fast_path: list[bool] = []
+
+    class DummyBroker:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def get_portfolio_value(self) -> float:
+            return 100_000.0
+
+    def _fake_process(
+        _session,
+        _broker,
+        ticker,
+        portfolio_value,
+        cycle_id,
+        msi,
+        dry_run=False,
+        run=None,
+        fast_path=False,
+    ):
+        captured_fast_path.append(bool(fast_path))
+        return {
+            "ticker": ticker,
+            "action": "HOLD",
+            "order_placed": False,
+        }
+
+    monkeypatch.setattr("app.services.live_trading.market_session_info", _market_open)
+    monkeypatch.setattr("app.services.live_trading.AlpacaBroker", DummyBroker)
+    monkeypatch.setattr("app.services.live_trading.IngestionService.run", lambda *_args, **_kwargs: {"ok": True})
+    monkeypatch.setattr("app.services.live_trading.count_new_raw_items", lambda _session, _since: 0)
+    monkeypatch.setattr(service, "_refresh_bars", lambda _session, _tickers: None)
+    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers: 0)
+    monkeypatch.setattr(
+        service,
+        "_get_last_agent_run_time",
+        lambda _session, ticker=None: datetime.now(timezone.utc) - timedelta(minutes=25),
+    )
+    monkeypatch.setattr(service, "_process_ticker", _fake_process)
+
+    result = service.run_cycle(session, trigger="pytest")
+    assert result["run_mode"] == "fast_path"
+    assert captured_fast_path == [True]
+
+
+def test_cached_agent_output_respects_ttl(session, settings) -> None:
+    service = LiveTradingService(settings)
+    now = datetime.now(timezone.utc)
+    session.add(
+        AgentRun(
+            ticker="AAPL",
+            status="COMPLETED",
+            created_at=now - timedelta(minutes=20),
+            macro_output={"signal": "BUY", "confidence": 70},
+        )
+    )
+    session.flush()
+
+    val_hit, hit = service._get_cached_agent_output(
+        session,
+        ticker="AAPL",
+        field="macro_output",
+        ttl_minutes=60,
+    )
+    assert hit is True
+    assert val_hit is not None and val_hit.get("signal") == "BUY"
+
+    val_miss, miss = service._get_cached_agent_output(
+        session,
+        ticker="AAPL",
+        field="macro_output",
+        ttl_minutes=5,
+    )
+    assert miss is False
+    assert val_miss is None
+

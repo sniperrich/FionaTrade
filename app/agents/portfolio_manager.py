@@ -70,7 +70,7 @@ IMPORTANT RULES:
 3. HOLD is valid when: conviction=LOW, or fewer than 2 agents align on the same direction, or the signal is unclear/mixed
 4. BUY or SHORT requires: conviction=HIGH or MEDIUM, AND at least 2 agents clearly aligned in the same direction
 5. Use SELL to close an existing long position when outlook has turned negative or neutral
-6. Weight news (45%) and macro (25%) highest for direction; fundamentals and technicals (15% each) for confirmation
+6. Weight news (60%) highest for direction; technicals (20%) as timing confirmation; macro (10%) and fundamentals (10%) as low-weight filters
 7. conviction=HIGH requires 3+ agents aligned; MEDIUM requires 2 agents aligned; LOW for 0-1 aligned or mixed signals
 8. When 2+ agents say SHORT/SELL, you SHOULD short or sell — do not override with BUY
 9. When agents disagree (e.g., fund=BUY, tech=SHORT, news=SHORT), side with the MAJORITY; if tie, return HOLD
@@ -87,6 +87,17 @@ class PortfolioManagerAgent(BaseAgent):
 
     name = "portfolio_manager"
 
+    def _base_weights(self) -> dict[str, float]:
+        weights = {
+            "news_sentiment": float(getattr(self.settings, "agent_weight_news", 0.60)),
+            "technicals": float(getattr(self.settings, "agent_weight_technicals", 0.20)),
+            "macro_analyst": float(getattr(self.settings, "agent_weight_macro", 0.10)),
+            "fundamentals": float(getattr(self.settings, "agent_weight_fundamentals", 0.10)),
+        }
+        safe = {k: max(0.0, v) for k, v in weights.items()}
+        total = sum(safe.values()) or 1.0
+        return {k: (v / total) for k, v in safe.items()}
+
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         context = context or {}
         agent_signals: dict[str, dict] = context.get("agent_signals", {})
@@ -95,7 +106,7 @@ class PortfolioManagerAgent(BaseAgent):
         as_of = context.get("as_of")
         try:
             from app.agents.reward import compute_dynamic_weights
-            dyn_weights = compute_dynamic_weights(session, as_of=as_of)
+            dyn_weights = compute_dynamic_weights(session, as_of=as_of, base_weights=self._base_weights())
         except Exception:
             dyn_weights = None
         self._current_weights = dyn_weights  # store for confidence calc
@@ -254,12 +265,7 @@ class PortfolioManagerAgent(BaseAgent):
         """Weighted average confidence — uses dynamic weights if available, else defaults."""
         weights = (
             getattr(self, "_current_weights", None)
-            or {
-                "technicals": 0.15,
-                "news_sentiment": 0.45,
-                "fundamentals": 0.15,
-                "macro_analyst": 0.25,
-            }
+            or self._base_weights()
         )
         total, weight_sum = 0.0, 0.0
         for agent, weight in weights.items():

@@ -114,9 +114,9 @@ class TestPortfolioManagerWeightedConfidence:
             "fundamentals": {"signal": "BUY", "confidence": 70},
             "macro_analyst": {"signal": "BUY", "confidence": 50},
         }
-        # 80*0.15 + 60*0.45 + 70*0.15 + 50*0.25 = 12+27+10.5+12.5 = 62.0
+        # 80*0.20 + 60*0.60 + 70*0.10 + 50*0.10 = 16+36+7+5 = 64.0
         conf = agent._compute_weighted_confidence(signals)
-        assert abs(conf - 62.0) < 0.1
+        assert abs(conf - 64.0) < 0.1
 
     def test_no_signals_returns_fifty(self, settings, session):
         agent = _make_agent(settings)
@@ -129,7 +129,7 @@ class TestPortfolioManagerWeightedConfidence:
             "technicals": {"signal": "NO_SIGNAL", "confidence": 90},
             "news_sentiment": {"signal": "BUY", "confidence": 60},
         }
-        # Only news_sentiment counts (weight 0.25)
+        # Only news_sentiment counts (single-signal path re-normalizes to 100%).
         conf = agent._compute_weighted_confidence(signals)
         assert abs(conf - 60.0) < 0.1
 

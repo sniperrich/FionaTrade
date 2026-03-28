@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from app.ingestion.sec_client import SecClient
 
 
 def _sec_submissions_payload(doc_name: str = "aapl8k.htm") -> dict:
+    as_of = datetime.now(timezone.utc) - timedelta(days=1)
+    filing_date = as_of.strftime("%Y-%m-%d")
+    acceptance = as_of.strftime("%Y-%m-%dT%H:%M:%S+00:00")
     return {
         "filings": {
             "recent": {
                 "form": ["8-K"],
-                "filingDate": ["2026-01-29"],
-                "acceptanceDateTime": ["2026-01-29T16:05:10-05:00"],
+                "filingDate": [filing_date],
+                "acceptanceDateTime": [acceptance],
                 "accessionNumber": ["0000320193-26-000010"],
                 "primaryDocument": [doc_name],
             }

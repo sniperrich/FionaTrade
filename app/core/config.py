@@ -191,6 +191,21 @@ class Settings(BaseSettings):
     live_allow_premarket: bool = False
     # Refuse new live orders when local Bar1m cache is older than this threshold.
     live_data_max_age_minutes: float = 20.0
+    # Event-driven live mode: run full graph when new tradeable news arrives.
+    live_event_driven_mode: bool = True
+    # Fallback full/light cycle interval when no new tradeable events.
+    live_fallback_cycle_seconds: int = 600
+    # Fast-path cache TTL for macro/fundamentals agent outputs.
+    live_fast_path_macro_ttl_min: int = 60
+    live_fast_path_fund_ttl_min: int = 120
+    # Capital confirmation layer (volume/follow-through/relative-strength).
+    flow_confirmation_enabled: bool = True
+    flow_confirmation_soft_gate: bool = True
+    # Base agent weights (direction bias).
+    agent_weight_news: float = 0.60
+    agent_weight_technicals: float = 0.20
+    agent_weight_macro: float = 0.10
+    agent_weight_fundamentals: float = 0.10
     # Entry-planning controls (Live First v1).
     live_entry_planning_enabled: bool = True
     live_entry_plan_default_valid_minutes: int = 180
