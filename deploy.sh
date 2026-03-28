@@ -65,11 +65,17 @@ chown "$SERVICE_USER:$SERVICE_USER" "$DEPLOY_DIR/logs"
 
 # ── 4. Python 虚拟环境 ────────────────────────────────────────────────────────
 echo "[4/7] 创建虚拟环境并安装依赖..."
+if [ -d "$VENV_DIR" ]; then
+    if ! run_as_service_user "$VENV_DIR/bin/python" -c "import sys; print(sys.version)" >/dev/null 2>&1; then
+        echo "  ⚠ 检测到已有虚拟环境不可用（常见原因：从其它机器复制了 .venv），正在重建..."
+        rm -rf "$VENV_DIR"
+    fi
+fi
 if [ ! -d "$VENV_DIR" ]; then
     run_as_service_user python3 -m venv "$VENV_DIR"
 fi
-run_as_service_user "$VENV_DIR/bin/pip" install --upgrade pip -q
-run_as_service_user "$VENV_DIR/bin/pip" install -e "$DEPLOY_DIR" -q
+run_as_service_user "$VENV_DIR/bin/python" -m pip install --upgrade pip -q
+run_as_service_user "$VENV_DIR/bin/python" -m pip install -e "$DEPLOY_DIR" -q
 
 # ── 5. 环境变量 ───────────────────────────────────────────────────────────────
 if [ ! -f "$DEPLOY_DIR/.env" ]; then

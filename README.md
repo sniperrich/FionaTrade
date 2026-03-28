@@ -364,6 +364,8 @@ systemctl restart fionatrade-worker
 curl http://localhost:6888/api/health
 ```
 
+注意：不要把本机的 `.venv/` 复制到服务器。若已复制，`deploy.sh` 现在会自动检测并重建虚拟环境。
+
 可选：自定义部署目录/服务用户/端口
 
 ```bash
