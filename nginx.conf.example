@@ -1,6 +1,13 @@
 server {
     listen 80;
-    server_name your-domain.com;          # ← 改成你的域名或服务器IP
+    server_name trade.taylorswift.fit;
+
+    # 访问白名单（仅允许以下 IP 访问）
+    allow 104.245.12.20;
+    allow 151.244.134.76;
+    allow 127.0.0.1;
+    allow ::1;
+    deny all;
 
     # 强制跳转 HTTPS（配好SSL后取消注释）
     # return 301 https://$host$request_uri;
@@ -29,7 +36,7 @@ server {
 # HTTPS 配置（certbot --nginx 后自动生成，或手动配置）
 # server {
 #     listen 443 ssl;
-#     server_name your-domain.com;
+#     server_name trade.taylorswift.fit;
 #     ssl_certificate     /etc/letsencrypt/live/your-domain.com/fullchain.pem;
 #     ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
 #     ... 同上 location 块 ...

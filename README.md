@@ -385,6 +385,10 @@ PYTHON_BIN=/usr/bin/python3.11 bash deploy.sh
 SKIP_APT=1 bash deploy.sh
 ```
 
+Nginx 示例已预置：
+- 域名：`trade.taylorswift.fit`
+- 白名单 IP：`104.245.12.20`、`151.244.134.76`（另允许本机 `127.0.0.1` / `::1`）
+
 ### 必填 API Keys
 
 | 变量 | 说明 |
