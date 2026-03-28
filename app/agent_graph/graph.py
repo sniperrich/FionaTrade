@@ -278,6 +278,13 @@ class AgentGraph:
     ) -> None:
         """Store a summary of this run in the AgentRun table."""
         try:
+            final_confidence = None
+            portfolio = state.get("portfolio_manager_result")
+            if isinstance(portfolio, dict):
+                try:
+                    final_confidence = int(portfolio.get("confidence"))
+                except Exception:
+                    final_confidence = None
             run = AgentRun(
                 ticker=ticker.upper(),
                 trigger="scheduled",
@@ -288,6 +295,7 @@ class AgentGraph:
                 risk_output=state.get("risk_manager_result") or {},
                 portfolio_output=state.get("portfolio_manager_result") or {},
                 final_action=state.get("final_action", "HOLD"),
+                final_confidence=final_confidence,
                 final_position_pct=state.get("final_position_pct", 0.0),
                 final_reasoning=state.get("final_reasoning", ""),
                 execution_ms=int(elapsed * 1000),

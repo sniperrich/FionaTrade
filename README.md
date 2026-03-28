@@ -109,6 +109,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 - 事件驱动优先：有新增可交易事件才跑完整决策
 - 无新增事件时仅 10 分钟兜底触发一次 fast-path
 - fast-path 复用 Macro/Fund TTL 缓存（默认 60/120 分钟）
+- live 执行前有置信度闸门：`LIVE_MIN_CONFIDENCE`（默认 70），低于阈值的 BUY/SHORT/SELL 会被降级为 HOLD（不下单）
 
 **资金确认层（软门槛）：**
 - 输出 `flow_score(0-100)` + `flow_bucket(HIGH/MEDIUM/LOW/WEAK)` + `position_multiplier`
@@ -171,7 +172,7 @@ tests/           pytest 测试集
 | 方法 | 路径 | 返回格式 |
 |------|------|---------|
 | GET | `/api/health` | `{status, llm_configured, llm_model, sources_online, ...}` |
-| GET | `/api/live/status` | **平铺字段**：`{enabled, market_tradeable, market_session(字符串), market_time, tickers, worker, supervisor, command_queue, ...}` |
+| GET | `/api/live/status` | **平铺字段**：`{enabled, market_tradeable, market_session(字符串), market_time, tickers, live_min_confidence, worker, supervisor, command_queue, ...}` |
 | GET | `/api/worker/status` | worker + supervisor heartbeat + command queue 快照 |
 | GET | `/api/worker/history` | recent worker runs + commands + runtime events |
 | GET | `/api/agent/runs` | **包装对象**：`{"runs": [...]}` — 每项用 `*_result` 字段名 |

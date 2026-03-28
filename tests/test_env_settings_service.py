@@ -58,6 +58,7 @@ def test_env_settings_apply_updates_supports_event_driven_and_weights(tmp_path: 
     svc = EnvSettingsService(env_path=env_file)
     svc.apply_updates(
         updates={
+            "LIVE_MIN_CONFIDENCE": 72,
             "LIVE_EVENT_DRIVEN_MODE": True,
             "LIVE_FALLBACK_CYCLE_SECONDS": 900,
             "FLOW_CONFIRMATION_ENABLED": "true",
@@ -68,6 +69,7 @@ def test_env_settings_apply_updates_supports_event_driven_and_weights(tmp_path: 
         }
     )
     rendered = env_file.read_text(encoding="utf-8")
+    assert "LIVE_MIN_CONFIDENCE=72" in rendered
     assert "LIVE_EVENT_DRIVEN_MODE=true" in rendered
     assert "LIVE_FALLBACK_CYCLE_SECONDS=900" in rendered
     assert "FLOW_CONFIRMATION_ENABLED=true" in rendered

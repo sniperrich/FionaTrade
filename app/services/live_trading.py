@@ -324,6 +324,7 @@ class LiveTradingService:
                 "tickers_processed": len(tickers),
                 "new_articles": new_article_count,
                 "new_tradeable_articles": new_tradeable_count,
+                "live_min_confidence": self._effective_live_min_confidence(),
                 "event_driven_mode": event_driven_mode,
                 "run_mode": run_mode,
                 "orders_placed": sum(1 for r in results if r.get("order_placed")) + sum(1 for r in plan_results if r.get("order_placed")),
@@ -429,6 +430,25 @@ class LiveTradingService:
         if not tickers:
             tickers = list(self.settings.agent_tickers_override or [])
         return [t.upper() for t in tickers if t]
+
+    def _effective_live_min_confidence(self) -> int:
+        configured = int(getattr(self.settings, "live_min_confidence", 0) or 0)
+        if configured <= 0:
+            configured = int(getattr(self.settings, "min_trade_confidence", 0) or 0)
+        return max(0, min(100, configured))
+
+    @staticmethod
+    def _extract_final_confidence(state: dict[str, Any]) -> int:
+        raw = None
+        portfolio = state.get("portfolio_manager_result")
+        if isinstance(portfolio, dict):
+            raw = portfolio.get("confidence")
+        if raw is None:
+            raw = state.get("final_confidence")
+        try:
+            return max(0, min(100, int(raw)))
+        except Exception:
+            return 0
 
     def _latest_cached_close(self, session: Session, ticker: str) -> float | None:
         row = session.execute(
@@ -888,6 +908,9 @@ class LiveTradingService:
         target_pct = float(state.get("final_position_pct") or 0.0)
         reasoning = (state.get("final_reasoning") or "")[:500]
         execution_plan = self._extract_execution_plan(state)
+        final_confidence = self._extract_final_confidence(state)
+        live_min_confidence = self._effective_live_min_confidence()
+        blocked_by_confidence = False
         used_cached_macro = bool(state.get("used_cached_macro", graph_context.get("used_cached_macro", False)))
         used_cached_fund = bool(state.get("used_cached_fundamentals", graph_context.get("used_cached_fundamentals", False)))
         if run is not None:
@@ -895,6 +918,36 @@ class LiveTradingService:
             session.commit()
 
         target_pct = min(target_pct, self.settings.live_max_position_pct)
+        if desired_action in {"BUY", "SHORT", "SELL"} and final_confidence < live_min_confidence:
+            blocked_by_confidence = True
+            prior_action = desired_action
+            desired_action = "HOLD"
+            target_pct = 0.0
+            execution_plan = {}
+            reasoning = (
+                f"{reasoning} | confidence_gate={final_confidence}<{live_min_confidence}, "
+                f"downgraded {prior_action}->HOLD"
+            )[:1000]
+            if run is not None:
+                self.runtime.add_event(
+                    session,
+                    "live_cycle",
+                    (
+                        f"{ticker}: confidence gate blocked {prior_action} "
+                        f"(confidence={final_confidence}, min={live_min_confidence})"
+                    ),
+                    run=run,
+                    level="info",
+                    stage="confidence_gate_blocked",
+                    ticker=ticker,
+                    agent="portfolio_manager",
+                    payload={
+                        "blocked_action": prior_action,
+                        "final_confidence": final_confidence,
+                        "live_min_confidence": live_min_confidence,
+                    },
+                )
+                session.commit()
 
         agent_run_id: int | None = None
         try:
@@ -975,6 +1028,9 @@ class LiveTradingService:
                     "used_cached_fundamentals": used_cached_fund,
                     **flow_info,
                     "fast_path": fast_path,
+                    "final_confidence": final_confidence,
+                    "live_min_confidence": live_min_confidence,
+                    "blocked_by_confidence": blocked_by_confidence,
                 },
             )
             return {
@@ -985,6 +1041,9 @@ class LiveTradingService:
                 "reasoning": reasoning,
                 "used_cached_macro": used_cached_macro,
                 "used_cached_fundamentals": used_cached_fund,
+                "final_confidence": final_confidence,
+                "live_min_confidence": live_min_confidence,
+                "blocked_by_confidence": blocked_by_confidence,
                 **flow_info,
             }
 
@@ -1044,6 +1103,9 @@ class LiveTradingService:
                         **flow_info,
                         "fast_path": fast_path,
                         "entry_plan_mode": plan.execution_mode,
+                        "final_confidence": final_confidence,
+                        "live_min_confidence": live_min_confidence,
+                        "blocked_by_confidence": blocked_by_confidence,
                     },
                 )
                 return {
@@ -1056,6 +1118,9 @@ class LiveTradingService:
                     "planned_action": plan.planned_action,
                     "used_cached_macro": used_cached_macro,
                     "used_cached_fundamentals": used_cached_fund,
+                    "final_confidence": final_confidence,
+                    "live_min_confidence": live_min_confidence,
+                    "blocked_by_confidence": blocked_by_confidence,
                     **flow_info,
                 }
 
@@ -1082,6 +1147,9 @@ class LiveTradingService:
                     "used_cached_fundamentals": used_cached_fund,
                     **flow_info,
                     "fast_path": fast_path,
+                    "final_confidence": final_confidence,
+                    "live_min_confidence": live_min_confidence,
+                    "blocked_by_confidence": blocked_by_confidence,
                 },
             )
             return {
@@ -1090,6 +1158,9 @@ class LiveTradingService:
                 "order_placed": False,
                 "used_cached_macro": used_cached_macro,
                 "used_cached_fundamentals": used_cached_fund,
+                "final_confidence": final_confidence,
+                "live_min_confidence": live_min_confidence,
+                "blocked_by_confidence": blocked_by_confidence,
                 **flow_info,
             }
 
@@ -1134,6 +1205,9 @@ class LiveTradingService:
                 "used_cached_fundamentals": used_cached_fund,
                 **flow_info,
                 "fast_path": fast_path,
+                "final_confidence": final_confidence,
+                "live_min_confidence": live_min_confidence,
+                "blocked_by_confidence": blocked_by_confidence,
             }
         )
         self._annotate_agent_run(
@@ -1145,6 +1219,9 @@ class LiveTradingService:
                 **flow_info,
                 "fast_path": fast_path,
                 "final_target_pct": target_pct,
+                "final_confidence": final_confidence,
+                "live_min_confidence": live_min_confidence,
+                "blocked_by_confidence": blocked_by_confidence,
             },
         )
         return order_result

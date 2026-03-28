@@ -30,6 +30,7 @@ class EnvSettingsService:
         "LIVE_FALLBACK_CYCLE_SECONDS",
         "LIVE_FAST_PATH_MACRO_TTL_MIN",
         "LIVE_FAST_PATH_FUND_TTL_MIN",
+        "LIVE_MIN_CONFIDENCE",
         "MIN_TRADE_CONFIDENCE",
     }
     FLOAT_KEYS = {
@@ -49,6 +50,7 @@ class EnvSettingsService:
         "AGENT_TICKERS_OVERRIDE",
         "POLL_INTERVAL_SECONDS",
         "LIVE_CYCLE_INTERVAL_SECONDS",
+        "LIVE_MIN_CONFIDENCE",
         "MIN_TRADE_CONFIDENCE",
         "LIVE_MAX_POSITION_PCT",
         "LIVE_DATA_MAX_AGE_MINUTES",
@@ -83,6 +85,7 @@ class EnvSettingsService:
                 "AGENT_TICKERS_OVERRIDE": ",".join(settings.agent_tickers_override or []),
                 "POLL_INTERVAL_SECONDS": settings.poll_interval_seconds,
                 "LIVE_CYCLE_INTERVAL_SECONDS": settings.live_cycle_interval_seconds,
+                "LIVE_MIN_CONFIDENCE": settings.live_min_confidence,
                 "MIN_TRADE_CONFIDENCE": settings.min_trade_confidence,
                 "LIVE_MAX_POSITION_PCT": settings.live_max_position_pct,
                 "LIVE_DATA_MAX_AGE_MINUTES": settings.live_data_max_age_minutes,

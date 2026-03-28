@@ -187,6 +187,8 @@ class Settings(BaseSettings):
     live_cycle_interval_seconds: int = 300
     # Maximum portfolio allocation per position (0.0–1.0)
     live_max_position_pct: float = 0.10
+    # Live execution confidence gate; BUY/SHORT/SELL below this are downgraded to HOLD.
+    live_min_confidence: int = 70
     # Allow order placement during pre-market session (default: False)
     live_allow_premarket: bool = False
     # Refuse new live orders when local Bar1m cache is older than this threshold.
