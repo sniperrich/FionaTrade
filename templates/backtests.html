@@ -89,6 +89,18 @@
           <label class="text-sm"><input type="checkbox" id="bt-use-validation" checked /> Use signal validation</label>
           <label class="text-sm"><input type="checkbox" id="bt-use-tradeability" checked /> Use tradeability filter</label>
           <label class="text-sm"><input type="checkbox" id="bt-use-quality-filter" /> Use event quality filter</label>
+          <label class="text-sm"><input type="checkbox" id="bt-flow-enabled" {% if backtest_defaults.flow_confirmation_enabled %}checked{% endif %} /> Flow confirmation enabled</label>
+          <label class="text-sm"><input type="checkbox" id="bt-flow-soft-gate" {% if backtest_defaults.flow_confirmation_soft_gate %}checked{% endif %} /> Flow soft gate + weak-flow breakout wait</label>
+        </div>
+      </div>
+      <div class="form-row mb8">
+        <div class="form-group">
+          <label>Flow Breakout Lookback (min)</label>
+          <input type="number" id="bt-flow-breakout-lookback-min" min="5" max="120" step="1" value="{{ backtest_defaults.flow_breakout_lookback_min }}" />
+        </div>
+        <div class="form-group">
+          <label>Flow Wait Valid (min)</label>
+          <input type="number" id="bt-flow-wait-valid-minutes" min="5" max="1440" step="1" value="{{ backtest_defaults.flow_wait_valid_minutes }}" />
         </div>
       </div>
       <div class="form-group mb12">
@@ -238,6 +250,10 @@ function currentBacktestPayload(){
     use_signal_validation: document.getElementById('bt-use-validation').checked,
     use_tradeability_filter: document.getElementById('bt-use-tradeability').checked,
     use_event_quality_filter: document.getElementById('bt-use-quality-filter').checked,
+    flow_confirmation_enabled: document.getElementById('bt-flow-enabled').checked,
+    flow_confirmation_soft_gate: document.getElementById('bt-flow-soft-gate').checked,
+    flow_breakout_lookback_min: Number(document.getElementById('bt-flow-breakout-lookback-min').value || 15),
+    flow_wait_valid_minutes: Number(document.getElementById('bt-flow-wait-valid-minutes').value || 180),
     sources: selectedSources(),
   };
 }

@@ -459,6 +459,10 @@ def backtest_options(
             "use_signal_validation": bool(getattr(settings, "validation_enabled", True)),
             "use_tradeability_filter": settings.event_tradeability_filter_enabled,
             "use_event_quality_filter": settings.backtest_use_event_quality_filter,
+            "flow_confirmation_enabled": bool(getattr(settings, "flow_confirmation_enabled", True)),
+            "flow_confirmation_soft_gate": bool(getattr(settings, "flow_confirmation_soft_gate", True)),
+            "flow_breakout_lookback_min": int(getattr(settings, "live_entry_plan_breakout_lookback_min", 15)),
+            "flow_wait_valid_minutes": int(getattr(settings, "live_entry_plan_default_valid_minutes", 180)),
         },
     }
 
@@ -516,6 +520,10 @@ def queue_backtest(
         "use_signal_validation": bool(payload.get("use_signal_validation", getattr(settings, "validation_enabled", True))),
         "use_tradeability_filter": bool(payload.get("use_tradeability_filter", settings.event_tradeability_filter_enabled)),
         "use_event_quality_filter": bool(payload.get("use_event_quality_filter", settings.backtest_use_event_quality_filter)),
+        "flow_confirmation_enabled": bool(payload.get("flow_confirmation_enabled", getattr(settings, "flow_confirmation_enabled", True))),
+        "flow_confirmation_soft_gate": bool(payload.get("flow_confirmation_soft_gate", getattr(settings, "flow_confirmation_soft_gate", True))),
+        "flow_breakout_lookback_min": int(payload.get("flow_breakout_lookback_min", getattr(settings, "live_entry_plan_breakout_lookback_min", 15))),
+        "flow_wait_valid_minutes": int(payload.get("flow_wait_valid_minutes", getattr(settings, "live_entry_plan_default_valid_minutes", 180))),
         "trigger": "api",
     }
 

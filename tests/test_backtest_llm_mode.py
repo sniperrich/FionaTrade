@@ -146,6 +146,7 @@ def test_backtest_llm_position_pct_suggestion_caps_position(session, settings):
             "risk_sizing": False,
             "slippage_bps": 0.0,
             "use_signal_validation": False,
+            "flow_confirmation_enabled": False,
         },
     )
     run = svc.get_run(session, result.run_id)

@@ -304,6 +304,7 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
   - 选择 `rules / llm`
   - 选择 `event_profile`
   - 选择 `source filter`
+  - 选择 `flow confirmation` 与 `soft gate` 参数
   - 查看最近 runs、metrics、trade log、事件进度条
 - Worker 负责：
   - 消费 `run_backtest` command
@@ -311,6 +312,8 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
   - 在后台执行回测，不依赖浏览器存活
 - Backtest 运行中会持续把 `progress_current / progress_total / progress_pct` 写回 `BacktestRun.metrics`
 - 对于主循环前的耗时阶段，还会持续写入 `phase_*` 字段，因此 Finnhub 预热/LLM 预取期间 UI 不会一直卡在 `0/N`
+- 回测已接入资金确认层：会记录 `flow_score / flow_bucket / flow_position_multiplier`，并在 soft gate 开启时按 multiplier 缩放仓位
+- 当 `flow_score < 40` 且 soft gate 开启时，回测会模拟 `WAIT_BREAKOUT_CONFIRMATION`：在有效窗口内等待突破确认，未触发则跳过该笔
 - Supervisor heartbeat 遇到短时 SQLite lock 会跳过本次写入并继续守护，不会再因为 heartbeat 写失败把 worker 一起带崩
 - Worker 重启时会把上次异常中断留下的 `RUNNING` backtest / worker command / worker run 统一标记为 `FAILED`
 

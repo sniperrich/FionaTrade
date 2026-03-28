@@ -28,6 +28,7 @@ from app.core.config import Settings
 from app.core.logging import ensure_logging, get_app_logger, log_writeout
 from app.core.utils import ensure_utc, utc_now
 from app.db.models import BacktestRun, BacktestTrade, Bar1m, Event
+from app.services.capital_confirmation import CapitalConfirmationService
 
 
 @dataclass
@@ -99,6 +100,7 @@ class BacktestEngineService:
         ensure_logging(log_dir=settings.log_dir, log_level=settings.log_level)
         self.analysis = AnalysisService(settings)
         self.validator = SignalValidator(settings)
+        self.capital_confirmation = CapitalConfirmationService()
         self.logger = get_app_logger()
 
     @staticmethod
@@ -474,6 +476,74 @@ class BacktestEngineService:
 
         return None
 
+    def _first_breakout_confirmation_bar(
+        self,
+        session: Session,
+        ticker: str,
+        *,
+        direction: str,
+        start_ts: datetime,
+        end_ts: datetime,
+        lookback_min: int,
+        regular_session_only: bool = False,
+    ) -> Bar1m | None:
+        direction_u = (direction or "").upper().strip()
+        if direction_u not in {"BUY", "SHORT"}:
+            return None
+
+        window_start = ensure_utc(start_ts)
+        window_end = ensure_utc(end_ts)
+        if window_end <= window_start:
+            return None
+
+        bars = (
+            session.execute(
+                select(Bar1m)
+                .where(
+                    and_(
+                        Bar1m.ticker == ticker,
+                        Bar1m.ts >= window_start,
+                        Bar1m.ts <= window_end,
+                    )
+                )
+                .order_by(Bar1m.ts.asc())
+            )
+            .scalars()
+            .all()
+        )
+        if regular_session_only:
+            bars = [bar for bar in bars if self._is_regular_session_bar(bar.ts)]
+        if not bars:
+            return None
+
+        lookback = max(5, min(int(lookback_min), 240))
+        for candidate in bars:
+            history = (
+                session.execute(
+                    select(Bar1m.high, Bar1m.low)
+                    .where(
+                        and_(
+                            Bar1m.ticker == ticker,
+                            Bar1m.ts < candidate.ts,
+                            Bar1m.ts >= ensure_utc(candidate.ts) - timedelta(minutes=lookback + 2),
+                        )
+                    )
+                    .order_by(Bar1m.ts.desc())
+                    .limit(lookback)
+                )
+                .all()
+            )
+            if len(history) < 3:
+                continue
+            range_high = max(float(row[0]) for row in history)
+            range_low = min(float(row[1]) for row in history)
+            close_px = float(candidate.close or 0.0)
+            if direction_u == "BUY" and close_px >= range_high:
+                return candidate
+            if direction_u == "SHORT" and close_px <= range_low:
+                return candidate
+        return None
+
     def _compute_metrics(self, initial_nav: float, equity_curve: list[dict], pnl_list: list[float]) -> dict:
         final_nav = equity_curve[-1]["equity"] if equity_curve else initial_nav
         total_return = (final_nav - initial_nav) / initial_nav if initial_nav else 0.0
@@ -615,6 +685,28 @@ class BacktestEngineService:
             params.get("conviction_position_sizing"),
             default=self.settings.backtest_conviction_position_sizing,
         )
+        flow_confirmation_enabled = self._as_bool(
+            params.get("flow_confirmation_enabled"),
+            default=getattr(self.settings, "flow_confirmation_enabled", True),
+        )
+        flow_confirmation_soft_gate = self._as_bool(
+            params.get("flow_confirmation_soft_gate"),
+            default=getattr(self.settings, "flow_confirmation_soft_gate", True),
+        )
+        flow_breakout_lookback_min = int(
+            params.get(
+                "flow_breakout_lookback_min",
+                getattr(self.settings, "live_entry_plan_breakout_lookback_min", 15),
+            )
+        )
+        flow_breakout_lookback_min = max(5, min(flow_breakout_lookback_min, 120))
+        flow_wait_valid_minutes = int(
+            params.get(
+                "flow_wait_valid_minutes",
+                getattr(self.settings, "live_entry_plan_default_valid_minutes", 180),
+            )
+        )
+        flow_wait_valid_minutes = max(5, min(flow_wait_valid_minutes, 1440))
         # Signal Validation Layer: on by default when validation_enabled=True in settings
         use_signal_validation = self._as_bool(
             params.get("use_signal_validation"),
@@ -716,6 +808,13 @@ class BacktestEngineService:
         entry_late_skipped = 0
         next_session_entry_used = 0
         tradeability_reason_counts: dict[str, int] = {}
+        flow_scaled_trades = 0
+        flow_wait_mode_events = 0
+        flow_wait_triggered = 0
+        flow_wait_expired = 0
+        flow_score_sum = 0.0
+        flow_score_count = 0
+        flow_bucket_counts: dict[str, int] = {}
 
         current_day: date | None = None
         day_start_equity = equity
@@ -863,6 +962,10 @@ class BacktestEngineService:
                 "event_quality_min_score": event_quality_min_score,
                 "event_quality_fail_open": event_quality_fail_open,
                 "conviction_position_sizing": conviction_position_sizing,
+                "flow_confirmation_enabled": flow_confirmation_enabled,
+                "flow_confirmation_soft_gate": flow_confirmation_soft_gate,
+                "flow_breakout_lookback_min": flow_breakout_lookback_min,
+                "flow_wait_valid_minutes": flow_wait_valid_minutes,
             },
         )
 
@@ -1144,6 +1247,10 @@ class BacktestEngineService:
             conviction_risk_multiplier = 1.0
             tradeability_score: int | None = None
             tradeability_reason: str | None = None
+            flow_score: int | None = None
+            flow_bucket: str | None = None
+            flow_position_multiplier = 1.0
+            flow_wait_mode = False
 
             if use_tradeability_filter:
                 tradeability = tradeability_result(event)
@@ -1194,6 +1301,24 @@ class BacktestEngineService:
                 emit_progress(idx)
                 continue
 
+            flow_direction = "BUY" if str(action).upper() == "BUY" else "SHORT"
+            if flow_confirmation_enabled and flow_direction in {"BUY", "SHORT"}:
+                flow = self.capital_confirmation.evaluate(
+                    session,
+                    ticker=ticker,
+                    direction=flow_direction,
+                    as_of=event_ts,
+                )
+                flow_score = int(flow.get("flow_score", 50) or 50)
+                flow_bucket = str(flow.get("flow_bucket", "LOW") or "LOW").upper()
+                flow_position_multiplier = max(0.0, float(flow.get("position_multiplier", 1.0) or 1.0))
+                flow_score_sum += float(flow_score)
+                flow_score_count += 1
+                flow_bucket_counts[flow_bucket] = flow_bucket_counts.get(flow_bucket, 0) + 1
+                if flow_confirmation_soft_gate and flow_score < 40:
+                    flow_wait_mode = True
+                    flow_wait_mode_events += 1
+
             if use_llm:
                 effective_position_pct_suggestion = self._effective_position_pct_suggestion(
                     event=event,
@@ -1243,17 +1368,35 @@ class BacktestEngineService:
                         continue
             # ─────────────────────────────────────────────────────────────────
 
-            entry_bar = self._bar_at_or_after(
-                session,
-                ticker,
-                event_ts + timedelta(minutes=1),
-                regular_session_only=regular_session_only,
-            )
+            entry_deadline_min = entry_window_min
+            if flow_wait_mode:
+                entry_deadline_min = max(entry_deadline_min, flow_wait_valid_minutes)
+                entry_bar = self._first_breakout_confirmation_bar(
+                    session,
+                    ticker,
+                    direction=flow_direction,
+                    start_ts=event_ts + timedelta(minutes=1),
+                    end_ts=event_ts + timedelta(minutes=entry_deadline_min),
+                    lookback_min=flow_breakout_lookback_min,
+                    regular_session_only=regular_session_only,
+                )
+                if entry_bar is None:
+                    flow_wait_expired += 1
+                    emit_progress(idx)
+                    continue
+                flow_wait_triggered += 1
+            else:
+                entry_bar = self._bar_at_or_after(
+                    session,
+                    ticker,
+                    event_ts + timedelta(minutes=1),
+                    regular_session_only=regular_session_only,
+                )
             # Skip if no bar within configured entry window of event.
             if not entry_bar:
                 emit_progress(idx)
                 continue
-            if ensure_utc(entry_bar.ts) > event_ts + timedelta(minutes=entry_window_min):
+            if ensure_utc(entry_bar.ts) > event_ts + timedelta(minutes=entry_deadline_min):
                 delay_min = (ensure_utc(entry_bar.ts) - event_ts).total_seconds() / 60.0
                 allow_next_session = (
                     allow_next_session_entry
@@ -1300,6 +1443,10 @@ class BacktestEngineService:
                 risk_sizing=risk_sizing,
                 position_pct_suggestion=effective_position_pct_suggestion,
             )
+            if flow_confirmation_enabled and flow_confirmation_soft_gate and flow_position_multiplier < 1.0:
+                qty *= flow_position_multiplier
+            if flow_confirmation_enabled and flow_confirmation_soft_gate and flow_position_multiplier < 1.0 and qty > 0:
+                flow_scaled_trades += 1
             if qty <= 0:
                 emit_progress(idx)
                 continue
@@ -1368,6 +1515,10 @@ class BacktestEngineService:
                 "tradeability_reason": tradeability_reason,
                 "conviction_risk_multiplier": conviction_risk_multiplier,
                 "exit_reason": exit_reason,
+                "flow_score": flow_score,
+                "flow_bucket": flow_bucket,
+                "flow_position_multiplier": flow_position_multiplier,
+                "flow_wait_mode": flow_wait_mode,
             }
             trade_log.append(trade_entry)
             equity_curve.append({"ts": exit_ts.isoformat(), "equity": equity})
@@ -1449,6 +1600,16 @@ class BacktestEngineService:
         metrics["conviction_min_risk_multiplier"] = self.settings.backtest_conviction_min_risk_multiplier
         metrics["conviction_max_risk_multiplier"] = self.settings.backtest_conviction_max_risk_multiplier
         metrics["conviction_position_floor"] = self.settings.backtest_conviction_position_floor
+        metrics["flow_confirmation_enabled"] = flow_confirmation_enabled
+        metrics["flow_confirmation_soft_gate"] = flow_confirmation_soft_gate
+        metrics["flow_breakout_lookback_min"] = flow_breakout_lookback_min
+        metrics["flow_wait_valid_minutes"] = flow_wait_valid_minutes
+        metrics["flow_scaled_trades"] = flow_scaled_trades
+        metrics["flow_wait_mode_events"] = flow_wait_mode_events
+        metrics["flow_wait_triggered"] = flow_wait_triggered
+        metrics["flow_wait_expired"] = flow_wait_expired
+        metrics["flow_bucket_counts"] = flow_bucket_counts
+        metrics["avg_flow_score"] = (flow_score_sum / flow_score_count) if flow_score_count else None
         metrics["entry_late_skipped"] = entry_late_skipped
         metrics["next_session_entry_used"] = next_session_entry_used
         metrics["progress_current"] = total_events
