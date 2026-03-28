@@ -15,6 +15,7 @@ VENV_DIR="${VENV_DIR:-$DEPLOY_DIR/.venv}"
 SERVICE_USER="${SERVICE_USER:-$(id -un)}"
 APP_PORT="${APP_PORT:-6888}"
 REPO_URL="${REPO_URL:-}"   # 如果用 git 部署，填入你的 repo URL；否则留空（手动上传代码）
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 
 run_as_service_user() {
     if [ "$SERVICE_USER" = "root" ]; then
@@ -24,16 +25,52 @@ run_as_service_user() {
     fi
 }
 
+python_version_ok() {
+    local bin="$1"
+    "$bin" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+}
+
 echo "=== FionaTrade 部署脚本 ==="
 echo "DEPLOY_DIR=$DEPLOY_DIR"
 echo "SERVICE_USER=$SERVICE_USER"
 echo "APP_PORT=$APP_PORT"
+echo "PYTHON_BIN=$PYTHON_BIN"
 
 # ── 1. 依赖 ──────────────────────────────────────────────────────────────────
 echo "[1/7] 安装系统依赖..."
 apt-get update -q
 apt-get install -y python3 python3-venv python3-dev \
     git nginx curl sqlite3 build-essential
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    if [ "$PYTHON_BIN" = "python3.11" ]; then
+        echo "  python3.11 未找到，尝试安装 python3.11..."
+        apt-get install -y python3.11 python3.11-venv python3.11-dev || true
+    fi
+fi
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1 && python_version_ok python3; then
+        PYTHON_BIN="python3"
+    else
+        echo "❌ 需要 Python >= 3.11，但当前系统未找到可用解释器。"
+        echo "   当前 python3 版本：$(python3 --version 2>/dev/null || echo unavailable)"
+        echo "   解决方案："
+        echo "   1) 升级到 Debian 12+，或"
+        echo "   2) 手动安装 python3.11 后重试，或"
+        echo "   3) 指定自定义解释器：PYTHON_BIN=/path/to/python3.11 ./deploy.sh"
+        exit 1
+    fi
+fi
+
+if ! python_version_ok "$PYTHON_BIN"; then
+    echo "❌ 解释器 $PYTHON_BIN 版本低于 3.11：$("$PYTHON_BIN" --version 2>/dev/null || echo unknown)"
+    echo "   请指定 Python 3.11+：PYTHON_BIN=/path/to/python3.11 ./deploy.sh"
+    exit 1
+fi
 
 # ── 2. 用户 ──────────────────────────────────────────────────────────────────
 echo "[2/7] 创建系统用户 $SERVICE_USER..."
@@ -69,10 +106,17 @@ if [ -d "$VENV_DIR" ]; then
     if ! run_as_service_user "$VENV_DIR/bin/python" -c "import sys; print(sys.version)" >/dev/null 2>&1; then
         echo "  ⚠ 检测到已有虚拟环境不可用（常见原因：从其它机器复制了 .venv），正在重建..."
         rm -rf "$VENV_DIR"
+    elif ! run_as_service_user "$VENV_DIR/bin/python" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+    then
+        echo "  ⚠ 检测到已有虚拟环境 Python 版本低于 3.11，正在重建..."
+        rm -rf "$VENV_DIR"
     fi
 fi
 if [ ! -d "$VENV_DIR" ]; then
-    run_as_service_user python3 -m venv "$VENV_DIR"
+    run_as_service_user "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 run_as_service_user "$VENV_DIR/bin/python" -m pip install --upgrade pip -q
 run_as_service_user "$VENV_DIR/bin/python" -m pip install -e "$DEPLOY_DIR" -q

@@ -372,6 +372,12 @@ curl http://localhost:6888/api/health
 DEPLOY_DIR=/opt/fionatrade SERVICE_USER=fiona APP_PORT=6888 bash deploy.sh
 ```
 
+Python 版本要求：`>=3.11`。如服务器已有自定义解释器，可显式指定：
+
+```bash
+PYTHON_BIN=/usr/bin/python3.11 bash deploy.sh
+```
+
 ### 必填 API Keys
 
 | 变量 | 说明 |
