@@ -353,12 +353,8 @@ ALPACA_BASE_URL=https://api.alpaca.markets        # 实盘
 ## 部署（Debian 12）
 
 ```bash
-# 本机推送代码
-rsync -avz --exclude='.git' --exclude='*.db' --exclude='logs/' \
-  /path/to/FionaTrade/ root@SERVER_IP:/opt/fionatrade/
-
-# 服务器一键部署
-cd /opt/fionatrade
+# 服务器一键部署（deploy.sh 默认使用“脚本所在目录”作为 DEPLOY_DIR）
+cd /你的项目目录/FionaTrade
 bash deploy.sh
 nano .env          # 填入 API keys
 systemctl restart fionatrade
@@ -366,6 +362,12 @@ systemctl restart fionatrade-worker
 
 # 验证
 curl http://localhost:6888/api/health
+```
+
+可选：自定义部署目录/服务用户/端口
+
+```bash
+DEPLOY_DIR=/opt/fionatrade SERVICE_USER=fiona APP_PORT=6888 bash deploy.sh
 ```
 
 ### 必填 API Keys
