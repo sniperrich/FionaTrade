@@ -389,6 +389,15 @@ Nginx 示例已预置：
 - 域名：`trade.taylorswift.fit`
 - 白名单 IP：`104.245.12.20`、`151.244.134.76`（另允许本机 `127.0.0.1` / `::1`）
 
+如果服务器已有 OpenResty，请使用仓库内 `openresty.conf.example`（不要再启动 nginx 抢占 80 端口）：
+
+```bash
+cp /home/FionaTrade/openresty.conf.example /usr/local/openresty/nginx/conf/conf.d/fionatrade.conf
+openresty -t
+systemctl restart openresty
+systemctl disable --now nginx || true
+```
+
 ### 必填 API Keys
 
 | 变量 | 说明 |
