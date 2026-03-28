@@ -16,6 +16,7 @@ SERVICE_USER="${SERVICE_USER:-$(id -un)}"
 APP_PORT="${APP_PORT:-6888}"
 REPO_URL="${REPO_URL:-}"   # 如果用 git 部署，填入你的 repo URL；否则留空（手动上传代码）
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+SKIP_APT="${SKIP_APT:-0}"
 
 run_as_service_user() {
     if [ "$SERVICE_USER" = "root" ]; then
@@ -38,12 +39,23 @@ echo "DEPLOY_DIR=$DEPLOY_DIR"
 echo "SERVICE_USER=$SERVICE_USER"
 echo "APP_PORT=$APP_PORT"
 echo "PYTHON_BIN=$PYTHON_BIN"
+echo "SKIP_APT=$SKIP_APT"
 
 # ── 1. 依赖 ──────────────────────────────────────────────────────────────────
-echo "[1/7] 安装系统依赖..."
-apt-get update -q
-apt-get install -y python3 python3-venv python3-dev \
-    git nginx curl sqlite3 build-essential
+if [ "$SKIP_APT" = "1" ]; then
+    echo "[1/7] 跳过系统依赖安装（SKIP_APT=1）"
+else
+    echo "[1/7] 安装系统依赖..."
+    if ! apt-get update -q; then
+        echo "❌ apt-get update 失败。"
+        echo "   常见原因：Debian 机器误加 Ubuntu 第三方源（如 deadsnakes PPA）。"
+        echo "   可先排查：grep -R \"deadsnakes\" /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true"
+        echo "   若已安装完依赖，可临时执行：SKIP_APT=1 ./deploy.sh"
+        exit 1
+    fi
+    apt-get install -y python3 python3-venv python3-dev \
+        git nginx curl sqlite3 build-essential
+fi
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     if [ "$PYTHON_BIN" = "python3.11" ]; then

@@ -378,6 +378,12 @@ Python 版本要求：`>=3.11`。如服务器已有自定义解释器，可显�
 PYTHON_BIN=/usr/bin/python3.11 bash deploy.sh
 ```
 
+若服务器 `apt-get update` 被错误第三方源卡住（例如 Debian 误加 Ubuntu deadsnakes PPA），可先跳过系统依赖步骤：
+
+```bash
+SKIP_APT=1 bash deploy.sh
+```
+
 ### 必填 API Keys
 
 | 变量 | 说明 |
