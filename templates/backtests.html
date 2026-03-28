@@ -181,6 +181,82 @@ function fmtUsd(v){
   return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 }
 
+function fmtNum(v, digits=2){
+  if(v == null || Number.isNaN(Number(v))) return '—';
+  return Number(v).toFixed(digits);
+}
+
+function downsample(points, maxPoints=280){
+  if(!Array.isArray(points) || points.length <= maxPoints) return points || [];
+  const out = [];
+  const step = (points.length - 1) / (maxPoints - 1);
+  for(let i = 0; i < maxPoints; i++){
+    out.push(points[Math.round(i * step)]);
+  }
+  return out;
+}
+
+function buildCurveSeries(equityCurve){
+  if(!Array.isArray(equityCurve) || !equityCurve.length) return [];
+  const start = Number(equityCurve[0]?.equity || 0);
+  if(!start) return [];
+  let peak = start;
+  const mapped = equityCurve.map((point, idx) => {
+    const equity = Number(point?.equity || 0);
+    peak = Math.max(peak, equity);
+    const returnPct = ((equity / start) - 1) * 100;
+    const drawdownPct = peak > 0 ? ((equity / peak) - 1) * 100 : 0;
+    return {
+      idx,
+      ts: point?.ts || null,
+      equity,
+      returnPct,
+      drawdownPct,
+    };
+  });
+  return downsample(mapped, 280);
+}
+
+function renderLineChart(series, valueKey, { stroke='#d97757', fill='rgba(217,119,87,0.14)', title='', yLabel='%' } = {}){
+  if(!Array.isArray(series) || series.length < 2){
+    return `<div class="empty-state">${escapeHtml(title ? `${title}: no curve data` : 'No curve data')}</div>`;
+  }
+  const width = 980;
+  const height = 220;
+  const pad = { top: 12, right: 16, bottom: 24, left: 56 };
+  const values = series.map(item => Number(item?.[valueKey] || 0));
+  let yMin = Math.min(...values);
+  let yMax = Math.max(...values);
+  if(Math.abs(yMax - yMin) < 1e-6){
+    yMin -= 1;
+    yMax += 1;
+  }
+  const xScale = (idx) => pad.left + (idx / (series.length - 1)) * (width - pad.left - pad.right);
+  const yScale = (v) => {
+    const t = (v - yMin) / (yMax - yMin);
+    return height - pad.bottom - t * (height - pad.top - pad.bottom);
+  };
+
+  const linePath = series.map((point, idx) => `${idx === 0 ? 'M' : 'L'} ${xScale(idx).toFixed(2)} ${yScale(Number(point?.[valueKey] || 0)).toFixed(2)}`).join(' ');
+  const areaPath = `${linePath} L ${xScale(series.length - 1).toFixed(2)} ${(height - pad.bottom).toFixed(2)} L ${xScale(0).toFixed(2)} ${(height - pad.bottom).toFixed(2)} Z`;
+  const latest = Number(series[series.length - 1]?.[valueKey] || 0);
+
+  return `
+    <div class="card card-sm">
+      <div class="card-title">${escapeHtml(title)}</div>
+      <div class="card-sub">Latest ${fmtNum(latest, 2)}${escapeHtml(yLabel)}</div>
+      <svg viewBox="0 0 ${width} ${height}" width="100%" height="220" style="margin-top:8px">
+        <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${height - pad.bottom}" stroke="rgba(156,152,144,0.25)" />
+        <line x1="${pad.left}" y1="${height - pad.bottom}" x2="${width - pad.right}" y2="${height - pad.bottom}" stroke="rgba(156,152,144,0.25)" />
+        <path d="${areaPath}" fill="${fill}"></path>
+        <path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="2.2"></path>
+        <text x="${pad.left}" y="${pad.top + 10}" font-size="11" fill="rgba(121,118,112,0.9)">${fmtNum(yMax, 2)}${escapeHtml(yLabel)}</text>
+        <text x="${pad.left}" y="${height - pad.bottom - 4}" font-size="11" fill="rgba(121,118,112,0.9)">${fmtNum(yMin, 2)}${escapeHtml(yLabel)}</text>
+      </svg>
+    </div>
+  `;
+}
+
 function progressBar(current, total, pct){
   const normalizedTotal = Number(total || 0);
   const normalizedCurrent = Number(current || 0);
@@ -325,6 +401,19 @@ async function selectBacktestRun(runId){
     return;
   }
   const metrics = data.metrics_full || {};
+  const curveSeries = buildCurveSeries(data.equity_curve || []);
+  const returnChart = renderLineChart(curveSeries, 'returnPct', {
+    stroke: '#d97757',
+    fill: 'rgba(217,119,87,0.16)',
+    title: '收益率曲线 (Return Curve)',
+    yLabel: '%',
+  });
+  const drawdownChart = renderLineChart(curveSeries, 'drawdownPct', {
+    stroke: '#c2410c',
+    fill: 'rgba(194,65,12,0.14)',
+    title: '回撤曲线 (Drawdown Curve)',
+    yLabel: '%',
+  });
   const trades = (data.trade_log || []).slice(-12).reverse();
   const topTrades = trades.length ? trades.map(trade => `
     <tr>
@@ -340,11 +429,16 @@ async function selectBacktestRun(runId){
       <div class="card card-sm">
         <div class="card-title">Return</div>
         <div class="card-value">${fmtPct(metrics.total_return || 0)}</div>
-        <div class="card-sub">Sharpe ${Number(metrics.sharpe || 0).toFixed(2)}</div>
+        <div class="card-sub">Trades ${metrics.trades ?? 0}</div>
       </div>
       <div class="card card-sm">
-        <div class="card-title">Trades</div>
-        <div class="card-value">${metrics.trades ?? 0}</div>
+        <div class="card-title">Sharpe Ratio</div>
+        <div class="card-value">${fmtNum(metrics.sharpe || 0, 2)}</div>
+        <div class="card-sub">Profit factor ${fmtNum(metrics.profit_factor || 0, 2)}</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Max Drawdown</div>
+        <div class="card-value">${fmtPct(metrics.max_drawdown || 0)}</div>
         <div class="card-sub">Win rate ${fmtPct(metrics.win_rate || 0)}</div>
       </div>
       <div class="card card-sm">
@@ -352,11 +446,15 @@ async function selectBacktestRun(runId){
         <div class="card-value">${metrics.progress_total && metrics.progress_current ? `${metrics.progress_current ?? 0}/${metrics.progress_total}` : (metrics.phase_label || 'Queued')}</div>
         <div class="card-sub">${escapeHtml(metrics.phase_detail || `${fmtPct((metrics.progress_pct || 0) / 100, 1)} complete`)}</div>
       </div>
-      <div class="card card-sm">
+      <div class="card card-sm" style="grid-column:1 / -1">
         <div class="card-title">Filters</div>
         <div class="card-value">${(data.sources || []).length ? data.sources.length : 'All'}</div>
         <div class="card-sub">${escapeHtml((data.sources || []).join(', ') || 'All sources')}</div>
       </div>
+    </div>
+    <div class="grid g2 mt12">
+      ${returnChart}
+      ${drawdownChart}
     </div>
     <div class="mt12">
       ${runProgressBlock(metrics)}

@@ -809,6 +809,8 @@ class BacktestEngineService:
         next_session_entry_used = 0
         tradeability_reason_counts: dict[str, int] = {}
         flow_scaled_trades = 0
+        flow_scaled_up_trades = 0
+        flow_scaled_down_trades = 0
         flow_wait_mode_events = 0
         flow_wait_triggered = 0
         flow_wait_expired = 0
@@ -1443,10 +1445,18 @@ class BacktestEngineService:
                 risk_sizing=risk_sizing,
                 position_pct_suggestion=effective_position_pct_suggestion,
             )
-            if flow_confirmation_enabled and flow_confirmation_soft_gate and flow_position_multiplier < 1.0:
-                qty *= flow_position_multiplier
-            if flow_confirmation_enabled and flow_confirmation_soft_gate and flow_position_multiplier < 1.0 and qty > 0:
-                flow_scaled_trades += 1
+            if flow_confirmation_enabled and flow_confirmation_soft_gate and qty > 0:
+                multiplier = max(0.0, float(flow_position_multiplier or 1.0))
+                if abs(multiplier - 1.0) > 1e-9:
+                    qty *= multiplier
+                    # Hard clamp after flow scaling so add-on logic never exceeds single-name cap.
+                    max_cap_qty = (equity * self.settings.max_position_pct) / max(entry_px, 0.01)
+                    qty = min(qty, max_cap_qty)
+                    flow_scaled_trades += 1
+                    if multiplier > 1.0:
+                        flow_scaled_up_trades += 1
+                    else:
+                        flow_scaled_down_trades += 1
             if qty <= 0:
                 emit_progress(idx)
                 continue
@@ -1605,6 +1615,8 @@ class BacktestEngineService:
         metrics["flow_breakout_lookback_min"] = flow_breakout_lookback_min
         metrics["flow_wait_valid_minutes"] = flow_wait_valid_minutes
         metrics["flow_scaled_trades"] = flow_scaled_trades
+        metrics["flow_scaled_up_trades"] = flow_scaled_up_trades
+        metrics["flow_scaled_down_trades"] = flow_scaled_down_trades
         metrics["flow_wait_mode_events"] = flow_wait_mode_events
         metrics["flow_wait_triggered"] = flow_wait_triggered
         metrics["flow_wait_expired"] = flow_wait_expired

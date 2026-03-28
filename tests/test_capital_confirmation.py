@@ -37,7 +37,7 @@ def _seed_bars(
 
 def test_capital_confirmation_bucket_mapping_boundaries() -> None:
     svc = CapitalConfirmationService()
-    assert svc._map_bucket(85) == ("HIGH", 1.00)
+    assert svc._map_bucket(85) == ("HIGH", 1.10)
     assert svc._map_bucket(69) == ("MEDIUM", 0.80)
     assert svc._map_bucket(54) == ("LOW", 0.60)
     assert svc._map_bucket(10) == ("WEAK", 0.35)
@@ -84,6 +84,5 @@ def test_capital_confirmation_high_flow_for_strong_buy(session) -> None:
     result = svc.evaluate(session, ticker="AAPL", direction="BUY")
     assert result["flow_score"] >= 70
     assert result["flow_bucket"] == "HIGH"
-    assert abs(float(result["position_multiplier"]) - 1.00) < 1e-9
+    assert abs(float(result["position_multiplier"]) - 1.10) < 1e-9
     assert float(result["volume_ratio"]) > 1.5
-

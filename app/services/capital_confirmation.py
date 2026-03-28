@@ -131,7 +131,8 @@ class CapitalConfirmationService:
     @staticmethod
     def _map_bucket(score: int) -> tuple[str, float]:
         if score >= 70:
-            return "HIGH", 1.00
+            # Strong flow can slightly scale in, but execution layer still clamps to max position.
+            return "HIGH", 1.10
         if score >= 55:
             return "MEDIUM", 0.80
         if score >= 40:

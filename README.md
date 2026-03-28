@@ -112,9 +112,14 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 
 **资金确认层（软门槛）：**
 - 输出 `flow_score(0-100)` + `flow_bucket(HIGH/MEDIUM/LOW/WEAK)` + `position_multiplier`
-- `>=70→1.00`, `55-69→0.80`, `40-54→0.60`, `<40→0.35`
+- `>=70→1.10`, `55-69→0.80`, `40-54→0.60`, `<40→0.35`
 - 最终仓位 = `portfolio_position_pct * position_multiplier`
 - `flow_score<40` 时 BUY/SHORT 会降级为 `WAIT_BREAKOUT_CONFIRMATION`（软降级，不是一刀切禁入）
+- execution 层会在加仓后再次做单票上限钳制，不会突破 `max_position_pct`
+
+**Backtests 页面（新增）：**
+- Run Detail 现在包含收益率曲线（Return Curve）与回撤曲线（Drawdown Curve）
+- 指标卡补充 `Sharpe Ratio / Max Drawdown / Profit Factor / Win Rate`
 
 **风控限制（硬编码）：** 最大仓位 20% · 日亏损上限 3% · 最少 2 个信号共识
 
