@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
+    <div>
+      <div class="page-title">Backtest Detail #{{ run_payload.id }}</div>
+      <div class="page-sub">完整回测详情页：收益曲线、回撤曲线、关键指标与逐笔交易明细。</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <a class="btn btn-ghost btn-sm" href="/backtests">← Back to List</a>
+      <button class="btn btn-ghost btn-sm" onclick="location.reload()">↻ Refresh</button>
+    </div>
+  </div>
+</div>
+
+<div class="grid g2 mb16" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))" id="metric-cards"></div>
+
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">收益率曲线 (Return Curve)</div>
+  </div>
+  <div id="return-chart" class="empty-state">Loading curve…</div>
+</div>
+
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">回撤曲线 (Drawdown Curve)</div>
+  </div>
+  <div id="drawdown-chart" class="empty-state">Loading curve…</div>
+</div>
+
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">运行参数</div>
+  </div>
+  <div id="run-meta" class="text-sm text-muted">Loading…</div>
+</div>
+
+<div class="card">
+  <div class="section-header mb8">
+    <div class="section-title">交易明细</div>
+    <span class="text-muted text-sm" id="trade-count">—</span>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Ticker</th>
+          <th>Side</th>
+          <th class="num">PnL</th>
+          <th>Event Type</th>
+          <th>Entry</th>
+          <th>Exit</th>
+          <th>Exit Reason</th>
+        </tr>
+      </thead>
+      <tbody id="trade-body">
+        <tr><td colspan="8" class="empty-state">Loading trade log…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const RUN = {{ run_payload | tojson }};
+
+function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+function fmtPct(v, digits=2){
+  if(v == null || Number.isNaN(Number(v))) return '—';
+  return `${Number(v * 100).toFixed(digits)}%`;
+}
+function fmtNum(v, digits=2){
+  if(v == null || Number.isNaN(Number(v))) return '—';
+  return Number(v).toFixed(digits);
+}
+function fmtUsd(v){
+  if(v == null || Number.isNaN(Number(v))) return '—';
+  return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+function fmtTs(ts){
+  if(!ts) return '—';
+  return String(ts).replace('T', ' ').slice(0, 19);
+}
+function downsample(points, maxPoints=360){
+  if(!Array.isArray(points) || points.length <= maxPoints) return points || [];
+  const out = [];
+  const step = (points.length - 1) / (maxPoints - 1);
+  for(let i = 0; i < maxPoints; i++){
+    out.push(points[Math.round(i * step)]);
+  }
+  return out;
+}
+function buildCurveSeries(equityCurve){
+  if(!Array.isArray(equityCurve) || !equityCurve.length) return [];
+  const start = Number(equityCurve[0]?.equity || 0);
+  if(!start) return [];
+  let peak = start;
+  const mapped = equityCurve.map((point, idx) => {
+    const equity = Number(point?.equity || 0);
+    peak = Math.max(peak, equity);
+    return {
+      idx,
+      ts: point?.ts || null,
+      equity,
+      returnPct: ((equity / start) - 1) * 100,
+      drawdownPct: peak > 0 ? ((equity / peak) - 1) * 100 : 0,
+    };
+  });
+  return downsample(mapped, 360);
+}
+function renderLineChart(series, valueKey, { stroke='#d97757', fill='rgba(217,119,87,0.16)', yLabel='%' } = {}){
+  if(!Array.isArray(series) || series.length < 2){
+    return '<div class="empty-state">No curve data</div>';
+  }
+  const width = 1200;
+  const height = 280;
+  const pad = { top: 12, right: 14, bottom: 24, left: 56 };
+  const values = series.map(item => Number(item?.[valueKey] || 0));
+  let yMin = Math.min(...values);
+  let yMax = Math.max(...values);
+  if(Math.abs(yMax - yMin) < 1e-6){
+    yMin -= 1;
+    yMax += 1;
+  }
+  const xScale = (idx) => pad.left + (idx / (series.length - 1)) * (width - pad.left - pad.right);
+  const yScale = (v) => {
+    const t = (v - yMin) / (yMax - yMin);
+    return height - pad.bottom - t * (height - pad.top - pad.bottom);
+  };
+  const linePath = series.map((point, idx) => `${idx === 0 ? 'M' : 'L'} ${xScale(idx).toFixed(2)} ${yScale(Number(point?.[valueKey] || 0)).toFixed(2)}`).join(' ');
+  const areaPath = `${linePath} L ${xScale(series.length - 1).toFixed(2)} ${(height - pad.bottom).toFixed(2)} L ${xScale(0).toFixed(2)} ${(height - pad.bottom).toFixed(2)} Z`;
+  return `
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="280">
+      <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${height - pad.bottom}" stroke="rgba(156,152,144,0.25)" />
+      <line x1="${pad.left}" y1="${height - pad.bottom}" x2="${width - pad.right}" y2="${height - pad.bottom}" stroke="rgba(156,152,144,0.25)" />
+      <path d="${areaPath}" fill="${fill}"></path>
+      <path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="2.4"></path>
+      <text x="${pad.left}" y="${pad.top + 10}" font-size="11" fill="rgba(121,118,112,0.9)">${fmtNum(yMax, 2)}${escapeHtml(yLabel)}</text>
+      <text x="${pad.left}" y="${height - pad.bottom - 4}" font-size="11" fill="rgba(121,118,112,0.9)">${fmtNum(yMin, 2)}${escapeHtml(yLabel)}</text>
+    </svg>
+  `;
+}
+
+function render(){
+  const metrics = RUN.metrics || {};
+  const cards = [
+    { title: 'Return', value: fmtPct(metrics.total_return || 0), sub: `Period ${escapeHtml(RUN.start_date || '—')} → ${escapeHtml(RUN.end_date || '—')}` },
+    { title: 'Sharpe', value: fmtNum(metrics.sharpe || 0, 2), sub: `Profit factor ${fmtNum(metrics.profit_factor || 0, 2)}` },
+    { title: 'Max Drawdown', value: fmtPct(metrics.max_drawdown || 0), sub: `Win rate ${fmtPct(metrics.win_rate || 0)}` },
+    { title: 'Trades', value: String(metrics.trades ?? 0), sub: `Events ${metrics.events_considered ?? 0}` },
+    { title: 'Mode', value: RUN.use_llm ? 'LLM' : 'RULES', sub: `Min conf ${RUN.min_confidence ?? '—'}` },
+    { title: 'Status', value: escapeHtml(RUN.status || '—'), sub: `Created ${fmtTs(RUN.created_at)}` },
+  ];
+  document.getElementById('metric-cards').innerHTML = cards.map(card => `
+    <div class="card card-sm">
+      <div class="card-title">${card.title}</div>
+      <div class="card-value">${card.value}</div>
+      <div class="card-sub">${card.sub}</div>
+    </div>
+  `).join('');
+
+  const curveSeries = buildCurveSeries(RUN.equity_curve || []);
+  document.getElementById('return-chart').innerHTML = renderLineChart(curveSeries, 'returnPct', {
+    stroke: '#d97757',
+    fill: 'rgba(217,119,87,0.16)',
+    yLabel: '%',
+  });
+  document.getElementById('drawdown-chart').innerHTML = renderLineChart(curveSeries, 'drawdownPct', {
+    stroke: '#c2410c',
+    fill: 'rgba(194,65,12,0.14)',
+    yLabel: '%',
+  });
+
+  const sources = Array.isArray(RUN.sources) && RUN.sources.length ? RUN.sources.join(', ') : 'All sources';
+  document.getElementById('run-meta').innerHTML = `
+    <div><span class="bold">Date Range:</span> ${escapeHtml(RUN.start_date || '—')} → ${escapeHtml(RUN.end_date || '—')}</div>
+    <div class="mt4"><span class="bold">Event Profile:</span> ${escapeHtml(RUN.event_profile || 'all')}</div>
+    <div class="mt4"><span class="bold">Sources:</span> ${escapeHtml(sources)}</div>
+    <div class="mt4"><span class="bold">Progress Phase:</span> ${escapeHtml(metrics.phase_label || metrics.phase || '—')} (${fmtNum(metrics.phase_pct || 0, 1)}%)</div>
+    <div class="mt4"><span class="bold">Updated:</span> ${fmtTs(metrics.last_progress_at || RUN.finished_at)}</div>
+  `;
+
+  const trades = Array.isArray(RUN.trade_log) ? RUN.trade_log : [];
+  document.getElementById('trade-count').textContent = `${trades.length} trades`;
+  document.getElementById('trade-body').innerHTML = trades.length ? trades.slice().reverse().map((trade, idx) => `
+    <tr>
+      <td class="mono text-xs">${idx + 1}</td>
+      <td class="bold">${escapeHtml(trade.ticker || '—')}</td>
+      <td>${escapeHtml(trade.side || '—')}</td>
+      <td class="num">${fmtUsd(trade.pnl || 0)}</td>
+      <td>${escapeHtml(trade.event_type || '—')}</td>
+      <td class="text-xs">${fmtTs(trade.entry_ts)}</td>
+      <td class="text-xs">${fmtTs(trade.exit_ts)}</td>
+      <td>${escapeHtml(trade.exit_reason || '—')}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="8" class="empty-state">No trades recorded.</td></tr>';
+}
+
+render();
+</script>
+{% endblock %}
+

@@ -383,7 +383,10 @@ async function loadBacktestRuns(){
       <td class="num">${row.metrics?.trades ?? row.metrics?.trades_so_far ?? 0}</td>
       <td class="num">${fmtPct(row.metrics?.win_rate || 0)}</td>
       <td class="num">${fmtPct(row.metrics?.total_return || 0)}</td>
-      <td><button class="btn btn-ghost btn-xs" onclick="selectBacktestRun(${row.id})">Inspect</button></td>
+      <td style="display:flex;gap:6px">
+        <button class="btn btn-ghost btn-xs" onclick="selectBacktestRun(${row.id})">Quick</button>
+        <a class="btn btn-ghost btn-xs" href="/backtests/${row.id}">Open Page</a>
+      </td>
     </tr>`;
   }).join('');
   return items;

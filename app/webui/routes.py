@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from math import ceil
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import distinct, func, select
@@ -231,6 +231,43 @@ def backtests_page(
                 "flow_wait_valid_minutes": int(getattr(settings, "live_entry_plan_default_valid_minutes", 180)),
             },
             "pager": pager,
+        },
+    )
+
+
+@router.get("/backtests/{run_id}", response_class=HTMLResponse)
+def backtest_detail_page(
+    run_id: int,
+    request: Request,
+    session: Session = Depends(get_db),
+):
+    run = session.get(BacktestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+
+    params = run.params or {}
+    metrics = run.metrics or {}
+    payload = {
+        "id": run.id,
+        "status": run.status,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "start_date": params.get("start_date"),
+        "end_date": params.get("end_date"),
+        "use_llm": bool(params.get("use_llm", False)),
+        "event_profile": params.get("event_profile") or "",
+        "sources": params.get("sources") or [],
+        "min_confidence": params.get("min_confidence"),
+        "metrics": metrics,
+        "equity_curve": run.equity_curve or [],
+        "trade_log": run.trade_log or [],
+    }
+    return templates.TemplateResponse(
+        "backtest_detail.html",
+        {
+            "request": request,
+            "title": f"Backtest #{run_id}",
+            "run_payload": payload,
         },
     )
 

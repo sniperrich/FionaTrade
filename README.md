@@ -131,7 +131,8 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + worker history + local bar cache + ticker K-line + entry plan 面板 + entry plan trigger log + 成交历史翻页** |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页** |
-| `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果与交易明细 |
+| `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果列表与快速检查 |
+| `/backtests/{run_id}` | Backtest 详情页：大图模式（收益率曲线 + 回撤曲线）+ Sharpe/回撤/PF + 全量交易明细 |
 | `/settings` | 配置控制台：可视化增删 ticker、编辑常用 env、保存到 `.env` |
 
 ---
@@ -157,7 +158,7 @@ app/
   api/routes.py  所有 REST API 端点
   webui/routes.py Jinja2 页面路由
 
-templates/       6 个 HTML 模板（Dashboard / Live / Agents / News / Backtests / Settings）
+templates/       7 个 HTML 模板（Dashboard / Live / Agents / News / Backtests / Backtest Detail / Settings）
 static/ft.css    Claude 风格 CSS 设计系统
 scripts/         独立工具脚本（回测、历史数据回填等）
 tests/           pytest 测试集
