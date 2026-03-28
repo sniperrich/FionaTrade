@@ -80,7 +80,7 @@ def dashboard(request: Request, session: Session = Depends(get_db), settings: Se
         "live_trades_24h": live_trades_24h,
         "source_latency_sec": round(source_latency_sec, 1),
     }
-    return templates.TemplateResponse("dashboard.html", context)
+    return templates.TemplateResponse(request, "dashboard.html", context)
 
 
 @router.get("/news", response_class=HTMLResponse)
@@ -127,9 +127,9 @@ def news_stream(
                 "error_message": row.error_message,
             }
     return templates.TemplateResponse(
+        request,
         "news.html",
         {
-            "request": request,
             "title": "News Stream",
             "news_items": rows,
             "latest_id": latest_id,
@@ -150,9 +150,9 @@ def news_stream(
 def settings_page(request: Request, settings: Settings = Depends(get_app_settings)):
     editable_snapshot = EnvSettingsService().snapshot(settings)
     return templates.TemplateResponse(
+        request,
         "settings.html",
         {
-            "request": request,
             "title": "Settings",
             "settings": settings,
             "settings_editor": editable_snapshot,
@@ -180,9 +180,9 @@ def agents_page(
     ).scalars().all()
 
     return templates.TemplateResponse(
+        request,
         "agents.html",
         {
-            "request": request,
             "title": "AI Agents",
             "runs": runs,
             "tickers": all_tickers,
@@ -212,9 +212,9 @@ def backtests_page(
         select(distinct(EventEvidence.source)).order_by(EventEvidence.source.asc())
     ).scalars().all()
     return templates.TemplateResponse(
+        request,
         "backtests.html",
         {
-            "request": request,
             "title": "Backtests",
             "backtest_runs": rows,
             "backtest_sources": [source for source in sources if source],
@@ -263,9 +263,9 @@ def backtest_detail_page(
         "trade_log": run.trade_log or [],
     }
     return templates.TemplateResponse(
+        request,
         "backtest_detail.html",
         {
-            "request": request,
             "title": f"Backtest #{run_id}",
             "run_payload": payload,
         },
@@ -292,9 +292,9 @@ def live_trading_page(
     live_enabled = RuntimeControlService().get_live_enabled(session, settings)
 
     return templates.TemplateResponse(
+        request,
         "live.html",
         {
-            "request": request,
             "title": "Live Trading",
             "trades": trades,
             "selected_ticker": ticker,

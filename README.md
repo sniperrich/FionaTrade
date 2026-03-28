@@ -241,6 +241,7 @@ tests/           pytest 测试集
 > - `/api/live/plans/events` 提供 entry plan 事件流（created/evaluated/triggered/trigger_failed/expired/cancelled），`/live` 页有独立 Trigger Log 卡片用于排障
 > - 已修复并行 agent 进度回调并发写库导致的 `Session is already flushing / prepared state`，live cycle 不会再因该错误把 AAPL/NVDA 直接打成 graph error
 > - 一旦 live 已启用，只要 `python -m app.worker.supervisor` 还在运行，关闭浏览器不会停止 auto trading
+> - 已修复 WebUI 模板渲染参数顺序（兼容 FastAPI/Starlette 新版 `TemplateResponse`），避免 `TypeError: unhashable type: 'dict'`
 
 ---
 
