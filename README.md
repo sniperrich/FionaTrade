@@ -129,13 +129,13 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | 路径 | 功能 |
 |------|------|
 | `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot + worker/queue 状态** |
-| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + worker history + local bar cache + ticker K-line + entry plan 面板 + entry plan trigger log + 成交历史翻页** |
+| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Live Strategy Config（ticker/news source filter/节奏/资金确认/agent权重） + Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + worker history + local bar cache + ticker K-line + entry plan 面板 + entry plan trigger log + 成交历史翻页** |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页** |
 | `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果列表与快速检查 |
 | `/backtests/{run_id}` | Backtest 详情页：大图模式（收益率曲线 + 回撤曲线）+ Sharpe/回撤/PF + 全量交易明细 |
 | `/attribution` | 模块归因面板：Agent 边际贡献、事件类型/source/source tier/flow bucket 分桶、过滤器价值排行、评分回填 |
-| `/settings` | 配置控制台：可视化增删 ticker、编辑常用 env、保存到 `.env` |
+| `/settings` | 基础配置中心：LLM 网关、采集周期、全局 confidence、核心数据源开关、保存到 `.env` |
 
 ---
 
@@ -160,7 +160,7 @@ app/
   api/routes.py  所有 REST API 端点
   webui/routes.py Jinja2 页面路由
 
-templates/       7 个 HTML 模板（Dashboard / Live / Agents / News / Backtests / Backtest Detail / Settings）
+templates/       10 个 HTML 模板（Dashboard / Live / Agents / News / Backtests / Backtest Detail / Attribution / Settings / Base 等）
 static/ft.css    Claude 风格 CSS 设计系统
 scripts/         独立工具脚本（回测、历史数据回填等）
 tests/           pytest 测试集
@@ -295,7 +295,7 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 
 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 现在兼容 CSV 和 JSON 数组两种写法。
 
-收缩升级新增配置（`/settings` 可直接改）：
+收缩升级新增配置（基础项在 `/settings`，实盘策略项在 `/live` 可直接改）：
 - `LIVE_EVENT_DRIVEN_MODE=true`
 - `LIVE_OPEN_CYCLE_SECONDS=900`（开盘 15 分钟）
 - `LIVE_CLOSED_CYCLE_SECONDS=7200`（闭市 120 分钟）

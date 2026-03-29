@@ -3,173 +3,99 @@
 {% set ed = settings_editor.editable if settings_editor else {} %}
 <div class="page-header">
   <div class="page-title">Settings</div>
-  <div class="page-sub">Runtime configuration and .env editor</div>
+  <div class="page-sub">基础配置中心（实时交易参数已迁移到 Live 页面）</div>
 </div>
 
 <div class="card mb16">
   <div class="section-header mb8">
-    <div class="card-title" style="margin:0">Config Editor（写入 .env）</div>
-    <span class="text-muted text-sm">支持增删 ticker 与常用参数编辑</span>
+    <div class="section-title">Base Config</div>
+    <span class="text-muted text-sm">保存后 Web 立即生效；Worker/Supervisor 需重启</span>
   </div>
   <div class="text-muted text-sm mb12">
-    保存后 Web 会热加载新配置；Worker/Supervisor 需要重启才能完全应用后台任务参数。
+    Live ticker、news 白名单、交易节奏、资金确认等参数已迁移到 <a href="/live">Live Trading</a> 页面统一管理。
   </div>
 
   <form id="settings-editor-form">
-    <div class="form-row mb12" style="grid-template-columns:1fr 1fr">
-      <div class="form-group">
-        <label>LIVE_TRADING_TICKERS</label>
-        <div style="display:flex;gap:8px">
-          <input type="text" id="live-ticker-input" placeholder="AAPL" style="text-transform:uppercase" />
-          <button type="button" class="btn btn-ghost btn-sm" onclick="addTicker('live')">添加</button>
+    <div class="grid g2 mb12">
+      <div class="card card-sm" style="background:var(--surface2)">
+        <div class="card-title" style="margin-bottom:8px">LLM Gateway</div>
+        <div class="form-group mb8">
+          <label>LLM_MODEL</label>
+          <input type="text" id="cfg-llm-model" value="{{ ed.get('LLM_MODEL', settings.llm_model) }}" placeholder="claude-sonnet-4-5" />
         </div>
-        <input type="hidden" id="cfg-live-trading-tickers" value="{{ ed.get('LIVE_TRADING_TICKERS', '') }}" />
-        <div id="live-ticker-chips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
-      </div>
-      <div class="form-group">
-        <label>AGENT_TICKERS_OVERRIDE</label>
-        <div style="display:flex;gap:8px">
-          <input type="text" id="agent-ticker-input" placeholder="NVDA" style="text-transform:uppercase" />
-          <button type="button" class="btn btn-ghost btn-sm" onclick="addTicker('agent')">添加</button>
+        <div class="form-group">
+          <label>LLM_BASE_URL</label>
+          <input type="text" id="cfg-llm-base-url" value="{{ ed.get('LLM_BASE_URL', settings.llm_base_url) }}" placeholder="https://api.duojie.games" />
         </div>
-        <input type="hidden" id="cfg-agent-tickers-override" value="{{ ed.get('AGENT_TICKERS_OVERRIDE', '') }}" />
-        <div id="agent-ticker-chips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+
+      <div class="card card-sm" style="background:var(--surface2)">
+        <div class="card-title" style="margin-bottom:8px">Scheduler & Threshold</div>
+        <div class="form-row" style="grid-template-columns:1fr 1fr">
+          <div class="form-group">
+            <label>POLL_INTERVAL_SECONDS</label>
+            <input type="number" min="10" step="1" id="cfg-poll-interval" value="{{ ed.get('POLL_INTERVAL_SECONDS', settings.poll_interval_seconds) }}" />
+          </div>
+          <div class="form-group">
+            <label>MIN_TRADE_CONFIDENCE</label>
+            <input type="number" min="0" max="100" step="1" id="cfg-min-trade-confidence" value="{{ ed.get('MIN_TRADE_CONFIDENCE', settings.min_trade_confidence) }}" />
+          </div>
+        </div>
       </div>
     </div>
 
-    <div class="form-row mb12" style="grid-template-columns:1fr">
-      <div class="form-group">
-        <label>LIVE_ALLOWED_SOURCES（逗号分隔，空=全部来源）</label>
-        <input
-          type="text"
-          id="cfg-live-allowed-sources"
-          value="{{ ed.get('LIVE_ALLOWED_SOURCES', '') }}"
-          placeholder="例如: finnhub,sec,cnbc,yahoo"
-        />
-        <div class="text-muted text-xs">可用标准名示例：finnhub, sec, cnbc, yahoo, marketwatch, ft, nytimes...</div>
-      </div>
-    </div>
-
-    <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
-      <div class="form-group">
-        <label>POLL_INTERVAL_SECONDS</label>
-        <input type="number" min="10" step="1" id="cfg-poll-interval" value="{{ ed.get('POLL_INTERVAL_SECONDS', settings.poll_interval_seconds) }}" />
-      </div>
-      <div class="form-group">
-        <label>LIVE_CYCLE_INTERVAL_SECONDS</label>
-        <input type="number" min="30" step="1" id="cfg-live-cycle-interval" value="{{ ed.get('LIVE_CYCLE_INTERVAL_SECONDS', settings.live_cycle_interval_seconds) }}" />
-      </div>
-      <div class="form-group">
-        <label>MIN_TRADE_CONFIDENCE</label>
-        <input type="number" min="0" max="100" step="1" id="cfg-min-trade-confidence" value="{{ ed.get('MIN_TRADE_CONFIDENCE', settings.min_trade_confidence) }}" />
-      </div>
-    </div>
-
-    <div class="form-row mb12" style="grid-template-columns:repeat(2,minmax(0,1fr))">
-      <div class="form-group">
-        <label>LIVE_MAX_POSITION_PCT</label>
-        <input type="number" min="0" max="1" step="0.01" id="cfg-live-max-position" value="{{ ed.get('LIVE_MAX_POSITION_PCT', settings.live_max_position_pct) }}" />
-      </div>
-      <div class="form-group">
-        <label>LIVE_DATA_MAX_AGE_MINUTES</label>
-        <input type="number" min="1" step="1" id="cfg-live-data-max-age" value="{{ ed.get('LIVE_DATA_MAX_AGE_MINUTES', settings.live_data_max_age_minutes) }}" />
-      </div>
-    </div>
-
-    <div class="form-row mb12" style="grid-template-columns:repeat(5,minmax(0,1fr))">
-      <div class="form-group">
-        <label>LIVE_OPEN_CYCLE_SECONDS</label>
-        <input type="number" min="60" step="60" id="cfg-live-open-cycle-seconds" value="{{ ed.get('LIVE_OPEN_CYCLE_SECONDS', settings.live_open_cycle_seconds) }}" />
-      </div>
-      <div class="form-group">
-        <label>LIVE_CLOSED_CYCLE_SECONDS</label>
-        <input type="number" min="300" step="60" id="cfg-live-closed-cycle-seconds" value="{{ ed.get('LIVE_CLOSED_CYCLE_SECONDS', settings.live_closed_cycle_seconds) }}" />
-      </div>
-      <div class="form-group">
-        <label>LIVE_TICKER_COOLDOWN_MINUTES</label>
-        <input type="number" min="0" step="1" id="cfg-live-ticker-cooldown-minutes" value="{{ ed.get('LIVE_TICKER_COOLDOWN_MINUTES', settings.live_ticker_cooldown_minutes) }}" />
-      </div>
-      <div class="form-group">
-        <label>LIVE_FALLBACK_CYCLE_SECONDS</label>
-        <input type="number" min="60" step="60" id="cfg-live-fallback-cycle-seconds" value="{{ ed.get('LIVE_FALLBACK_CYCLE_SECONDS', settings.live_fallback_cycle_seconds) }}" />
-      </div>
-    </div>
-
-    <div class="form-row mb12" style="grid-template-columns:repeat(4,minmax(0,1fr))">
-      <div class="form-group">
-        <label>LIVE_FAST_PATH_MACRO_TTL_MIN</label>
-        <input type="number" min="5" step="5" id="cfg-live-fast-macro-ttl" value="{{ ed.get('LIVE_FAST_PATH_MACRO_TTL_MIN', settings.live_fast_path_macro_ttl_min) }}" />
-      </div>
-      <div class="form-group">
-        <label>LIVE_FAST_PATH_FUND_TTL_MIN</label>
-        <input type="number" min="5" step="5" id="cfg-live-fast-fund-ttl" value="{{ ed.get('LIVE_FAST_PATH_FUND_TTL_MIN', settings.live_fast_path_fund_ttl_min) }}" />
-      </div>
-      <div class="form-group">
-        <label>LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS</label>
-        <input type="number" min="1" step="1" id="cfg-live-portfolio-llm-timeout-seconds" value="{{ ed.get('LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS', settings.live_portfolio_llm_timeout_seconds) }}" />
-      </div>
-      <div class="form-group">
-        <label>LIVE_PORTFOLIO_LLM_MAX_RETRIES</label>
-        <input type="number" min="1" step="1" id="cfg-live-portfolio-llm-max-retries" value="{{ ed.get('LIVE_PORTFOLIO_LLM_MAX_RETRIES', settings.live_portfolio_llm_max_retries) }}" />
-      </div>
-      <div class="form-group">
-        <label>FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS</label>
-        <input type="number" min="1" step="1" id="cfg-finnhub-company-news-live-lookback-days" value="{{ ed.get('FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS', settings.finnhub_company_news_live_lookback_days) }}" />
-      </div>
-    </div>
-
-    <div class="form-row mb12" style="grid-template-columns:repeat(4,minmax(0,1fr))">
-      <div class="form-group">
-        <label>AGENT_WEIGHT_NEWS</label>
-        <input type="number" min="0" max="1" step="0.01" id="cfg-weight-news" value="{{ ed.get('AGENT_WEIGHT_NEWS', settings.agent_weight_news) }}" />
-      </div>
-      <div class="form-group">
-        <label>AGENT_WEIGHT_TECHNICALS</label>
-        <input type="number" min="0" max="1" step="0.01" id="cfg-weight-technicals" value="{{ ed.get('AGENT_WEIGHT_TECHNICALS', settings.agent_weight_technicals) }}" />
-      </div>
-      <div class="form-group">
-        <label>AGENT_WEIGHT_MACRO</label>
-        <input type="number" min="0" max="1" step="0.01" id="cfg-weight-macro" value="{{ ed.get('AGENT_WEIGHT_MACRO', settings.agent_weight_macro) }}" />
-      </div>
-      <div class="form-group">
-        <label>AGENT_WEIGHT_FUNDAMENTALS</label>
-        <input type="number" min="0" max="1" step="0.01" id="cfg-weight-fundamentals" value="{{ ed.get('AGENT_WEIGHT_FUNDAMENTALS', settings.agent_weight_fundamentals) }}" />
-      </div>
-    </div>
-
-    <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
-      <label><input type="checkbox" id="cfg-live-enabled" {% if ed.get('LIVE_TRADING_ENABLED', settings.live_trading_enabled) %}checked{% endif %} /> LIVE_TRADING_ENABLED</label>
-      <label><input type="checkbox" id="cfg-live-allow-premarket" {% if ed.get('LIVE_ALLOW_PREMARKET', settings.live_allow_premarket) %}checked{% endif %} /> LIVE_ALLOW_PREMARKET</label>
-      <label><input type="checkbox" id="cfg-live-event-driven-mode" {% if ed.get('LIVE_EVENT_DRIVEN_MODE', settings.live_event_driven_mode) %}checked{% endif %} /> LIVE_EVENT_DRIVEN_MODE</label>
-      <label><input type="checkbox" id="cfg-flow-confirmation-enabled" {% if ed.get('FLOW_CONFIRMATION_ENABLED', settings.flow_confirmation_enabled) %}checked{% endif %} /> FLOW_CONFIRMATION_ENABLED</label>
-      <label><input type="checkbox" id="cfg-flow-confirmation-soft-gate" {% if ed.get('FLOW_CONFIRMATION_SOFT_GATE', settings.flow_confirmation_soft_gate) %}checked{% endif %} /> FLOW_CONFIRMATION_SOFT_GATE</label>
-      <label><input type="checkbox" id="cfg-enable-sec" {% if ed.get('ENABLE_SEC', settings.enable_sec) %}checked{% endif %} /> ENABLE_SEC</label>
-      <label><input type="checkbox" id="cfg-enable-rss" {% if ed.get('ENABLE_RSS', settings.enable_rss) %}checked{% endif %} /> ENABLE_RSS</label>
-      <label><input type="checkbox" id="cfg-enable-finnhub" {% if ed.get('ENABLE_FINNHUB', settings.enable_finnhub) %}checked{% endif %} /> ENABLE_FINNHUB</label>
-      <label><input type="checkbox" id="cfg-enable-finnhub-company-news-live" {% if ed.get('ENABLE_FINNHUB_COMPANY_NEWS_LIVE', settings.enable_finnhub_company_news_live) %}checked{% endif %} /> ENABLE_FINNHUB_COMPANY_NEWS_LIVE</label>
-      <label><input type="checkbox" id="cfg-enable-earnings" {% if ed.get('ENABLE_EARNINGS_RELEASE_SOURCE', settings.enable_earnings_release_source) %}checked{% endif %} /> ENABLE_EARNINGS_RELEASE_SOURCE</label>
-    </div>
-
-    <div class="form-row mb12" style="grid-template-columns:repeat(2,minmax(0,1fr))">
-      <div class="form-group">
-        <label>LLM_MODEL</label>
-        <input type="text" id="cfg-llm-model" value="{{ ed.get('LLM_MODEL', settings.llm_model) }}" />
-      </div>
-      <div class="form-group">
-        <label>LLM_BASE_URL</label>
-        <input type="text" id="cfg-llm-base-url" value="{{ ed.get('LLM_BASE_URL', settings.llm_base_url) }}" />
+    <div class="card card-sm mb12" style="background:var(--surface2)">
+      <div class="card-title" style="margin-bottom:8px">Data Sources</div>
+      <div class="form-row" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <div class="form-group">
+          <label>ENABLE_SEC</label>
+          <div class="seg-group">
+            <input type="radio" name="cfg-enable-sec" id="cfg-enable-sec-on" value="true" />
+            <label for="cfg-enable-sec-on">ON</label>
+            <input type="radio" name="cfg-enable-sec" id="cfg-enable-sec-off" value="false" />
+            <label for="cfg-enable-sec-off">OFF</label>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>ENABLE_RSS</label>
+          <div class="seg-group">
+            <input type="radio" name="cfg-enable-rss" id="cfg-enable-rss-on" value="true" />
+            <label for="cfg-enable-rss-on">ON</label>
+            <input type="radio" name="cfg-enable-rss" id="cfg-enable-rss-off" value="false" />
+            <label for="cfg-enable-rss-off">OFF</label>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>ENABLE_FINNHUB</label>
+          <div class="seg-group">
+            <input type="radio" name="cfg-enable-finnhub" id="cfg-enable-finnhub-on" value="true" />
+            <label for="cfg-enable-finnhub-on">ON</label>
+            <input type="radio" name="cfg-enable-finnhub" id="cfg-enable-finnhub-off" value="false" />
+            <label for="cfg-enable-finnhub-off">OFF</label>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>ENABLE_EARNINGS_RELEASE_SOURCE</label>
+          <div class="seg-group">
+            <input type="radio" name="cfg-enable-earnings" id="cfg-enable-earnings-on" value="true" />
+            <label for="cfg-enable-earnings-on">ON</label>
+            <input type="radio" name="cfg-enable-earnings" id="cfg-enable-earnings-off" value="false" />
+            <label for="cfg-enable-earnings-off">OFF</label>
+          </div>
+        </div>
       </div>
     </div>
 
     <div class="form-group mb12">
       <label>额外 ENV 覆盖（可选）</label>
-      <textarea id="cfg-extra-updates" rows="5" placeholder="例如：\nFINNHUB_API_KEY=xxxx\nLLM_API_KEY=sk-xxxx"></textarea>
-      <div class="text-muted text-xs">每行一个 KEY=VALUE，支持你想改的其它 env 配置。</div>
+      <textarea id="cfg-extra-updates" rows="4" placeholder="例如：\nFINNHUB_API_KEY=xxxx\nLLM_API_KEY=sk-xxxx"></textarea>
+      <div class="text-muted text-xs">每行一个 KEY=VALUE，仅用于高级覆盖。</div>
     </div>
 
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <button type="submit" class="btn btn-primary">保存到 .env</button>
       <button type="button" class="btn btn-ghost" onclick="reloadEditableSettings()">从后端刷新</button>
+      <a class="btn btn-ghost" href="/live">去 Live 页面调交易参数</a>
       <span class="text-muted text-sm mono">{{ settings_editor.env_file if settings_editor else '.env' }}</span>
     </div>
   </form>
@@ -177,204 +103,54 @@
   <div id="settings-save-result" class="mt8 text-sm"></div>
 </div>
 
-<div class="grid g2">
-  <!-- LLM / AI -->
+<div class="grid g3">
   <div class="card">
-    <div class="card-title">AI / LLM</div>
-    <table class="tbl">
-      <tbody>
-        <tr>
-          <td class="text-muted">Mode</td>
-          <td>
-            {% if settings.llm_base_url and settings.llm_api_key and settings.llm_model %}
-              <span class="badge badge-green">LLM Active</span>
-            {% else %}
-              <span class="badge badge-grey">Rules Fallback</span>
-            {% endif %}
-          </td>
-        </tr>
-        <tr><td class="text-muted">Model</td><td>{{ settings.llm_model or '—' }}</td></tr>
-        <tr><td class="text-muted">Base URL</td><td class="mono text-sm">{{ settings.llm_base_url or '—' }}</td></tr>
-        <tr>
-          <td class="text-muted">Agent Mode</td>
-          <td>
-            {% if settings.agent_mode_enabled %}
-              <span class="badge badge-accent">Enabled</span>
-            {% else %}
-              <span class="badge badge-grey">Disabled</span>
-            {% endif %}
-          </td>
-        </tr>
-        <tr><td class="text-muted">LLM Max Retries</td><td>{{ settings.llm_max_retries }}</td></tr>
-      </tbody>
-    </table>
+    <div class="card-title">Analysis Mode</div>
+    {% if settings.llm_base_url and settings.llm_api_key and settings.llm_model %}
+      <div class="card-value text-accent">LLM</div>
+      <div class="card-sub">Model: {{ settings.llm_model }}</div>
+    {% else %}
+      <div class="card-value text-muted">Rules</div>
+      <div class="card-sub">LLM 未完整配置，自动回退规则模式</div>
+    {% endif %}
   </div>
-
-  <!-- Data Sources -->
   <div class="card">
-    <div class="card-title">Data Sources</div>
-    <table class="tbl">
-      <tbody>
-        <tr>
-          <td class="text-muted">Finnhub</td>
-          <td>{% if settings.enable_finnhub %}<span class="badge badge-green">ON</span>{% else %}<span class="badge badge-grey">OFF</span>{% endif %}</td>
-        </tr>
-        <tr>
-          <td class="text-muted">RSS</td>
-          <td>{% if settings.enable_rss %}<span class="badge badge-green">ON</span>{% else %}<span class="badge badge-grey">OFF</span>{% endif %}</td>
-        </tr>
-        <tr>
-          <td class="text-muted">SEC EDGAR</td>
-          <td>{% if settings.enable_sec %}<span class="badge badge-green">ON</span>{% else %}<span class="badge badge-grey">OFF</span>{% endif %}</td>
-        </tr>
-        <tr>
-          <td class="text-muted">FRED</td>
-          <td>{% if settings.fred_api_key %}<span class="badge badge-green">ON</span>{% else %}<span class="badge badge-grey">No Key</span>{% endif %}</td>
-        </tr>
-        <tr><td class="text-muted">Poll Interval</td><td>{{ settings.poll_interval_seconds }}s</td></tr>
-        <tr><td class="text-muted">Ticker Universe</td><td>{{ settings.sp100_tickers | length }} tickers</td></tr>
-      </tbody>
-    </table>
+    <div class="card-title">Data Ingestion</div>
+    <div class="card-value">{{ settings.poll_interval_seconds }}s</div>
+    <div class="card-sub">每轮采集周期</div>
   </div>
-
-  <!-- Risk Limits -->
   <div class="card">
-    <div class="card-title">Risk Limits</div>
-    <table class="tbl">
-      <tbody>
-        <tr><td class="text-muted">Max Position</td><td>{{ (settings.max_position_pct * 100) | round(1) }}%</td></tr>
-        <tr><td class="text-muted">Max Gross Exposure</td><td>{{ (settings.max_gross_exposure_pct * 100) | round(1) }}%</td></tr>
-        <tr><td class="text-muted">Daily Loss Limit</td><td>{{ (settings.daily_loss_limit_pct * 100) | round(1) }}%</td></tr>
-        <tr><td class="text-muted">Min Trade Confidence</td><td>{{ settings.min_trade_confidence }}</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Alpaca -->
-  <div class="card">
-    <div class="card-title">Alpaca Broker</div>
-    <table class="tbl">
-      <tbody>
-        <tr>
-          <td class="text-muted">API Key</td>
-          <td>{% if settings.alpaca_api_key %}<span class="badge badge-green">Configured</span>{% else %}<span class="badge badge-grey">Not Set</span>{% endif %}</td>
-        </tr>
-        <tr><td class="text-muted">Base URL</td><td class="mono text-sm">{{ settings.alpaca_base_url or '—' }}</td></tr>
-        <tr>
-          <td class="text-muted">Live Trading</td>
-          <td>
-            {% if settings.live_trading_enabled %}
-              <span class="badge badge-accent">Enabled</span>
-            {% else %}
-              <span class="badge badge-grey">Disabled</span>
-            {% endif %}
-          </td>
-        </tr>
-        <tr><td class="text-muted">Live Tickers</td><td class="text-sm">{{ (settings.live_trading_tickers or settings.agent_tickers_override or ['—']) | join(', ') }}</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Database -->
-  <div class="card" style="grid-column:1/-1">
-    <div class="card-title">Database</div>
-    <div class="mono text-sm" style="padding:4px 0">{{ settings.database_url }}</div>
+    <div class="card-title">Trade Gate</div>
+    <div class="card-value">{{ settings.min_trade_confidence }}</div>
+    <div class="card-sub">最小交易置信度</div>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let liveTickers = [];
-let agentTickers = [];
-
-function parseCsvTickers(raw){
-  return [...new Set(String(raw||'').split(',').map(s=>s.trim().toUpperCase()).filter(Boolean))];
+function setBoolSeg(name, value){
+  const normalized = value ? 'true' : 'false';
+  const target = document.querySelector(`input[name="${name}"][value="${normalized}"]`);
+  if (target) target.checked = true;
 }
 
-function syncTickerHidden(){
-  document.getElementById('cfg-live-trading-tickers').value = liveTickers.join(',');
-  document.getElementById('cfg-agent-tickers-override').value = agentTickers.join(',');
-}
-
-function renderTickerChips(kind){
-  const list = kind === 'live' ? liveTickers : agentTickers;
-  const container = document.getElementById(kind === 'live' ? 'live-ticker-chips' : 'agent-ticker-chips');
-  if(!list.length){
-    container.innerHTML = '<span class="text-muted text-xs">未设置</span>';
-    return;
-  }
-  container.innerHTML = list.map(t => `
-    <span class="badge badge-accent" style="display:inline-flex;align-items:center;gap:6px">
-      ${escapeHtml(t)}
-      <button type="button" class="btn btn-ghost btn-xs" onclick="removeTicker('${kind}','${t}')">×</button>
-    </span>
-  `).join('');
-}
-
-function addTicker(kind){
-  const input = document.getElementById(kind === 'live' ? 'live-ticker-input' : 'agent-ticker-input');
-  const token = String(input.value || '').trim().toUpperCase();
-  if(!token) return;
-  if(!/^[A-Z.\-]{1,10}$/.test(token)){
-    toast('Ticker 格式不合法', 'error');
-    return;
-  }
-  const list = kind === 'live' ? liveTickers : agentTickers;
-  if(!list.includes(token)) list.push(token);
-  input.value = '';
-  syncTickerHidden();
-  renderTickerChips(kind);
-}
-
-function removeTicker(kind, ticker){
-  if(kind === 'live') liveTickers = liveTickers.filter(t => t !== ticker);
-  else agentTickers = agentTickers.filter(t => t !== ticker);
-  syncTickerHidden();
-  renderTickerChips(kind);
+function getBoolSeg(name){
+  const selected = document.querySelector(`input[name="${name}"]:checked`);
+  return selected ? selected.value === 'true' : false;
 }
 
 function applyEditorSettings(payload){
   const ed = payload?.editable || {};
-  liveTickers = parseCsvTickers(ed.LIVE_TRADING_TICKERS || '');
-  agentTickers = parseCsvTickers(ed.AGENT_TICKERS_OVERRIDE || '');
-  document.getElementById('cfg-live-allowed-sources').value = ed.LIVE_ALLOWED_SOURCES ?? '';
-  syncTickerHidden();
-  renderTickerChips('live');
-  renderTickerChips('agent');
-
-  document.getElementById('cfg-poll-interval').value = ed.POLL_INTERVAL_SECONDS ?? '';
-  document.getElementById('cfg-live-cycle-interval').value = ed.LIVE_CYCLE_INTERVAL_SECONDS ?? '';
-  document.getElementById('cfg-min-trade-confidence').value = ed.MIN_TRADE_CONFIDENCE ?? '';
-  document.getElementById('cfg-live-max-position').value = ed.LIVE_MAX_POSITION_PCT ?? '';
-  document.getElementById('cfg-live-data-max-age').value = ed.LIVE_DATA_MAX_AGE_MINUTES ?? '';
-  document.getElementById('cfg-live-open-cycle-seconds').value = ed.LIVE_OPEN_CYCLE_SECONDS ?? '';
-  document.getElementById('cfg-live-closed-cycle-seconds').value = ed.LIVE_CLOSED_CYCLE_SECONDS ?? '';
-  document.getElementById('cfg-live-ticker-cooldown-minutes').value = ed.LIVE_TICKER_COOLDOWN_MINUTES ?? '';
-  document.getElementById('cfg-live-fallback-cycle-seconds').value = ed.LIVE_FALLBACK_CYCLE_SECONDS ?? '';
-  document.getElementById('cfg-live-fast-macro-ttl').value = ed.LIVE_FAST_PATH_MACRO_TTL_MIN ?? '';
-  document.getElementById('cfg-live-fast-fund-ttl').value = ed.LIVE_FAST_PATH_FUND_TTL_MIN ?? '';
-  document.getElementById('cfg-live-portfolio-llm-timeout-seconds').value = ed.LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS ?? '';
-  document.getElementById('cfg-live-portfolio-llm-max-retries').value = ed.LIVE_PORTFOLIO_LLM_MAX_RETRIES ?? '';
-  document.getElementById('cfg-finnhub-company-news-live-lookback-days').value = ed.FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS ?? '';
-  document.getElementById('cfg-weight-news').value = ed.AGENT_WEIGHT_NEWS ?? '';
-  document.getElementById('cfg-weight-technicals').value = ed.AGENT_WEIGHT_TECHNICALS ?? '';
-  document.getElementById('cfg-weight-macro').value = ed.AGENT_WEIGHT_MACRO ?? '';
-  document.getElementById('cfg-weight-fundamentals').value = ed.AGENT_WEIGHT_FUNDAMENTALS ?? '';
-
-  document.getElementById('cfg-live-enabled').checked = !!ed.LIVE_TRADING_ENABLED;
-  document.getElementById('cfg-live-allow-premarket').checked = !!ed.LIVE_ALLOW_PREMARKET;
-  document.getElementById('cfg-live-event-driven-mode').checked = !!ed.LIVE_EVENT_DRIVEN_MODE;
-  document.getElementById('cfg-flow-confirmation-enabled').checked = !!ed.FLOW_CONFIRMATION_ENABLED;
-  document.getElementById('cfg-flow-confirmation-soft-gate').checked = !!ed.FLOW_CONFIRMATION_SOFT_GATE;
-  document.getElementById('cfg-enable-sec').checked = !!ed.ENABLE_SEC;
-  document.getElementById('cfg-enable-rss').checked = !!ed.ENABLE_RSS;
-  document.getElementById('cfg-enable-finnhub').checked = !!ed.ENABLE_FINNHUB;
-  document.getElementById('cfg-enable-finnhub-company-news-live').checked = !!ed.ENABLE_FINNHUB_COMPANY_NEWS_LIVE;
-  document.getElementById('cfg-enable-earnings').checked = !!ed.ENABLE_EARNINGS_RELEASE_SOURCE;
-
   document.getElementById('cfg-llm-model').value = ed.LLM_MODEL ?? '';
   document.getElementById('cfg-llm-base-url').value = ed.LLM_BASE_URL ?? '';
+  document.getElementById('cfg-poll-interval').value = ed.POLL_INTERVAL_SECONDS ?? '';
+  document.getElementById('cfg-min-trade-confidence').value = ed.MIN_TRADE_CONFIDENCE ?? '';
+
+  setBoolSeg('cfg-enable-sec', !!ed.ENABLE_SEC);
+  setBoolSeg('cfg-enable-rss', !!ed.ENABLE_RSS);
+  setBoolSeg('cfg-enable-finnhub', !!ed.ENABLE_FINNHUB);
+  setBoolSeg('cfg-enable-earnings', !!ed.ENABLE_EARNINGS_RELEASE_SOURCE);
 }
 
 async function reloadEditableSettings(){
@@ -389,39 +165,13 @@ async function reloadEditableSettings(){
 
 async function saveSettings(e){
   e.preventDefault();
-  syncTickerHidden();
   const updates = {
-    LIVE_TRADING_TICKERS: document.getElementById('cfg-live-trading-tickers').value,
-    AGENT_TICKERS_OVERRIDE: document.getElementById('cfg-agent-tickers-override').value,
-    LIVE_ALLOWED_SOURCES: document.getElementById('cfg-live-allowed-sources').value.trim(),
     POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
-    LIVE_CYCLE_INTERVAL_SECONDS: document.getElementById('cfg-live-cycle-interval').value,
     MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
-    LIVE_MAX_POSITION_PCT: document.getElementById('cfg-live-max-position').value,
-    LIVE_DATA_MAX_AGE_MINUTES: document.getElementById('cfg-live-data-max-age').value,
-    LIVE_OPEN_CYCLE_SECONDS: document.getElementById('cfg-live-open-cycle-seconds').value,
-    LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('cfg-live-closed-cycle-seconds').value,
-    LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('cfg-live-ticker-cooldown-minutes').value,
-    LIVE_FALLBACK_CYCLE_SECONDS: document.getElementById('cfg-live-fallback-cycle-seconds').value,
-    LIVE_FAST_PATH_MACRO_TTL_MIN: document.getElementById('cfg-live-fast-macro-ttl').value,
-    LIVE_FAST_PATH_FUND_TTL_MIN: document.getElementById('cfg-live-fast-fund-ttl').value,
-    LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS: document.getElementById('cfg-live-portfolio-llm-timeout-seconds').value,
-    LIVE_PORTFOLIO_LLM_MAX_RETRIES: document.getElementById('cfg-live-portfolio-llm-max-retries').value,
-    FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS: document.getElementById('cfg-finnhub-company-news-live-lookback-days').value,
-    AGENT_WEIGHT_NEWS: document.getElementById('cfg-weight-news').value,
-    AGENT_WEIGHT_TECHNICALS: document.getElementById('cfg-weight-technicals').value,
-    AGENT_WEIGHT_MACRO: document.getElementById('cfg-weight-macro').value,
-    AGENT_WEIGHT_FUNDAMENTALS: document.getElementById('cfg-weight-fundamentals').value,
-    LIVE_TRADING_ENABLED: document.getElementById('cfg-live-enabled').checked,
-    LIVE_ALLOW_PREMARKET: document.getElementById('cfg-live-allow-premarket').checked,
-    LIVE_EVENT_DRIVEN_MODE: document.getElementById('cfg-live-event-driven-mode').checked,
-    FLOW_CONFIRMATION_ENABLED: document.getElementById('cfg-flow-confirmation-enabled').checked,
-    FLOW_CONFIRMATION_SOFT_GATE: document.getElementById('cfg-flow-confirmation-soft-gate').checked,
-    ENABLE_SEC: document.getElementById('cfg-enable-sec').checked,
-    ENABLE_RSS: document.getElementById('cfg-enable-rss').checked,
-    ENABLE_FINNHUB: document.getElementById('cfg-enable-finnhub').checked,
-    ENABLE_FINNHUB_COMPANY_NEWS_LIVE: document.getElementById('cfg-enable-finnhub-company-news-live').checked,
-    ENABLE_EARNINGS_RELEASE_SOURCE: document.getElementById('cfg-enable-earnings').checked,
+    ENABLE_SEC: getBoolSeg('cfg-enable-sec'),
+    ENABLE_RSS: getBoolSeg('cfg-enable-rss'),
+    ENABLE_FINNHUB: getBoolSeg('cfg-enable-finnhub'),
+    ENABLE_EARNINGS_RELEASE_SOURCE: getBoolSeg('cfg-enable-earnings'),
     LLM_MODEL: document.getElementById('cfg-llm-model').value.trim(),
     LLM_BASE_URL: document.getElementById('cfg-llm-base-url').value.trim(),
   };
@@ -456,39 +206,14 @@ async function saveSettings(e){
 }
 
 applyEditorSettings({ editable: {
-  LIVE_TRADING_TICKERS: document.getElementById('cfg-live-trading-tickers').value,
-  AGENT_TICKERS_OVERRIDE: document.getElementById('cfg-agent-tickers-override').value,
-  LIVE_ALLOWED_SOURCES: document.getElementById('cfg-live-allowed-sources').value,
-  POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
-  LIVE_CYCLE_INTERVAL_SECONDS: document.getElementById('cfg-live-cycle-interval').value,
-  MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
-  LIVE_MAX_POSITION_PCT: document.getElementById('cfg-live-max-position').value,
-  LIVE_DATA_MAX_AGE_MINUTES: document.getElementById('cfg-live-data-max-age').value,
-  LIVE_OPEN_CYCLE_SECONDS: document.getElementById('cfg-live-open-cycle-seconds').value,
-  LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('cfg-live-closed-cycle-seconds').value,
-  LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('cfg-live-ticker-cooldown-minutes').value,
-  LIVE_FALLBACK_CYCLE_SECONDS: document.getElementById('cfg-live-fallback-cycle-seconds').value,
-  LIVE_FAST_PATH_MACRO_TTL_MIN: document.getElementById('cfg-live-fast-macro-ttl').value,
-  LIVE_FAST_PATH_FUND_TTL_MIN: document.getElementById('cfg-live-fast-fund-ttl').value,
-  LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS: document.getElementById('cfg-live-portfolio-llm-timeout-seconds').value,
-  LIVE_PORTFOLIO_LLM_MAX_RETRIES: document.getElementById('cfg-live-portfolio-llm-max-retries').value,
-  FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS: document.getElementById('cfg-finnhub-company-news-live-lookback-days').value,
-  AGENT_WEIGHT_NEWS: document.getElementById('cfg-weight-news').value,
-  AGENT_WEIGHT_TECHNICALS: document.getElementById('cfg-weight-technicals').value,
-  AGENT_WEIGHT_MACRO: document.getElementById('cfg-weight-macro').value,
-  AGENT_WEIGHT_FUNDAMENTALS: document.getElementById('cfg-weight-fundamentals').value,
-  LIVE_TRADING_ENABLED: document.getElementById('cfg-live-enabled').checked,
-  LIVE_ALLOW_PREMARKET: document.getElementById('cfg-live-allow-premarket').checked,
-  LIVE_EVENT_DRIVEN_MODE: document.getElementById('cfg-live-event-driven-mode').checked,
-  FLOW_CONFIRMATION_ENABLED: document.getElementById('cfg-flow-confirmation-enabled').checked,
-  FLOW_CONFIRMATION_SOFT_GATE: document.getElementById('cfg-flow-confirmation-soft-gate').checked,
-  ENABLE_SEC: document.getElementById('cfg-enable-sec').checked,
-  ENABLE_RSS: document.getElementById('cfg-enable-rss').checked,
-  ENABLE_FINNHUB: document.getElementById('cfg-enable-finnhub').checked,
-  ENABLE_FINNHUB_COMPANY_NEWS_LIVE: document.getElementById('cfg-enable-finnhub-company-news-live').checked,
-  ENABLE_EARNINGS_RELEASE_SOURCE: document.getElementById('cfg-enable-earnings').checked,
   LLM_MODEL: document.getElementById('cfg-llm-model').value,
   LLM_BASE_URL: document.getElementById('cfg-llm-base-url').value,
+  POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
+  MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
+  ENABLE_SEC: {{ 'true' if ed.get('ENABLE_SEC', settings.enable_sec) else 'false' }},
+  ENABLE_RSS: {{ 'true' if ed.get('ENABLE_RSS', settings.enable_rss) else 'false' }},
+  ENABLE_FINNHUB: {{ 'true' if ed.get('ENABLE_FINNHUB', settings.enable_finnhub) else 'false' }},
+  ENABLE_EARNINGS_RELEASE_SOURCE: {{ 'true' if ed.get('ENABLE_EARNINGS_RELEASE_SOURCE', settings.enable_earnings_release_source) else 'false' }},
 }});
 
 document.getElementById('settings-editor-form').addEventListener('submit', saveSettings);

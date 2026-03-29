@@ -313,6 +313,7 @@ def live_trading_page(
         stmt = stmt.where(LiveTrade.ticker == ticker.upper())
     trades = session.execute(stmt).scalars().all()
     live_enabled = RuntimeControlService().get_live_enabled(session, settings)
+    editable_snapshot = EnvSettingsService().snapshot(settings)
 
     return templates.TemplateResponse(
         request,
@@ -325,5 +326,6 @@ def live_trading_page(
             "market_session": msi,
             "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
             "default_chart_ticker": ticker or ((settings.live_trading_tickers or list(settings.agent_tickers_override or []))[:1] or ["AAPL"])[0],
+            "live_editor": editable_snapshot,
         },
     )

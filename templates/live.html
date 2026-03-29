@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+{% set led = live_editor.editable if live_editor else {} %}
 <div class="page-header">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
     <div>
@@ -33,6 +34,161 @@
   <div class="text-muted text-sm mt4">
     This UI only controls and observes the worker. Once live trading is enabled, the worker keeps running even if you close the browser.
   </div>
+</div>
+
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">Live Strategy Config</div>
+    <span class="text-muted text-sm">Ticker、news 筛选、节奏、风控参数</span>
+  </div>
+  <div class="text-muted text-sm mb12">
+    本区保存后会写入 <span class="mono">.env</span>。Web 立即读新值，Worker/Supervisor 需重启后完全应用。
+  </div>
+
+  <form id="live-config-form">
+    <div class="grid g2 mb12">
+      <div class="card card-sm" style="background:var(--surface2)">
+        <div class="card-title" style="margin-bottom:8px">LIVE_TRADING_TICKERS</div>
+        <div style="display:flex;gap:8px" class="mb8">
+          <input type="text" id="live-cfg-ticker-input" placeholder="AAPL" style="text-transform:uppercase" />
+          <button type="button" class="btn btn-ghost btn-sm" onclick="addLiveConfigToken('ticker')">添加</button>
+        </div>
+        <input type="hidden" id="cfg-live-trading-tickers" value="{{ led.get('LIVE_TRADING_TICKERS', '') }}" />
+        <div id="live-cfg-ticker-chips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+      <div class="card card-sm" style="background:var(--surface2)">
+        <div class="card-title" style="margin-bottom:8px">News Source Filter</div>
+        <div class="form-group mb8">
+          <label>筛选机制</label>
+          <select id="cfg-live-news-filter-mode" onchange="onLiveNewsFilterModeChange()">
+            <option value="all">全部来源（不做白名单）</option>
+            <option value="whitelist">白名单（仅选中来源）</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px" class="mb8">
+          <input type="text" id="live-cfg-source-input" placeholder="finnhub / sec / cnbc / yahoo_finance" />
+          <button type="button" id="live-cfg-source-add-btn" class="btn btn-ghost btn-sm" onclick="addLiveConfigToken('source')">添加</button>
+        </div>
+        <input type="hidden" id="cfg-live-allowed-sources" value="{{ led.get('LIVE_ALLOWED_SOURCES', '') }}" />
+        <div id="live-cfg-source-chips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+    </div>
+
+    <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div class="form-group">
+        <label>LIVE_MIN_CONFIDENCE</label>
+        <input type="number" id="cfg-live-min-confidence" min="0" max="100" step="1" value="{{ led.get('LIVE_MIN_CONFIDENCE', 50) }}" />
+      </div>
+      <div class="form-group">
+        <label>LIVE_MAX_POSITION_PCT</label>
+        <input type="number" id="cfg-live-max-position" min="0" max="1" step="0.01" value="{{ led.get('LIVE_MAX_POSITION_PCT', 0.1) }}" />
+      </div>
+      <div class="form-group">
+        <label>FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS</label>
+        <input type="number" id="cfg-finnhub-company-news-live-lookback-days" min="1" step="1" value="{{ led.get('FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS', 2) }}" />
+      </div>
+    </div>
+
+    <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div class="form-group">
+        <label>LIVE_OPEN_CYCLE_SECONDS</label>
+        <input type="number" id="cfg-live-open-cycle-seconds" min="60" step="60" value="{{ led.get('LIVE_OPEN_CYCLE_SECONDS', 900) }}" />
+      </div>
+      <div class="form-group">
+        <label>LIVE_CLOSED_CYCLE_SECONDS</label>
+        <input type="number" id="cfg-live-closed-cycle-seconds" min="300" step="60" value="{{ led.get('LIVE_CLOSED_CYCLE_SECONDS', 7200) }}" />
+      </div>
+      <div class="form-group">
+        <label>LIVE_TICKER_COOLDOWN_MINUTES</label>
+        <input type="number" id="cfg-live-ticker-cooldown-minutes" min="0" step="1" value="{{ led.get('LIVE_TICKER_COOLDOWN_MINUTES', 60) }}" />
+      </div>
+    </div>
+
+    <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div class="form-group">
+        <label>LIVE_EVENT_DRIVEN_MODE</label>
+        <div class="seg-group">
+          <input type="radio" name="cfg-live-event-driven-mode" id="cfg-live-event-driven-mode-on" value="true" {% if led.get('LIVE_EVENT_DRIVEN_MODE', true) %}checked{% endif %} />
+          <label for="cfg-live-event-driven-mode-on">ON</label>
+          <input type="radio" name="cfg-live-event-driven-mode" id="cfg-live-event-driven-mode-off" value="false" {% if not led.get('LIVE_EVENT_DRIVEN_MODE', true) %}checked{% endif %} />
+          <label for="cfg-live-event-driven-mode-off">OFF</label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>LIVE_ALLOW_PREMARKET</label>
+        <div class="seg-group">
+          <input type="radio" name="cfg-live-allow-premarket" id="cfg-live-allow-premarket-on" value="true" {% if led.get('LIVE_ALLOW_PREMARKET', false) %}checked{% endif %} />
+          <label for="cfg-live-allow-premarket-on">ON</label>
+          <input type="radio" name="cfg-live-allow-premarket" id="cfg-live-allow-premarket-off" value="false" {% if not led.get('LIVE_ALLOW_PREMARKET', false) %}checked{% endif %} />
+          <label for="cfg-live-allow-premarket-off">OFF</label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>ENABLE_FINNHUB_COMPANY_NEWS_LIVE</label>
+        <div class="seg-group">
+          <input type="radio" name="cfg-enable-finnhub-company-news-live" id="cfg-enable-finnhub-company-news-live-on" value="true" {% if led.get('ENABLE_FINNHUB_COMPANY_NEWS_LIVE', true) %}checked{% endif %} />
+          <label for="cfg-enable-finnhub-company-news-live-on">ON</label>
+          <input type="radio" name="cfg-enable-finnhub-company-news-live" id="cfg-enable-finnhub-company-news-live-off" value="false" {% if not led.get('ENABLE_FINNHUB_COMPANY_NEWS_LIVE', true) %}checked{% endif %} />
+          <label for="cfg-enable-finnhub-company-news-live-off">OFF</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div class="form-group">
+        <label>FLOW_CONFIRMATION_ENABLED</label>
+        <div class="seg-group">
+          <input type="radio" name="cfg-flow-confirmation-enabled" id="cfg-flow-confirmation-enabled-on" value="true" {% if led.get('FLOW_CONFIRMATION_ENABLED', true) %}checked{% endif %} />
+          <label for="cfg-flow-confirmation-enabled-on">ON</label>
+          <input type="radio" name="cfg-flow-confirmation-enabled" id="cfg-flow-confirmation-enabled-off" value="false" {% if not led.get('FLOW_CONFIRMATION_ENABLED', true) %}checked{% endif %} />
+          <label for="cfg-flow-confirmation-enabled-off">OFF</label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>FLOW_CONFIRMATION_SOFT_GATE</label>
+        <div class="seg-group">
+          <input type="radio" name="cfg-flow-confirmation-soft-gate" id="cfg-flow-confirmation-soft-gate-on" value="true" {% if led.get('FLOW_CONFIRMATION_SOFT_GATE', true) %}checked{% endif %} />
+          <label for="cfg-flow-confirmation-soft-gate-on">ON</label>
+          <input type="radio" name="cfg-flow-confirmation-soft-gate" id="cfg-flow-confirmation-soft-gate-off" value="false" {% if not led.get('FLOW_CONFIRMATION_SOFT_GATE', true) %}checked{% endif %} />
+          <label for="cfg-flow-confirmation-soft-gate-off">OFF</label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>LIVE_FALLBACK_CYCLE_SECONDS</label>
+        <input type="number" id="cfg-live-fallback-cycle-seconds" min="60" step="60" value="{{ led.get('LIVE_FALLBACK_CYCLE_SECONDS', 600) }}" />
+      </div>
+    </div>
+
+    <div class="card card-sm mb12" style="background:var(--surface2)">
+      <div class="card-title" style="margin-bottom:8px">Agent Weights（消息优先）</div>
+      <div class="form-row" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+        <div class="form-group">
+          <label>AGENT_WEIGHT_NEWS</label>
+          <input type="number" id="cfg-weight-news" min="0" max="1" step="0.01" value="{{ led.get('AGENT_WEIGHT_NEWS', 0.6) }}" />
+        </div>
+        <div class="form-group">
+          <label>AGENT_WEIGHT_TECHNICALS</label>
+          <input type="number" id="cfg-weight-technicals" min="0" max="1" step="0.01" value="{{ led.get('AGENT_WEIGHT_TECHNICALS', 0.2) }}" />
+        </div>
+        <div class="form-group">
+          <label>AGENT_WEIGHT_MACRO</label>
+          <input type="number" id="cfg-weight-macro" min="0" max="1" step="0.01" value="{{ led.get('AGENT_WEIGHT_MACRO', 0.1) }}" />
+        </div>
+        <div class="form-group">
+          <label>AGENT_WEIGHT_FUNDAMENTALS</label>
+          <input type="number" id="cfg-weight-fundamentals" min="0" max="1" step="0.01" value="{{ led.get('AGENT_WEIGHT_FUNDAMENTALS', 0.1) }}" />
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button type="submit" class="btn btn-primary">保存 Live 参数</button>
+      <button type="button" class="btn btn-ghost" onclick="reloadLiveConfig()">从后端刷新</button>
+      <a class="btn btn-ghost" href="/settings">回基础 Settings</a>
+      <span class="text-muted text-sm">news filter：all=不过滤；whitelist=仅白名单来源</span>
+    </div>
+  </form>
+  <div id="live-config-save-result" class="mt8 text-sm"></div>
 </div>
 
 <!-- Portfolio row -->
@@ -388,6 +544,8 @@
 const LIVE_CACHE_PREFIX = 'ui:live_snapshot:v4:';
 let liveTradesPage = 1;
 const LIVE_TRADES_PER_PAGE = 20;
+let liveConfigTickers = [];
+let liveConfigSources = [];
 
 function fmt$(n){return n==null?'—':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function sideBadge(s){return s==='long'?'<span class="badge badge-green">LONG</span>':'<span class="badge badge-red">SHORT</span>';}
@@ -399,6 +557,215 @@ function statusBadge(s){
 function actionBadge(a){const m={BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};return `<span class="badge ${m[a]||'badge-grey'}">${a||'—'}</span>`;}
 function safeSlice(v, n=8){return typeof v==='string'?v.slice(0,n):String(v||'').slice(0,n);}
 function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+function parseCsvTokens(raw, mode='upper'){
+  const parts = String(raw || '').split(',').map(item => item.trim()).filter(Boolean);
+  const normalized = parts.map(item => {
+    if(mode === 'lower'){
+      return item.toLowerCase().replaceAll(' ', '_');
+    }
+    return item.toUpperCase();
+  });
+  return [...new Set(normalized)];
+}
+
+function syncLiveConfigHidden(){
+  document.getElementById('cfg-live-trading-tickers').value = liveConfigTickers.join(',');
+  document.getElementById('cfg-live-allowed-sources').value = liveConfigSources.join(',');
+}
+
+function renderLiveConfigChips(kind){
+  const isTicker = kind === 'ticker';
+  const list = isTicker ? liveConfigTickers : liveConfigSources;
+  const container = document.getElementById(isTicker ? 'live-cfg-ticker-chips' : 'live-cfg-source-chips');
+  if(!container) return;
+  if(!list.length){
+    if(!isTicker && (document.getElementById('cfg-live-news-filter-mode')?.value || 'all') === 'all'){
+      container.innerHTML = '<span class="text-muted text-xs">当前为全部来源模式（不启用白名单）</span>';
+      return;
+    }
+    container.innerHTML = '<span class="text-muted text-xs">未设置</span>';
+    return;
+  }
+  container.innerHTML = list.map(token => `
+    <span class="badge badge-accent" style="display:inline-flex;align-items:center;gap:6px">
+      ${escapeHtml(token)}
+      <button type="button" class="btn btn-ghost btn-xs" onclick="removeLiveConfigToken('${kind}','${token}')">×</button>
+    </span>
+  `).join('');
+}
+
+function addLiveConfigToken(kind){
+  const isTicker = kind === 'ticker';
+  if(!isTicker && (document.getElementById('cfg-live-news-filter-mode')?.value || 'all') === 'all'){
+    toast('当前是全部来源模式，切到白名单后再添加来源', 'warn');
+    return;
+  }
+  const input = document.getElementById(isTicker ? 'live-cfg-ticker-input' : 'live-cfg-source-input');
+  const raw = String(input?.value || '').trim();
+  if(!raw) return;
+  const token = isTicker ? raw.toUpperCase() : raw.toLowerCase().replaceAll(' ', '_');
+  if(isTicker){
+    if(!/^[A-Z.\\-]{1,10}$/.test(token)){
+      toast('Ticker 格式不合法', 'error');
+      return;
+    }
+  } else if(!/^[a-z0-9_\\-.]{2,64}$/.test(token)){
+    toast('来源标识格式不合法', 'error');
+    return;
+  }
+  const list = isTicker ? liveConfigTickers : liveConfigSources;
+  if(!list.includes(token)) list.push(token);
+  if(input) input.value = '';
+  syncLiveConfigHidden();
+  renderLiveConfigChips(kind);
+  if(isTicker) refreshLiveTickerSelectors();
+}
+
+function removeLiveConfigToken(kind, token){
+  if(kind === 'ticker'){
+    liveConfigTickers = liveConfigTickers.filter(item => item !== token);
+  } else {
+    liveConfigSources = liveConfigSources.filter(item => item !== token);
+  }
+  syncLiveConfigHidden();
+  renderLiveConfigChips(kind);
+  if(kind === 'ticker') refreshLiveTickerSelectors();
+}
+
+function setLiveBoolSeg(name, value){
+  const normalized = value ? 'true' : 'false';
+  const target = document.querySelector(`input[name="${name}"][value="${normalized}"]`);
+  if(target) target.checked = true;
+}
+
+function getLiveBoolSeg(name){
+  const selected = document.querySelector(`input[name="${name}"]:checked`);
+  return selected ? selected.value === 'true' : false;
+}
+
+function onLiveNewsFilterModeChange(){
+  const mode = document.getElementById('cfg-live-news-filter-mode')?.value || 'all';
+  const sourceInput = document.getElementById('live-cfg-source-input');
+  const addBtn = document.getElementById('live-cfg-source-add-btn');
+  const whitelistMode = mode === 'whitelist';
+  if(sourceInput) sourceInput.disabled = !whitelistMode;
+  if(addBtn) addBtn.disabled = !whitelistMode;
+  renderLiveConfigChips('source');
+}
+
+function refreshLiveTickerSelectors(){
+  const list = liveConfigTickers.length ? [...liveConfigTickers] : ['AAPL'];
+  const chartSel = document.getElementById('chart-ticker');
+  const histSel = document.getElementById('hist-ticker-filter');
+  if(chartSel){
+    const current = (chartSel.value || '').toUpperCase();
+    chartSel.innerHTML = list.map(t => `<option value="${t}">${t}</option>`).join('');
+    chartSel.value = list.includes(current) ? current : list[0];
+  }
+  if(histSel){
+    const current = (histSel.value || '').toUpperCase();
+    histSel.innerHTML = '<option value="">All tickers</option>' + list.map(t => `<option value="${t}">${t}</option>`).join('');
+    histSel.value = current && list.includes(current) ? current : '';
+  }
+}
+
+function applyLiveConfigEditable(editable){
+  const ed = editable || {};
+  liveConfigTickers = parseCsvTokens(ed.LIVE_TRADING_TICKERS || '', 'upper');
+  liveConfigSources = parseCsvTokens(ed.LIVE_ALLOWED_SOURCES || '', 'lower');
+  document.getElementById('cfg-live-min-confidence').value = ed.LIVE_MIN_CONFIDENCE ?? '';
+  document.getElementById('cfg-live-max-position').value = ed.LIVE_MAX_POSITION_PCT ?? '';
+  document.getElementById('cfg-finnhub-company-news-live-lookback-days').value = ed.FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS ?? '';
+  document.getElementById('cfg-live-open-cycle-seconds').value = ed.LIVE_OPEN_CYCLE_SECONDS ?? '';
+  document.getElementById('cfg-live-closed-cycle-seconds').value = ed.LIVE_CLOSED_CYCLE_SECONDS ?? '';
+  document.getElementById('cfg-live-ticker-cooldown-minutes').value = ed.LIVE_TICKER_COOLDOWN_MINUTES ?? '';
+  document.getElementById('cfg-live-fallback-cycle-seconds').value = ed.LIVE_FALLBACK_CYCLE_SECONDS ?? '';
+  document.getElementById('cfg-weight-news').value = ed.AGENT_WEIGHT_NEWS ?? '';
+  document.getElementById('cfg-weight-technicals').value = ed.AGENT_WEIGHT_TECHNICALS ?? '';
+  document.getElementById('cfg-weight-macro').value = ed.AGENT_WEIGHT_MACRO ?? '';
+  document.getElementById('cfg-weight-fundamentals').value = ed.AGENT_WEIGHT_FUNDAMENTALS ?? '';
+
+  setLiveBoolSeg('cfg-live-event-driven-mode', !!ed.LIVE_EVENT_DRIVEN_MODE);
+  setLiveBoolSeg('cfg-live-allow-premarket', !!ed.LIVE_ALLOW_PREMARKET);
+  setLiveBoolSeg('cfg-enable-finnhub-company-news-live', !!ed.ENABLE_FINNHUB_COMPANY_NEWS_LIVE);
+  setLiveBoolSeg('cfg-flow-confirmation-enabled', !!ed.FLOW_CONFIRMATION_ENABLED);
+  setLiveBoolSeg('cfg-flow-confirmation-soft-gate', !!ed.FLOW_CONFIRMATION_SOFT_GATE);
+
+  document.getElementById('cfg-live-news-filter-mode').value = liveConfigSources.length ? 'whitelist' : 'all';
+  syncLiveConfigHidden();
+  onLiveNewsFilterModeChange();
+  renderLiveConfigChips('ticker');
+  renderLiveConfigChips('source');
+  refreshLiveTickerSelectors();
+}
+
+async function reloadLiveConfig(notify=true){
+  try{
+    const [settingsResp, statusResp] = await Promise.all([
+      apiFetch('/api/settings/editable', { timeout: 12000 }),
+      apiFetch('/api/live/status', { timeout: 12000 }),
+    ]);
+    applyLiveConfigEditable(settingsResp?.editable || {});
+    if(Array.isArray(statusResp?.tickers) && statusResp.tickers.length && !liveConfigTickers.length){
+      liveConfigTickers = parseCsvTokens(statusResp.tickers.join(','), 'upper');
+      syncLiveConfigHidden();
+      renderLiveConfigChips('ticker');
+      refreshLiveTickerSelectors();
+    }
+    if(notify) toast('Live 参数已从后端刷新', 'success');
+  }catch(err){
+    if(notify) toast(`刷新失败: ${err.message}`, 'error');
+  }
+}
+
+async function saveLiveConfig(e){
+  e.preventDefault();
+  syncLiveConfigHidden();
+  const mode = document.getElementById('cfg-live-news-filter-mode').value || 'all';
+  const updates = {
+    LIVE_TRADING_TICKERS: document.getElementById('cfg-live-trading-tickers').value,
+    LIVE_ALLOWED_SOURCES: mode === 'whitelist' ? document.getElementById('cfg-live-allowed-sources').value : '',
+    LIVE_MIN_CONFIDENCE: document.getElementById('cfg-live-min-confidence').value,
+    LIVE_MAX_POSITION_PCT: document.getElementById('cfg-live-max-position').value,
+    FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS: document.getElementById('cfg-finnhub-company-news-live-lookback-days').value,
+    LIVE_OPEN_CYCLE_SECONDS: document.getElementById('cfg-live-open-cycle-seconds').value,
+    LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('cfg-live-closed-cycle-seconds').value,
+    LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('cfg-live-ticker-cooldown-minutes').value,
+    LIVE_FALLBACK_CYCLE_SECONDS: document.getElementById('cfg-live-fallback-cycle-seconds').value,
+    LIVE_EVENT_DRIVEN_MODE: getLiveBoolSeg('cfg-live-event-driven-mode'),
+    LIVE_ALLOW_PREMARKET: getLiveBoolSeg('cfg-live-allow-premarket'),
+    ENABLE_FINNHUB_COMPANY_NEWS_LIVE: getLiveBoolSeg('cfg-enable-finnhub-company-news-live'),
+    FLOW_CONFIRMATION_ENABLED: getLiveBoolSeg('cfg-flow-confirmation-enabled'),
+    FLOW_CONFIRMATION_SOFT_GATE: getLiveBoolSeg('cfg-flow-confirmation-soft-gate'),
+    AGENT_WEIGHT_NEWS: document.getElementById('cfg-weight-news').value,
+    AGENT_WEIGHT_TECHNICALS: document.getElementById('cfg-weight-technicals').value,
+    AGENT_WEIGHT_MACRO: document.getElementById('cfg-weight-macro').value,
+    AGENT_WEIGHT_FUNDAMENTALS: document.getElementById('cfg-weight-fundamentals').value,
+  };
+  const resultEl = document.getElementById('live-config-save-result');
+  resultEl.textContent = '保存中...';
+  resultEl.className = 'mt8 text-sm text-muted';
+  try{
+    const resp = await apiFetch('/api/settings/editable', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ updates }),
+      timeout: 20000,
+    });
+    resultEl.textContent = `${resp.message || '保存成功'} 已写入 keys: ${(resp.written_keys || []).join(', ')}`;
+    resultEl.className = 'mt8 text-sm';
+    clearViewCache('ui:');
+    applyLiveConfigEditable(resp.settings || {});
+    toast('Live 参数已写入 .env', 'success');
+    toast('重启 worker/supervisor 后后台调度参数会完全生效', 'warn');
+    setTimeout(refreshAll, 1200);
+  }catch(err){
+    resultEl.textContent = `保存失败: ${err.message}`;
+    resultEl.className = 'mt8 text-sm text-red';
+    toast(`保存失败: ${err.message}`, 'error');
+  }
+}
+
 function liveSnapshotCacheKey(){
   const tradeTicker=(document.getElementById('hist-ticker-filter')?.value || '').toUpperCase();
   const tradeOffset=(liveTradesPage - 1) * LIVE_TRADES_PER_PAGE;
@@ -1076,6 +1443,29 @@ async function refreshAll(){
     ]);
   }
 }
+
+applyLiveConfigEditable({
+  LIVE_TRADING_TICKERS: document.getElementById('cfg-live-trading-tickers').value,
+  LIVE_ALLOWED_SOURCES: document.getElementById('cfg-live-allowed-sources').value,
+  LIVE_MIN_CONFIDENCE: document.getElementById('cfg-live-min-confidence').value,
+  LIVE_MAX_POSITION_PCT: document.getElementById('cfg-live-max-position').value,
+  FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS: document.getElementById('cfg-finnhub-company-news-live-lookback-days').value,
+  LIVE_OPEN_CYCLE_SECONDS: document.getElementById('cfg-live-open-cycle-seconds').value,
+  LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('cfg-live-closed-cycle-seconds').value,
+  LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('cfg-live-ticker-cooldown-minutes').value,
+  LIVE_FALLBACK_CYCLE_SECONDS: document.getElementById('cfg-live-fallback-cycle-seconds').value,
+  LIVE_EVENT_DRIVEN_MODE: getLiveBoolSeg('cfg-live-event-driven-mode'),
+  LIVE_ALLOW_PREMARKET: getLiveBoolSeg('cfg-live-allow-premarket'),
+  ENABLE_FINNHUB_COMPANY_NEWS_LIVE: getLiveBoolSeg('cfg-enable-finnhub-company-news-live'),
+  FLOW_CONFIRMATION_ENABLED: getLiveBoolSeg('cfg-flow-confirmation-enabled'),
+  FLOW_CONFIRMATION_SOFT_GATE: getLiveBoolSeg('cfg-flow-confirmation-soft-gate'),
+  AGENT_WEIGHT_NEWS: document.getElementById('cfg-weight-news').value,
+  AGENT_WEIGHT_TECHNICALS: document.getElementById('cfg-weight-technicals').value,
+  AGENT_WEIGHT_MACRO: document.getElementById('cfg-weight-macro').value,
+  AGENT_WEIGHT_FUNDAMENTALS: document.getElementById('cfg-weight-fundamentals').value,
+});
+document.getElementById('live-config-form').addEventListener('submit', saveLiveConfig);
+reloadLiveConfig(false);
 
 const initialLiveSnapshot=readViewCache(liveSnapshotCacheKey(), 10 * 60 * 1000);
 if(initialLiveSnapshot) hydrateLiveSnapshot(initialLiveSnapshot);
