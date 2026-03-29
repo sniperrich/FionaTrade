@@ -45,6 +45,8 @@ SECONDARY_CONFIRMATION_SOURCES = frozenset({"cnbc", "yahoo", "yahoo_finance"})
 
 _SOURCE_ALIASES = {
     "yahoo": "yahoo_finance",
+    "yahoo finance": "yahoo_finance",
+    "yahoo-finance": "yahoo_finance",
 }
 
 SOURCE_TIER = {
@@ -135,7 +137,13 @@ def normalize_source_name(source: str | None) -> str:
     lowered = (source or "").strip().lower()
     if not lowered:
         return ""
-    return _SOURCE_ALIASES.get(lowered, lowered)
+    alias = _SOURCE_ALIASES.get(lowered)
+    if alias:
+        return alias
+    compact = re.sub(r"\s+", "_", lowered)
+    compact = compact.replace("-", "_")
+    compact = re.sub(r"_+", "_", compact).strip("_")
+    return _SOURCE_ALIASES.get(compact, compact)
 
 
 def is_secondary_confirmation_source(source: str | None) -> bool:

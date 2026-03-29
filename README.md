@@ -315,6 +315,10 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 - `AGENT_WEIGHT_MACRO=0.10`
 - `AGENT_WEIGHT_FUNDAMENTALS=0.10`
 
+归因与来源过滤修正：
+- `Module Attribution` 的同 tier source 选择改为稳定顺序：`event_id -> source_tier -> captured_at -> id`，不再用字母序 tie-break。
+- source 归一化补齐 `Yahoo Finance` / `yahoo-finance`，并统一空格与连字符，保证白名单匹配一致。
+
 > Enable Live 现在不会再让 Web 进程直接起后台线程。
 > 它会写入共享 `runtime_controls`，再给 worker 排队 `refresh_bars + live_cycle`。
 > worker/supervisor 心跳都写在 `runtime_controls`，可从 `/api/worker/status` 或 Live 页面直接确认后台是否在线。

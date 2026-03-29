@@ -382,30 +382,35 @@ class ModuleAttributionService:
         if not event_ids:
             return {}, {}
         rows = session.execute(
-            select(EventEvidence.event_id, EventEvidence.source_tier, EventEvidence.source).where(
+            select(
+                EventEvidence.event_id,
+                EventEvidence.source_tier,
+                EventEvidence.source,
+                EventEvidence.captured_at,
+                EventEvidence.id,
+            ).where(
                 EventEvidence.event_id.in_(sorted(event_ids))
+            ).order_by(
+                EventEvidence.event_id.asc(),
+                func.coalesce(EventEvidence.source_tier, 9).asc(),
+                EventEvidence.captured_at.asc(),
+                EventEvidence.id.asc(),
             )
         ).all()
         source_tier_map: dict[int, int] = {}
-        source_map_ranked: dict[int, tuple[int, str]] = {}
-        for event_id, source_tier, source in rows:
+        source_map: dict[int, str] = {}
+        for event_id, source_tier, source, _, _ in rows:
             event_id_i = int(event_id)
             tier_i = int(source_tier) if source_tier is not None else 9
             source_i = self._source_label(source)
 
             if event_id_i not in source_tier_map:
                 source_tier_map[event_id_i] = tier_i
-            else:
-                source_tier_map[event_id_i] = min(source_tier_map[event_id_i], tier_i)
-
-            if event_id_i not in source_map_ranked:
-                source_map_ranked[event_id_i] = (tier_i, source_i)
-            else:
-                prev_tier, prev_source = source_map_ranked[event_id_i]
-                if tier_i < prev_tier or (tier_i == prev_tier and source_i < prev_source):
-                    source_map_ranked[event_id_i] = (tier_i, source_i)
-
-        source_map = {event_id: item[1] for event_id, item in source_map_ranked.items()}
+            if event_id_i not in source_map:
+                source_map[event_id_i] = source_i
+            elif source_map[event_id_i] == "unknown_source" and source_i != "unknown_source":
+                # Keep deterministic "first evidence wins", but allow replacing empty fallback.
+                source_map[event_id_i] = source_i
         return source_tier_map, source_map
 
     def _bucketize(self, rows: list[dict[str, Any]], key_getter) -> list[dict[str, Any]]:

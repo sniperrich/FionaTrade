@@ -238,3 +238,44 @@ def test_module_attribution_overview_and_run_detail(session):
     detail_sources = {row["bucket"] for row in detail["source_buckets"]}
     assert "sec" in detail_sources
     assert "yahoo_finance" in detail_sources
+
+
+def test_event_source_map_prefers_first_captured_when_tier_is_equal(session):
+    base = datetime(2026, 1, 4, 10, 0, tzinfo=timezone.utc)
+    raw_first = _raw_item("zzz_source", "https://example.com/zzz", "AAPL first", "hash-zzz", base)
+    raw_second = _raw_item("aaa_source", "https://example.com/aaa", "AAPL second", "hash-aaa", base + timedelta(minutes=1))
+    session.add_all([raw_first, raw_second])
+    session.flush()
+
+    event = _event("major_litigation", "AAPL", base + timedelta(minutes=2))
+    session.add(event)
+    session.flush()
+
+    session.add_all(
+        [
+            EventEvidence(
+                event_id=event.id,
+                raw_item_id=raw_first.id,
+                url=raw_first.url,
+                source="zzz_source",
+                source_tier=1,
+                captured_at=base + timedelta(minutes=3),
+                summary="first",
+            ),
+            EventEvidence(
+                event_id=event.id,
+                raw_item_id=raw_second.id,
+                url=raw_second.url,
+                source="aaa_source",
+                source_tier=1,
+                captured_at=base + timedelta(minutes=4),
+                summary="second",
+            ),
+        ]
+    )
+    session.flush()
+
+    service = ModuleAttributionService()
+    source_tier_map, source_map = service._event_source_maps(session, {event.id})
+    assert source_tier_map[event.id] == 1
+    assert source_map[event.id] == "zzz_source"
