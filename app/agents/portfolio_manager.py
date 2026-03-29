@@ -175,7 +175,20 @@ class PortfolioManagerAgent(BaseAgent):
                     },
                 )
 
-            raw = self._call_llm(self._get_market_time_context(context) + _SYSTEM_PROMPT, user_prompt, response_format="json")
+            llm_timeout: float | None = None
+            llm_retries: int | None = None
+            # Live cycles should fail fast here to avoid blocking the whole run.
+            if not context.get("as_of"):
+                llm_timeout = float(getattr(self.settings, "live_portfolio_llm_timeout_seconds", 20.0))
+                llm_retries = int(getattr(self.settings, "live_portfolio_llm_max_retries", 2))
+
+            raw = self._call_llm(
+                self._get_market_time_context(context) + _SYSTEM_PROMPT,
+                user_prompt,
+                response_format="json",
+                timeout_seconds=llm_timeout,
+                max_retries=llm_retries,
+            )
             parsed = self._parse_json_response(raw)
 
             if not parsed:

@@ -18,6 +18,7 @@ from app.services.worker_runtime import (
     COMMAND_RUN_LIVE_CYCLE,
     WorkerRuntimeService,
 )
+from app.worker import main as worker_main
 
 
 def test_worker_heartbeat_status_transitions(session) -> None:
@@ -322,6 +323,7 @@ def test_live_cycle_skips_when_another_cycle_is_running(session, settings) -> No
 
 def test_stale_market_data_suppresses_order_before_price_fetch(session, settings, monkeypatch) -> None:
     service = LiveTradingService(settings)
+    service.settings.live_min_confidence = 0
 
     class DummyGraph:
         def run(self, _session, _ticker, context=None, progress_callback=None):
@@ -329,6 +331,7 @@ def test_stale_market_data_suppresses_order_before_price_fetch(session, settings
                 "final_action": "BUY",
                 "final_position_pct": 0.05,
                 "final_reasoning": "positive catalyst",
+                "portfolio_manager_result": {"confidence": 80, "metadata": {"action": "BUY", "position_pct": 0.05}},
             }
 
     class DummyBroker:
@@ -356,3 +359,43 @@ def test_stale_market_data_suppresses_order_before_price_fetch(session, settings
     assert result["order_placed"] is False
     assert result["reason"] == "stale_market_data"
     assert result["cache_age_minutes"] == 45.0
+
+
+def test_scheduled_live_cycle_uses_open_closed_intervals(session, monkeypatch) -> None:
+    monkeypatch.setattr(worker_main, "market_session_info", lambda: {"label": "open"})
+    monkeypatch.setattr(worker_main.settings, "live_open_cycle_seconds", 900, raising=False)
+    open_interval, open_label = worker_main._target_live_interval_seconds()
+    assert open_label == "open"
+    assert open_interval == 900
+
+    monkeypatch.setattr(worker_main, "market_session_info", lambda: {"label": "closed"})
+    monkeypatch.setattr(worker_main.settings, "live_closed_cycle_seconds", 7200, raising=False)
+    closed_interval, closed_label = worker_main._target_live_interval_seconds()
+    assert closed_label == "closed"
+    assert closed_interval == 7200
+
+
+def test_scheduled_live_cycle_throttles_by_interval(session, monkeypatch) -> None:
+    runtime = WorkerRuntimeService()
+    run = runtime.start_run(
+        session,
+        run_type="live_cycle",
+        trigger="scheduled",
+        run_key="throttle01",
+        status="COMPLETED",
+        stage="completed",
+    )
+    runtime.update_run(
+        session,
+        run,
+        started_at=utc_now() - timedelta(minutes=30),
+        updated_at=utc_now() - timedelta(minutes=29),
+    )
+    session.commit()
+
+    monkeypatch.setattr(worker_main, "market_session_info", lambda: {"label": "closed"})
+    monkeypatch.setattr(worker_main.settings, "live_closed_cycle_seconds", 7200, raising=False)
+
+    should_run, meta = worker_main._should_run_scheduled_live_cycle(session)
+    assert should_run is False
+    assert meta["reason"] == "interval_not_elapsed"

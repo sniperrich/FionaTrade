@@ -185,6 +185,11 @@ class Settings(BaseSettings):
     live_trading_tickers: Annotated[list[str], NoDecode] = []
     # How often (seconds) the live cycle runs during market hours (default 5 min)
     live_cycle_interval_seconds: int = 300
+    # Effective scheduled interval by market session.
+    # Open session cadence (default: 15 minutes)
+    live_open_cycle_seconds: int = 900
+    # Closed / pre-market / after-hours cadence (default: 120 minutes)
+    live_closed_cycle_seconds: int = 7200
     # Maximum portfolio allocation per position (0.0–1.0)
     live_max_position_pct: float = 0.10
     # Live execution confidence gate; BUY/SHORT/SELL below this are downgraded to HOLD.
@@ -195,11 +200,16 @@ class Settings(BaseSettings):
     live_data_max_age_minutes: float = 20.0
     # Event-driven live mode: run full graph when new tradeable news arrives.
     live_event_driven_mode: bool = True
-    # Fallback full/light cycle interval when no new tradeable events.
+    # Legacy fallback interval (kept for backward compatibility).
     live_fallback_cycle_seconds: int = 600
+    # Per-ticker debounce when there is no new tradeable event for that ticker.
+    live_ticker_cooldown_minutes: int = 60
     # Fast-path cache TTL for macro/fundamentals agent outputs.
     live_fast_path_macro_ttl_min: int = 60
     live_fast_path_fund_ttl_min: int = 120
+    # Portfolio manager LLM guardrails for live cycles.
+    live_portfolio_llm_timeout_seconds: float = 20.0
+    live_portfolio_llm_max_retries: int = 2
     # Capital confirmation layer (volume/follow-through/relative-strength).
     flow_confirmation_enabled: bool = True
     flow_confirmation_soft_gate: bool = True

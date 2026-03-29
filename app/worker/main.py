@@ -13,7 +13,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from app.backtest_engine.service import BacktestEngineService
 from app.core.config import get_settings
 from app.core.logging import get_app_logger, log_writeout, setup_logging
-from app.core.market_hours import is_market_open
+from app.core.market_hours import is_market_open, market_session_info
 from app.db.database import db_session, init_db, is_sqlite_lock_error
 from app.db.models import BacktestRun, WorkerCommand
 from app.ingestion.service import IngestionService
@@ -145,6 +145,16 @@ def _scheduled_live_trading() -> None:
         return
     try:
         with db_session() as session:
+            should_run, throttle = _should_run_scheduled_live_cycle(session)
+            if not should_run:
+                logger.debug(
+                    "[live] scheduled throttle skip reason=%s elapsed=%.1fs required=%ss session=%s",
+                    throttle.get("reason"),
+                    float(throttle.get("elapsed_seconds") or 0.0),
+                    int(throttle.get("required_interval_seconds") or 0),
+                    throttle.get("market_session"),
+                )
+                return
             result = LiveTradingService(settings).run_cycle(session, trigger="scheduled")
             if result.get("skipped"):
                 logger.debug("[live] 模拟盘跳过 reason=%s", result.get("reason"))
@@ -159,6 +169,57 @@ def _scheduled_live_trading() -> None:
                 )
     except Exception as exc:
         logger.exception("[live] 模拟盘轮询失败: %s", exc)
+
+
+def _target_live_interval_seconds() -> tuple[int, str]:
+    msi = market_session_info()
+    label = str(msi.get("label") or "closed")
+    if label == "open":
+        return max(60, int(getattr(settings, "live_open_cycle_seconds", 900) or 900)), label
+    return max(60, int(getattr(settings, "live_closed_cycle_seconds", 7200) or 7200)), label
+
+
+def _should_run_scheduled_live_cycle(session) -> tuple[bool, dict[str, object]]:
+    required_interval, market_label = _target_live_interval_seconds()
+    latest_run = runtime.latest_run(session, "live_cycle")
+    if latest_run is None:
+        return True, {
+            "reason": "no_previous_run",
+            "market_session": market_label,
+            "required_interval_seconds": required_interval,
+            "elapsed_seconds": None,
+        }
+    if str(latest_run.status or "").upper() == "RUNNING":
+        return False, {
+            "reason": "previous_cycle_running",
+            "market_session": market_label,
+            "required_interval_seconds": required_interval,
+            "elapsed_seconds": 0.0,
+        }
+    started_at = latest_run.started_at
+    if started_at is None:
+        return True, {
+            "reason": "previous_cycle_missing_start",
+            "market_session": market_label,
+            "required_interval_seconds": required_interval,
+            "elapsed_seconds": None,
+        }
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+    if elapsed < required_interval:
+        return False, {
+            "reason": "interval_not_elapsed",
+            "market_session": market_label,
+            "required_interval_seconds": required_interval,
+            "elapsed_seconds": elapsed,
+        }
+    return True, {
+        "reason": "interval_elapsed",
+        "market_session": market_label,
+        "required_interval_seconds": required_interval,
+        "elapsed_seconds": elapsed,
+    }
 
 
 def _heartbeat_worker() -> None:

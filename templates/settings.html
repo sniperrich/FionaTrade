@@ -63,11 +63,26 @@
       </div>
     </div>
 
-    <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+    <div class="form-row mb12" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+      <div class="form-group">
+        <label>LIVE_OPEN_CYCLE_SECONDS</label>
+        <input type="number" min="60" step="60" id="cfg-live-open-cycle-seconds" value="{{ ed.get('LIVE_OPEN_CYCLE_SECONDS', settings.live_open_cycle_seconds) }}" />
+      </div>
+      <div class="form-group">
+        <label>LIVE_CLOSED_CYCLE_SECONDS</label>
+        <input type="number" min="300" step="60" id="cfg-live-closed-cycle-seconds" value="{{ ed.get('LIVE_CLOSED_CYCLE_SECONDS', settings.live_closed_cycle_seconds) }}" />
+      </div>
+      <div class="form-group">
+        <label>LIVE_TICKER_COOLDOWN_MINUTES</label>
+        <input type="number" min="0" step="1" id="cfg-live-ticker-cooldown-minutes" value="{{ ed.get('LIVE_TICKER_COOLDOWN_MINUTES', settings.live_ticker_cooldown_minutes) }}" />
+      </div>
       <div class="form-group">
         <label>LIVE_FALLBACK_CYCLE_SECONDS</label>
         <input type="number" min="60" step="60" id="cfg-live-fallback-cycle-seconds" value="{{ ed.get('LIVE_FALLBACK_CYCLE_SECONDS', settings.live_fallback_cycle_seconds) }}" />
       </div>
+    </div>
+
+    <div class="form-row mb12" style="grid-template-columns:repeat(4,minmax(0,1fr))">
       <div class="form-group">
         <label>LIVE_FAST_PATH_MACRO_TTL_MIN</label>
         <input type="number" min="5" step="5" id="cfg-live-fast-macro-ttl" value="{{ ed.get('LIVE_FAST_PATH_MACRO_TTL_MIN', settings.live_fast_path_macro_ttl_min) }}" />
@@ -75,6 +90,14 @@
       <div class="form-group">
         <label>LIVE_FAST_PATH_FUND_TTL_MIN</label>
         <input type="number" min="5" step="5" id="cfg-live-fast-fund-ttl" value="{{ ed.get('LIVE_FAST_PATH_FUND_TTL_MIN', settings.live_fast_path_fund_ttl_min) }}" />
+      </div>
+      <div class="form-group">
+        <label>LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS</label>
+        <input type="number" min="1" step="1" id="cfg-live-portfolio-llm-timeout-seconds" value="{{ ed.get('LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS', settings.live_portfolio_llm_timeout_seconds) }}" />
+      </div>
+      <div class="form-group">
+        <label>LIVE_PORTFOLIO_LLM_MAX_RETRIES</label>
+        <input type="number" min="1" step="1" id="cfg-live-portfolio-llm-max-retries" value="{{ ed.get('LIVE_PORTFOLIO_LLM_MAX_RETRIES', settings.live_portfolio_llm_max_retries) }}" />
       </div>
     </div>
 
@@ -306,9 +329,14 @@ function applyEditorSettings(payload){
   document.getElementById('cfg-min-trade-confidence').value = ed.MIN_TRADE_CONFIDENCE ?? '';
   document.getElementById('cfg-live-max-position').value = ed.LIVE_MAX_POSITION_PCT ?? '';
   document.getElementById('cfg-live-data-max-age').value = ed.LIVE_DATA_MAX_AGE_MINUTES ?? '';
+  document.getElementById('cfg-live-open-cycle-seconds').value = ed.LIVE_OPEN_CYCLE_SECONDS ?? '';
+  document.getElementById('cfg-live-closed-cycle-seconds').value = ed.LIVE_CLOSED_CYCLE_SECONDS ?? '';
+  document.getElementById('cfg-live-ticker-cooldown-minutes').value = ed.LIVE_TICKER_COOLDOWN_MINUTES ?? '';
   document.getElementById('cfg-live-fallback-cycle-seconds').value = ed.LIVE_FALLBACK_CYCLE_SECONDS ?? '';
   document.getElementById('cfg-live-fast-macro-ttl').value = ed.LIVE_FAST_PATH_MACRO_TTL_MIN ?? '';
   document.getElementById('cfg-live-fast-fund-ttl').value = ed.LIVE_FAST_PATH_FUND_TTL_MIN ?? '';
+  document.getElementById('cfg-live-portfolio-llm-timeout-seconds').value = ed.LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS ?? '';
+  document.getElementById('cfg-live-portfolio-llm-max-retries').value = ed.LIVE_PORTFOLIO_LLM_MAX_RETRIES ?? '';
   document.getElementById('cfg-weight-news').value = ed.AGENT_WEIGHT_NEWS ?? '';
   document.getElementById('cfg-weight-technicals').value = ed.AGENT_WEIGHT_TECHNICALS ?? '';
   document.getElementById('cfg-weight-macro').value = ed.AGENT_WEIGHT_MACRO ?? '';
@@ -349,9 +377,14 @@ async function saveSettings(e){
     MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
     LIVE_MAX_POSITION_PCT: document.getElementById('cfg-live-max-position').value,
     LIVE_DATA_MAX_AGE_MINUTES: document.getElementById('cfg-live-data-max-age').value,
+    LIVE_OPEN_CYCLE_SECONDS: document.getElementById('cfg-live-open-cycle-seconds').value,
+    LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('cfg-live-closed-cycle-seconds').value,
+    LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('cfg-live-ticker-cooldown-minutes').value,
     LIVE_FALLBACK_CYCLE_SECONDS: document.getElementById('cfg-live-fallback-cycle-seconds').value,
     LIVE_FAST_PATH_MACRO_TTL_MIN: document.getElementById('cfg-live-fast-macro-ttl').value,
     LIVE_FAST_PATH_FUND_TTL_MIN: document.getElementById('cfg-live-fast-fund-ttl').value,
+    LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS: document.getElementById('cfg-live-portfolio-llm-timeout-seconds').value,
+    LIVE_PORTFOLIO_LLM_MAX_RETRIES: document.getElementById('cfg-live-portfolio-llm-max-retries').value,
     AGENT_WEIGHT_NEWS: document.getElementById('cfg-weight-news').value,
     AGENT_WEIGHT_TECHNICALS: document.getElementById('cfg-weight-technicals').value,
     AGENT_WEIGHT_MACRO: document.getElementById('cfg-weight-macro').value,
@@ -406,9 +439,14 @@ applyEditorSettings({ editable: {
   MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
   LIVE_MAX_POSITION_PCT: document.getElementById('cfg-live-max-position').value,
   LIVE_DATA_MAX_AGE_MINUTES: document.getElementById('cfg-live-data-max-age').value,
+  LIVE_OPEN_CYCLE_SECONDS: document.getElementById('cfg-live-open-cycle-seconds').value,
+  LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('cfg-live-closed-cycle-seconds').value,
+  LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('cfg-live-ticker-cooldown-minutes').value,
   LIVE_FALLBACK_CYCLE_SECONDS: document.getElementById('cfg-live-fallback-cycle-seconds').value,
   LIVE_FAST_PATH_MACRO_TTL_MIN: document.getElementById('cfg-live-fast-macro-ttl').value,
   LIVE_FAST_PATH_FUND_TTL_MIN: document.getElementById('cfg-live-fast-fund-ttl').value,
+  LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS: document.getElementById('cfg-live-portfolio-llm-timeout-seconds').value,
+  LIVE_PORTFOLIO_LLM_MAX_RETRIES: document.getElementById('cfg-live-portfolio-llm-max-retries').value,
   AGENT_WEIGHT_NEWS: document.getElementById('cfg-weight-news').value,
   AGENT_WEIGHT_TECHNICALS: document.getElementById('cfg-weight-technicals').value,
   AGENT_WEIGHT_MACRO: document.getElementById('cfg-weight-macro').value,

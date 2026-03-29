@@ -146,8 +146,10 @@ class LiveTradingService:
             cycle_start = datetime.now(timezone.utc)
             new_article_count = 0
             new_tradeable_count = 0
+            new_tradeable_by_ticker = {t.upper(): 0 for t in tickers}
             event_driven_mode = bool(getattr(self.settings, "live_event_driven_mode", True))
             run_mode = "full_graph"
+            fallback_seconds = self._effective_fallback_cycle_seconds(msi.get("label", "closed"))
             try:
                 self._update_run(session, run, stage="ingestion", current_agent=None)
                 ingestion = IngestionService(self.settings)
@@ -162,16 +164,21 @@ class LiveTradingService:
                     since=cycle_start,
                     tickers=tickers,
                 )
+                new_tradeable_by_ticker = self._count_new_tradeable_by_ticker(
+                    session,
+                    since=cycle_start,
+                    tickers=tickers,
+                )
             except Exception as exc:
                 self._emit_event(session, run, f"Cycle {cycle_id} ingestion failed: {exc}", level="warn", stage="ingestion")
                 logger.warning("[live] Ingestion failed (continuing): %s", exc)
 
-            if not dry_run and event_driven_mode:
+            if event_driven_mode:
                 last_global_run = self._get_last_agent_run_time(session, ticker=None)
                 time_since_last = (
                     (cycle_start - last_global_run).total_seconds() / 60 if last_global_run else 999
                 )
-                fallback_minutes = max(1.0, float(getattr(self.settings, "live_fallback_cycle_seconds", 600)) / 60.0)
+                fallback_minutes = max(1.0, float(fallback_seconds) / 60.0)
                 if new_tradeable_count == 0 and time_since_last < fallback_minutes:
                     summary = {
                         "cycle_id": cycle_id,
@@ -182,6 +189,8 @@ class LiveTradingService:
                         "market_time": msi["et_time_str"],
                         "run_key": run.run_key,
                         "event_driven_mode": True,
+                        "fallback_cycle_seconds": int(fallback_seconds),
+                        "market_session": msi.get("label"),
                     }
                     self.runtime.finish_run(
                         session,
@@ -197,13 +206,18 @@ class LiveTradingService:
                         run,
                         f"Cycle {cycle_id} skipped: no new tradeable event",
                         stage="skipped_no_tradeable_event",
-                        payload={"reason": "no_new_tradeable_event"},
+                        payload={
+                            "reason": "no_new_tradeable_event",
+                            "fallback_cycle_seconds": int(fallback_seconds),
+                            "market_session": msi.get("label"),
+                        },
                     )
                     logger.info(
-                        "[live] Cycle %s: no new tradeable event (last run %.0f min ago, fallback %.0f min) — skipping agents",
+                        "[live] Cycle %s: no new tradeable event (last run %.0f min ago, fallback %.0f min, market=%s) — skipping agents",
                         cycle_id,
                         time_since_last,
                         fallback_minutes,
+                        msi.get("label"),
                     )
                     return summary
                 if new_tradeable_count == 0:
@@ -256,6 +270,7 @@ class LiveTradingService:
                 triggered_plan_tickers = set(plan_eval["triggered_tickers"])
 
             results = []
+            ticker_cooldown_skipped = 0
             for idx, ticker in enumerate(tickers, start=1):
                 try:
                     if ticker in triggered_plan_tickers:
@@ -268,6 +283,41 @@ class LiveTradingService:
                             }
                         )
                         continue
+                    if event_driven_mode:
+                        should_skip, minutes_since_last, cooldown_minutes = self._should_skip_ticker_by_cooldown(
+                            session,
+                            ticker=ticker,
+                            cycle_start=cycle_start,
+                            new_tradeable_by_ticker=new_tradeable_by_ticker,
+                        )
+                        if should_skip:
+                            ticker_cooldown_skipped += 1
+                            results.append(
+                                {
+                                    "ticker": ticker,
+                                    "action": "HOLD",
+                                    "order_placed": False,
+                                    "skipped": True,
+                                    "reason": "ticker_cooldown_no_new_event",
+                                    "minutes_since_last": round(float(minutes_since_last or 0.0), 2),
+                                    "cooldown_minutes": int(cooldown_minutes),
+                                    "new_tradeable_articles": int(new_tradeable_by_ticker.get(ticker.upper(), 0)),
+                                }
+                            )
+                            self._emit_event(
+                                session,
+                                run,
+                                f"{ticker} skipped: no new event + cooldown {cooldown_minutes}m",
+                                stage="ticker_skipped_cooldown",
+                                ticker=ticker,
+                                payload={
+                                    "reason": "ticker_cooldown_no_new_event",
+                                    "minutes_since_last": round(float(minutes_since_last or 0.0), 2),
+                                    "cooldown_minutes": int(cooldown_minutes),
+                                    "new_tradeable_articles": int(new_tradeable_by_ticker.get(ticker.upper(), 0)),
+                                },
+                            )
+                            continue
                     self._update_run(
                         session,
                         run,
@@ -324,9 +374,13 @@ class LiveTradingService:
                 "tickers_processed": len(tickers),
                 "new_articles": new_article_count,
                 "new_tradeable_articles": new_tradeable_count,
+                "new_tradeable_articles_by_ticker": new_tradeable_by_ticker,
                 "live_min_confidence": self._effective_live_min_confidence(),
                 "event_driven_mode": event_driven_mode,
                 "run_mode": run_mode,
+                "fallback_cycle_seconds": int(fallback_seconds),
+                "ticker_cooldown_minutes": int(getattr(self.settings, "live_ticker_cooldown_minutes", 60)),
+                "ticker_cooldown_skipped": int(ticker_cooldown_skipped),
                 "orders_placed": sum(1 for r in results if r.get("order_placed")) + sum(1 for r in plan_results if r.get("order_placed")),
                 "plans_triggered": sum(1 for r in plan_results if r.get("order_placed")),
                 "plans_evaluated": len(plan_results),
@@ -436,6 +490,37 @@ class LiveTradingService:
         if configured <= 0:
             configured = int(getattr(self.settings, "min_trade_confidence", 0) or 0)
         return max(0, min(100, configured))
+
+    def _effective_fallback_cycle_seconds(self, market_session: str) -> int:
+        """Return event-driven fallback interval by market session."""
+        legacy = max(60, int(getattr(self.settings, "live_fallback_cycle_seconds", 600) or 600))
+        if str(market_session or "").lower() == "open":
+            open_seconds = int(getattr(self.settings, "live_open_cycle_seconds", legacy) or legacy)
+            return max(60, open_seconds)
+        closed_default = max(legacy, 7200)
+        closed_seconds = int(getattr(self.settings, "live_closed_cycle_seconds", closed_default) or closed_default)
+        return max(60, closed_seconds)
+
+    def _should_skip_ticker_by_cooldown(
+        self,
+        session: Session,
+        *,
+        ticker: str,
+        cycle_start: datetime,
+        new_tradeable_by_ticker: dict[str, int],
+    ) -> tuple[bool, float | None, int]:
+        cooldown_minutes = max(0, int(getattr(self.settings, "live_ticker_cooldown_minutes", 60) or 0))
+        if cooldown_minutes <= 0:
+            return False, None, cooldown_minutes
+        if int(new_tradeable_by_ticker.get(ticker.upper(), 0)) > 0:
+            return False, None, cooldown_minutes
+        last_ticker_run = self._get_last_agent_run_time(session, ticker=ticker)
+        if last_ticker_run is None:
+            return False, None, cooldown_minutes
+        minutes_since_last = (cycle_start - last_ticker_run).total_seconds() / 60.0
+        if minutes_since_last < float(cooldown_minutes):
+            return True, minutes_since_last, cooldown_minutes
+        return False, minutes_since_last, cooldown_minutes
 
     @staticmethod
     def _extract_final_confidence(state: dict[str, Any]) -> int:
@@ -775,6 +860,40 @@ class LiveTradingService:
                 continue
             count += 1
         return count
+
+    def _count_new_tradeable_by_ticker(
+        self,
+        session: Session,
+        *,
+        since: datetime,
+        tickers: list[str],
+    ) -> dict[str, int]:
+        ticker_set = {t.upper() for t in tickers if t}
+        counts: dict[str, int] = {ticker: 0 for ticker in ticker_set}
+        if not ticker_set:
+            return counts
+        rows = session.execute(
+            select(RawItem).where(RawItem.ingested_at >= since).order_by(desc(RawItem.ingested_at))
+        ).scalars().all()
+        if not rows:
+            return counts
+        for row in rows:
+            title = (row.title or "").strip()
+            body = (row.body or "")[:2000]
+            combined = f"{title}\n{body}"
+            if is_follow_up_commentary(combined):
+                continue
+            title_upper = (row.title or "").upper()
+            body_upper = (row.body or "").upper()
+            meta = row.metadata_json or {}
+            meta_ticker = str(meta.get("ticker") or "").upper().strip()
+            for ticker in ticker_set:
+                if meta_ticker and meta_ticker == ticker:
+                    counts[ticker] += 1
+                    continue
+                if ticker in title_upper or ticker in body_upper:
+                    counts[ticker] += 1
+        return counts
 
     @staticmethod
     def _raw_item_mentions_any_ticker(raw: RawItem, ticker_set: set[str]) -> bool:
