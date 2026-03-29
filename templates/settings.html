@@ -37,6 +37,19 @@
       </div>
     </div>
 
+    <div class="form-row mb12" style="grid-template-columns:1fr">
+      <div class="form-group">
+        <label>LIVE_ALLOWED_SOURCES（逗号分隔，空=全部来源）</label>
+        <input
+          type="text"
+          id="cfg-live-allowed-sources"
+          value="{{ ed.get('LIVE_ALLOWED_SOURCES', '') }}"
+          placeholder="例如: finnhub,sec,cnbc,yahoo"
+        />
+        <div class="text-muted text-xs">可用标准名示例：finnhub, sec, cnbc, yahoo, marketwatch, ft, nytimes...</div>
+      </div>
+    </div>
+
     <div class="form-row mb12" style="grid-template-columns:repeat(3,minmax(0,1fr))">
       <div class="form-group">
         <label>POLL_INTERVAL_SECONDS</label>
@@ -63,7 +76,7 @@
       </div>
     </div>
 
-    <div class="form-row mb12" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+    <div class="form-row mb12" style="grid-template-columns:repeat(5,minmax(0,1fr))">
       <div class="form-group">
         <label>LIVE_OPEN_CYCLE_SECONDS</label>
         <input type="number" min="60" step="60" id="cfg-live-open-cycle-seconds" value="{{ ed.get('LIVE_OPEN_CYCLE_SECONDS', settings.live_open_cycle_seconds) }}" />
@@ -99,6 +112,10 @@
         <label>LIVE_PORTFOLIO_LLM_MAX_RETRIES</label>
         <input type="number" min="1" step="1" id="cfg-live-portfolio-llm-max-retries" value="{{ ed.get('LIVE_PORTFOLIO_LLM_MAX_RETRIES', settings.live_portfolio_llm_max_retries) }}" />
       </div>
+      <div class="form-group">
+        <label>FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS</label>
+        <input type="number" min="1" step="1" id="cfg-finnhub-company-news-live-lookback-days" value="{{ ed.get('FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS', settings.finnhub_company_news_live_lookback_days) }}" />
+      </div>
     </div>
 
     <div class="form-row mb12" style="grid-template-columns:repeat(4,minmax(0,1fr))">
@@ -129,6 +146,7 @@
       <label><input type="checkbox" id="cfg-enable-sec" {% if ed.get('ENABLE_SEC', settings.enable_sec) %}checked{% endif %} /> ENABLE_SEC</label>
       <label><input type="checkbox" id="cfg-enable-rss" {% if ed.get('ENABLE_RSS', settings.enable_rss) %}checked{% endif %} /> ENABLE_RSS</label>
       <label><input type="checkbox" id="cfg-enable-finnhub" {% if ed.get('ENABLE_FINNHUB', settings.enable_finnhub) %}checked{% endif %} /> ENABLE_FINNHUB</label>
+      <label><input type="checkbox" id="cfg-enable-finnhub-company-news-live" {% if ed.get('ENABLE_FINNHUB_COMPANY_NEWS_LIVE', settings.enable_finnhub_company_news_live) %}checked{% endif %} /> ENABLE_FINNHUB_COMPANY_NEWS_LIVE</label>
       <label><input type="checkbox" id="cfg-enable-earnings" {% if ed.get('ENABLE_EARNINGS_RELEASE_SOURCE', settings.enable_earnings_release_source) %}checked{% endif %} /> ENABLE_EARNINGS_RELEASE_SOURCE</label>
     </div>
 
@@ -320,6 +338,7 @@ function applyEditorSettings(payload){
   const ed = payload?.editable || {};
   liveTickers = parseCsvTickers(ed.LIVE_TRADING_TICKERS || '');
   agentTickers = parseCsvTickers(ed.AGENT_TICKERS_OVERRIDE || '');
+  document.getElementById('cfg-live-allowed-sources').value = ed.LIVE_ALLOWED_SOURCES ?? '';
   syncTickerHidden();
   renderTickerChips('live');
   renderTickerChips('agent');
@@ -337,6 +356,7 @@ function applyEditorSettings(payload){
   document.getElementById('cfg-live-fast-fund-ttl').value = ed.LIVE_FAST_PATH_FUND_TTL_MIN ?? '';
   document.getElementById('cfg-live-portfolio-llm-timeout-seconds').value = ed.LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS ?? '';
   document.getElementById('cfg-live-portfolio-llm-max-retries').value = ed.LIVE_PORTFOLIO_LLM_MAX_RETRIES ?? '';
+  document.getElementById('cfg-finnhub-company-news-live-lookback-days').value = ed.FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS ?? '';
   document.getElementById('cfg-weight-news').value = ed.AGENT_WEIGHT_NEWS ?? '';
   document.getElementById('cfg-weight-technicals').value = ed.AGENT_WEIGHT_TECHNICALS ?? '';
   document.getElementById('cfg-weight-macro').value = ed.AGENT_WEIGHT_MACRO ?? '';
@@ -350,6 +370,7 @@ function applyEditorSettings(payload){
   document.getElementById('cfg-enable-sec').checked = !!ed.ENABLE_SEC;
   document.getElementById('cfg-enable-rss').checked = !!ed.ENABLE_RSS;
   document.getElementById('cfg-enable-finnhub').checked = !!ed.ENABLE_FINNHUB;
+  document.getElementById('cfg-enable-finnhub-company-news-live').checked = !!ed.ENABLE_FINNHUB_COMPANY_NEWS_LIVE;
   document.getElementById('cfg-enable-earnings').checked = !!ed.ENABLE_EARNINGS_RELEASE_SOURCE;
 
   document.getElementById('cfg-llm-model').value = ed.LLM_MODEL ?? '';
@@ -372,6 +393,7 @@ async function saveSettings(e){
   const updates = {
     LIVE_TRADING_TICKERS: document.getElementById('cfg-live-trading-tickers').value,
     AGENT_TICKERS_OVERRIDE: document.getElementById('cfg-agent-tickers-override').value,
+    LIVE_ALLOWED_SOURCES: document.getElementById('cfg-live-allowed-sources').value.trim(),
     POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
     LIVE_CYCLE_INTERVAL_SECONDS: document.getElementById('cfg-live-cycle-interval').value,
     MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
@@ -385,6 +407,7 @@ async function saveSettings(e){
     LIVE_FAST_PATH_FUND_TTL_MIN: document.getElementById('cfg-live-fast-fund-ttl').value,
     LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS: document.getElementById('cfg-live-portfolio-llm-timeout-seconds').value,
     LIVE_PORTFOLIO_LLM_MAX_RETRIES: document.getElementById('cfg-live-portfolio-llm-max-retries').value,
+    FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS: document.getElementById('cfg-finnhub-company-news-live-lookback-days').value,
     AGENT_WEIGHT_NEWS: document.getElementById('cfg-weight-news').value,
     AGENT_WEIGHT_TECHNICALS: document.getElementById('cfg-weight-technicals').value,
     AGENT_WEIGHT_MACRO: document.getElementById('cfg-weight-macro').value,
@@ -397,6 +420,7 @@ async function saveSettings(e){
     ENABLE_SEC: document.getElementById('cfg-enable-sec').checked,
     ENABLE_RSS: document.getElementById('cfg-enable-rss').checked,
     ENABLE_FINNHUB: document.getElementById('cfg-enable-finnhub').checked,
+    ENABLE_FINNHUB_COMPANY_NEWS_LIVE: document.getElementById('cfg-enable-finnhub-company-news-live').checked,
     ENABLE_EARNINGS_RELEASE_SOURCE: document.getElementById('cfg-enable-earnings').checked,
     LLM_MODEL: document.getElementById('cfg-llm-model').value.trim(),
     LLM_BASE_URL: document.getElementById('cfg-llm-base-url').value.trim(),
@@ -434,6 +458,7 @@ async function saveSettings(e){
 applyEditorSettings({ editable: {
   LIVE_TRADING_TICKERS: document.getElementById('cfg-live-trading-tickers').value,
   AGENT_TICKERS_OVERRIDE: document.getElementById('cfg-agent-tickers-override').value,
+  LIVE_ALLOWED_SOURCES: document.getElementById('cfg-live-allowed-sources').value,
   POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
   LIVE_CYCLE_INTERVAL_SECONDS: document.getElementById('cfg-live-cycle-interval').value,
   MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
@@ -447,6 +472,7 @@ applyEditorSettings({ editable: {
   LIVE_FAST_PATH_FUND_TTL_MIN: document.getElementById('cfg-live-fast-fund-ttl').value,
   LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS: document.getElementById('cfg-live-portfolio-llm-timeout-seconds').value,
   LIVE_PORTFOLIO_LLM_MAX_RETRIES: document.getElementById('cfg-live-portfolio-llm-max-retries').value,
+  FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS: document.getElementById('cfg-finnhub-company-news-live-lookback-days').value,
   AGENT_WEIGHT_NEWS: document.getElementById('cfg-weight-news').value,
   AGENT_WEIGHT_TECHNICALS: document.getElementById('cfg-weight-technicals').value,
   AGENT_WEIGHT_MACRO: document.getElementById('cfg-weight-macro').value,
@@ -459,6 +485,7 @@ applyEditorSettings({ editable: {
   ENABLE_SEC: document.getElementById('cfg-enable-sec').checked,
   ENABLE_RSS: document.getElementById('cfg-enable-rss').checked,
   ENABLE_FINNHUB: document.getElementById('cfg-enable-finnhub').checked,
+  ENABLE_FINNHUB_COMPANY_NEWS_LIVE: document.getElementById('cfg-enable-finnhub-company-news-live').checked,
   ENABLE_EARNINGS_RELEASE_SOURCE: document.getElementById('cfg-enable-earnings').checked,
   LLM_MODEL: document.getElementById('cfg-llm-model').value,
   LLM_BASE_URL: document.getElementById('cfg-llm-base-url').value,

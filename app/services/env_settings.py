@@ -17,6 +17,7 @@ class EnvSettingsService:
         "ENABLE_SEC",
         "ENABLE_RSS",
         "ENABLE_FINNHUB",
+        "ENABLE_FINNHUB_COMPANY_NEWS_LIVE",
         "ENABLE_EARNINGS_RELEASE_SOURCE",
         "LIVE_TRADING_ENABLED",
         "LIVE_ALLOW_PREMARKET",
@@ -36,6 +37,7 @@ class EnvSettingsService:
         "LIVE_MIN_CONFIDENCE",
         "MIN_TRADE_CONFIDENCE",
         "LIVE_PORTFOLIO_LLM_MAX_RETRIES",
+        "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS",
     }
     FLOAT_KEYS = {
         "LIVE_MAX_POSITION_PCT",
@@ -50,9 +52,13 @@ class EnvSettingsService:
         "LIVE_TRADING_TICKERS",
         "AGENT_TICKERS_OVERRIDE",
     }
+    CSV_LOWER_KEYS = {
+        "LIVE_ALLOWED_SOURCES",
+    }
     KEY_ORDER = [
         "LIVE_TRADING_TICKERS",
         "AGENT_TICKERS_OVERRIDE",
+        "LIVE_ALLOWED_SOURCES",
         "POLL_INTERVAL_SECONDS",
         "LIVE_CYCLE_INTERVAL_SECONDS",
         "LIVE_OPEN_CYCLE_SECONDS",
@@ -68,6 +74,8 @@ class EnvSettingsService:
         "LIVE_FAST_PATH_FUND_TTL_MIN",
         "LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS",
         "LIVE_PORTFOLIO_LLM_MAX_RETRIES",
+        "ENABLE_FINNHUB_COMPANY_NEWS_LIVE",
+        "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS",
         "FLOW_CONFIRMATION_ENABLED",
         "FLOW_CONFIRMATION_SOFT_GATE",
         "AGENT_WEIGHT_NEWS",
@@ -93,6 +101,7 @@ class EnvSettingsService:
             "editable": {
                 "LIVE_TRADING_TICKERS": ",".join(settings.live_trading_tickers or []),
                 "AGENT_TICKERS_OVERRIDE": ",".join(settings.agent_tickers_override or []),
+                "LIVE_ALLOWED_SOURCES": ",".join(settings.live_allowed_sources or []),
                 "POLL_INTERVAL_SECONDS": settings.poll_interval_seconds,
                 "LIVE_CYCLE_INTERVAL_SECONDS": settings.live_cycle_interval_seconds,
                 "LIVE_OPEN_CYCLE_SECONDS": settings.live_open_cycle_seconds,
@@ -108,6 +117,8 @@ class EnvSettingsService:
                 "LIVE_FAST_PATH_FUND_TTL_MIN": settings.live_fast_path_fund_ttl_min,
                 "LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS": settings.live_portfolio_llm_timeout_seconds,
                 "LIVE_PORTFOLIO_LLM_MAX_RETRIES": settings.live_portfolio_llm_max_retries,
+                "ENABLE_FINNHUB_COMPANY_NEWS_LIVE": settings.enable_finnhub_company_news_live,
+                "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS": settings.finnhub_company_news_live_lookback_days,
                 "FLOW_CONFIRMATION_ENABLED": settings.flow_confirmation_enabled,
                 "FLOW_CONFIRMATION_SOFT_GATE": settings.flow_confirmation_soft_gate,
                 "AGENT_WEIGHT_NEWS": settings.agent_weight_news,
@@ -160,9 +171,31 @@ class EnvSettingsService:
             seen.add(token)
         return ",".join(cleaned)
 
+    @staticmethod
+    def _normalize_csv_lower(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            parts = value.split(",")
+        elif isinstance(value, Iterable):
+            parts = [str(item) for item in value]
+        else:
+            parts = [str(value)]
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            token = str(part).strip().lower()
+            if not token or token in seen:
+                continue
+            cleaned.append(token)
+            seen.add(token)
+        return ",".join(cleaned)
+
     def _normalize_value(self, key: str, value: Any) -> str:
         if key in self.CSV_UPPER_KEYS:
             return self._normalize_csv_upper(value)
+        if key in self.CSV_LOWER_KEYS:
+            return self._normalize_csv_lower(value)
         if key in self.BOOL_KEYS:
             if isinstance(value, str):
                 normalized = value.strip().lower()

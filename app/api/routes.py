@@ -948,6 +948,11 @@ def live_status(
         "max_position_pct": settings.live_max_position_pct,
         "live_min_confidence": int(getattr(settings, "live_min_confidence", settings.min_trade_confidence)),
         "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
+        "live_allowed_sources": list(getattr(settings, "live_allowed_sources", []) or []),
+        "enable_finnhub_company_news_live": bool(getattr(settings, "enable_finnhub_company_news_live", True)),
+        "finnhub_company_news_live_lookback_days": int(
+            getattr(settings, "finnhub_company_news_live_lookback_days", 2) or 2
+        ),
         "last_cycle": last_cycle,
         "worker": worker_bundle["worker"],
         "supervisor": worker_bundle["supervisor"],

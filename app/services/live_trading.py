@@ -25,7 +25,7 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.analysis.taxonomy import is_follow_up_commentary
+from app.analysis.taxonomy import is_follow_up_commentary, normalize_source_name
 from app.agent_graph.graph import AgentGraph
 from app.broker.alpaca import AlpacaBroker
 from app.core.config import Settings
@@ -147,6 +147,7 @@ class LiveTradingService:
             new_article_count = 0
             new_tradeable_count = 0
             new_tradeable_by_ticker = {t.upper(): 0 for t in tickers}
+            allowed_sources = self._allowed_source_set()
             event_driven_mode = bool(getattr(self.settings, "live_event_driven_mode", True))
             run_mode = "full_graph"
             fallback_seconds = self._effective_fallback_cycle_seconds(msi.get("label", "closed"))
@@ -163,11 +164,13 @@ class LiveTradingService:
                     session,
                     since=cycle_start,
                     tickers=tickers,
+                    allowed_sources=allowed_sources,
                 )
                 new_tradeable_by_ticker = self._count_new_tradeable_by_ticker(
                     session,
                     since=cycle_start,
                     tickers=tickers,
+                    allowed_sources=allowed_sources,
                 )
             except Exception as exc:
                 self._emit_event(session, run, f"Cycle {cycle_id} ingestion failed: {exc}", level="warn", stage="ingestion")
@@ -191,6 +194,7 @@ class LiveTradingService:
                         "event_driven_mode": True,
                         "fallback_cycle_seconds": int(fallback_seconds),
                         "market_session": msi.get("label"),
+                        "live_allowed_sources": sorted(allowed_sources),
                     }
                     self.runtime.finish_run(
                         session,
@@ -210,6 +214,7 @@ class LiveTradingService:
                             "reason": "no_new_tradeable_event",
                             "fallback_cycle_seconds": int(fallback_seconds),
                             "market_session": msi.get("label"),
+                            "live_allowed_sources": sorted(allowed_sources),
                         },
                     )
                     logger.info(
@@ -337,6 +342,7 @@ class LiveTradingService:
                         dry_run=dry_run,
                         run=run,
                         fast_path=(run_mode == "fast_path"),
+                        allowed_sources=allowed_sources,
                     )
                     results.append(result)
                     self._emit_event(
@@ -381,6 +387,7 @@ class LiveTradingService:
                 "fallback_cycle_seconds": int(fallback_seconds),
                 "ticker_cooldown_minutes": int(getattr(self.settings, "live_ticker_cooldown_minutes", 60)),
                 "ticker_cooldown_skipped": int(ticker_cooldown_skipped),
+                "live_allowed_sources": sorted(allowed_sources),
                 "orders_placed": sum(1 for r in results if r.get("order_placed")) + sum(1 for r in plan_results if r.get("order_placed")),
                 "plans_triggered": sum(1 for r in plan_results if r.get("order_placed")),
                 "plans_evaluated": len(plan_results),
@@ -484,6 +491,20 @@ class LiveTradingService:
         if not tickers:
             tickers = list(self.settings.agent_tickers_override or [])
         return [t.upper() for t in tickers if t]
+
+    def _allowed_source_set(self) -> set[str]:
+        configured = getattr(self.settings, "live_allowed_sources", []) or []
+        return {
+            normalize_source_name(str(source).strip().lower())
+            for source in configured
+            if str(source).strip()
+        }
+
+    @staticmethod
+    def _source_allowed(source: str | None, allowed_sources: set[str]) -> bool:
+        if not allowed_sources:
+            return True
+        return normalize_source_name(str(source or "").strip().lower()) in allowed_sources
 
     def _effective_live_min_confidence(self) -> int:
         configured = int(getattr(self.settings, "live_min_confidence", 0) or 0)
@@ -842,6 +863,7 @@ class LiveTradingService:
         *,
         since: datetime,
         tickers: list[str],
+        allowed_sources: set[str] | None = None,
     ) -> int:
         rows = session.execute(
             select(RawItem).where(RawItem.ingested_at >= since).order_by(desc(RawItem.ingested_at))
@@ -849,8 +871,11 @@ class LiveTradingService:
         if not rows:
             return 0
         ticker_set = {t.upper() for t in tickers if t}
+        allowed = allowed_sources or set()
         count = 0
         for row in rows:
+            if not self._source_allowed(getattr(row, "source", None), allowed):
+                continue
             title = (row.title or "").strip()
             body = (row.body or "")[:2000]
             combined = f"{title}\n{body}"
@@ -867,17 +892,21 @@ class LiveTradingService:
         *,
         since: datetime,
         tickers: list[str],
+        allowed_sources: set[str] | None = None,
     ) -> dict[str, int]:
         ticker_set = {t.upper() for t in tickers if t}
         counts: dict[str, int] = {ticker: 0 for ticker in ticker_set}
         if not ticker_set:
             return counts
+        allowed = allowed_sources or set()
         rows = session.execute(
             select(RawItem).where(RawItem.ingested_at >= since).order_by(desc(RawItem.ingested_at))
         ).scalars().all()
         if not rows:
             return counts
         for row in rows:
+            if not self._source_allowed(getattr(row, "source", None), allowed):
+                continue
             title = (row.title or "").strip()
             body = (row.body or "")[:2000]
             combined = f"{title}\n{body}"
@@ -972,6 +1001,7 @@ class LiveTradingService:
         dry_run: bool = False,
         run: WorkerRun | None = None,
         fast_path: bool = False,
+        allowed_sources: set[str] | None = None,
     ) -> dict[str, Any]:
         graph = self._get_agent_graph()
 
@@ -1000,6 +1030,8 @@ class LiveTradingService:
 
         last_run_at = self._get_last_agent_run_time(session, ticker=ticker)
         graph_context: dict[str, Any] = {"last_agent_run_at": last_run_at} if last_run_at else {}
+        if allowed_sources:
+            graph_context["allowed_sources"] = sorted(allowed_sources)
         if fast_path:
             macro_cache, used_cached_macro = self._get_cached_agent_output(
                 session,

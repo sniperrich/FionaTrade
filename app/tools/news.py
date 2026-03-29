@@ -6,6 +6,7 @@ from sqlalchemy import select
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from app.analysis.taxonomy import normalize_source_name
 from app.db.models import Event, EventEvidence, RawItem
 
 # Map tickers to company name search terms for broader news matching.
@@ -118,6 +119,7 @@ def get_recent_events(
     limit: int = 30,
     min_confidence: int = 0,
     as_of: datetime | None = None,
+    allowed_sources: list[str] | None = None,
 ) -> list[dict]:
     """Return recent events, optionally filtered by ticker.
 
@@ -130,6 +132,11 @@ def get_recent_events(
     """
     ref_time = as_of or datetime.now(timezone.utc)
     since = ref_time - timedelta(hours=lookback_hours)
+    allowed_source_set = {
+        normalize_source_name(str(source).strip().lower())
+        for source in (allowed_sources or [])
+        if str(source).strip()
+    }
 
     if as_of:
         stmt = select(Event).where(
@@ -156,6 +163,14 @@ def get_recent_events(
         evidence_count = session.execute(
             select(EventEvidence).where(EventEvidence.event_id == row.id)
         ).scalars().all()
+        if allowed_source_set:
+            event_sources = {
+                normalize_source_name(e.source)
+                for e in evidence_count
+                if getattr(e, "source", None)
+            }
+            if not event_sources.intersection(allowed_source_set):
+                continue
 
         results.append({
             "id": row.id,
@@ -207,6 +222,7 @@ def get_event_detail(session: Session, event_id: int) -> dict | None:
 def get_ticker_news_summary(
     session: Session, ticker: str, lookback_hours: int = 72, limit: int = 25,
     as_of: datetime | None = None,
+    allowed_sources: list[str] | None = None,
 ) -> list[dict]:
     """Return recent RawItems mentioning a ticker directly.
 
@@ -218,6 +234,11 @@ def get_ticker_news_summary(
     ref_time = as_of or datetime.now(timezone.utc)
     since = ref_time - timedelta(hours=lookback_hours)
     ticker_upper = ticker.upper()
+    allowed_source_set = {
+        normalize_source_name(str(source).strip().lower())
+        for source in (allowed_sources or [])
+        if str(source).strip()
+    }
 
     # Word-boundary patterns for ticker symbol in title
     title_patterns = [
@@ -261,10 +282,13 @@ def get_ticker_news_summary(
 
     results = []
     for row in rows:
+        source_name = normalize_source_name(row.source)
+        if allowed_source_set and source_name not in allowed_source_set:
+            continue
         results.append({
             "id": row.id,
             "title": row.title,
-            "source": row.source,
+            "source": source_name,
             "published_at": row.published_at.isoformat(),
             "ingested_at": row.ingested_at.isoformat() if row.ingested_at else None,
             "body_snippet": (row.body or "")[:400],
@@ -341,6 +365,7 @@ def build_news_screening_text(
     lookback_hours: int = 336,
     as_of: datetime | None = None,
     since: datetime | None = None,
+    allowed_sources: list[str] | None = None,
 ) -> tuple[str, list[dict]]:
     """Build a numbered screening list with article IDs for the pre-screening pass.
 
@@ -354,7 +379,12 @@ def build_news_screening_text(
     """
     ref_time = as_of or datetime.now(timezone.utc)
     news = get_ticker_news_summary(
-        session, ticker=ticker, lookback_hours=lookback_hours, limit=25, as_of=as_of
+        session,
+        ticker=ticker,
+        lookback_hours=lookback_hours,
+        limit=25,
+        as_of=as_of,
+        allowed_sources=allowed_sources,
     )
 
     # Partition articles: new (unseen) vs already-analyzed
@@ -429,6 +459,7 @@ def build_news_context_text(
     lookback_hours: int = 336,
     as_of: datetime | None = None,
     expanded_articles: dict[int, dict] | None = None,
+    allowed_sources: list[str] | None = None,
 ) -> str:
     """Build a time-bucketed news context block for LLM prompts.
 
@@ -446,10 +477,20 @@ def build_news_context_text(
     ref_time = as_of or datetime.now(timezone.utc)
 
     events = get_recent_events(
-        session, ticker=ticker, lookback_hours=lookback_hours, limit=25, as_of=as_of
+        session,
+        ticker=ticker,
+        lookback_hours=lookback_hours,
+        limit=25,
+        as_of=as_of,
+        allowed_sources=allowed_sources,
     )
     news = get_ticker_news_summary(
-        session, ticker=ticker, lookback_hours=lookback_hours, limit=20, as_of=as_of
+        session,
+        ticker=ticker,
+        lookback_hours=lookback_hours,
+        limit=20,
+        as_of=as_of,
+        allowed_sources=allowed_sources,
     )
 
     lines: list[str] = [f"=== NEWS & EVENTS FOR {ticker} ==="]

@@ -112,6 +112,7 @@ class NewsSentimentAgent(BaseAgent):
         try:
             as_of = (context or {}).get("as_of")
             last_run_at = (context or {}).get("last_agent_run_at")  # set by LiveTradingService
+            allowed_sources = (context or {}).get("allowed_sources")
 
             # ── Build geo / sentiment blocks (shared across both passes) ──
             geo_block, sentiment_block = self._build_aux_blocks(session, ticker, as_of, context)
@@ -119,7 +120,12 @@ class NewsSentimentAgent(BaseAgent):
             # ── Pass 1: screening — which articles are worth reading in full? ──
             # In live mode, `since=last_run_at` ensures screener focuses on NEW articles only.
             screening_text, raw_news = build_news_screening_text(
-                session, ticker, lookback_hours=336, as_of=as_of, since=last_run_at
+                session,
+                ticker,
+                lookback_hours=336,
+                as_of=as_of,
+                since=last_run_at,
+                allowed_sources=allowed_sources,
             )
 
             # Count genuinely new articles (unseen since last run)
@@ -162,6 +168,7 @@ class NewsSentimentAgent(BaseAgent):
                 session, ticker,
                 lookback_hours=336, as_of=as_of,
                 expanded_articles=expanded_articles or None,
+                allowed_sources=allowed_sources,
             )
             market_ctx = build_market_context_text(session, ticker, as_of=as_of)
             combined = f"{news_context}\n\n{market_ctx}"
@@ -253,4 +260,3 @@ class NewsSentimentAgent(BaseAgent):
         except Exception as exc:
             logger.debug("[news_sentiment] Finnhub sentiment fetch failed for %s: %s", ticker, exc)
             return None
-

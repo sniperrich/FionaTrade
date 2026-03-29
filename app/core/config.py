@@ -183,6 +183,9 @@ class Settings(BaseSettings):
     live_trading_enabled: bool = False
     # Tickers to trade live; falls back to agent_tickers_override if empty
     live_trading_tickers: Annotated[list[str], NoDecode] = []
+    # Optional source whitelist for live news analysis/triggering.
+    # Empty list means "all sources".
+    live_allowed_sources: Annotated[list[str], NoDecode] = []
     # How often (seconds) the live cycle runs during market hours (default 5 min)
     live_cycle_interval_seconds: int = 300
     # Effective scheduled interval by market session.
@@ -210,6 +213,9 @@ class Settings(BaseSettings):
     # Portfolio manager LLM guardrails for live cycles.
     live_portfolio_llm_timeout_seconds: float = 20.0
     live_portfolio_llm_max_retries: int = 2
+    # Pull Finnhub per-ticker company-news during live cycles (more relevant than general feed).
+    enable_finnhub_company_news_live: bool = True
+    finnhub_company_news_live_lookback_days: int = 2
     # Capital confirmation layer (volume/follow-through/relative-strength).
     flow_confirmation_enabled: bool = True
     flow_confirmation_soft_gate: bool = True
@@ -243,6 +249,27 @@ class Settings(BaseSettings):
                 except json.JSONDecodeError:
                     pass
             return [part.upper().strip() for part in stripped.split(",") if part.strip()]
+        return value
+
+    @field_validator("live_allowed_sources", mode="before")
+    @classmethod
+    def _parse_csv_source_list(cls, value):
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return [str(item).strip().lower() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        return [str(item).strip().lower() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+            return [part.strip().lower() for part in stripped.split(",") if part.strip()]
         return value
 
 

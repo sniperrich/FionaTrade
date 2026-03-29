@@ -77,3 +77,20 @@ def test_env_settings_apply_updates_supports_event_driven_and_weights(tmp_path: 
     assert "AGENT_WEIGHT_TECHNICALS=0.2" in rendered
     assert "AGENT_WEIGHT_MACRO=0.1" in rendered
     assert "AGENT_WEIGHT_FUNDAMENTALS=0.1" in rendered
+
+
+def test_env_settings_apply_updates_supports_live_sources_and_finnhub_company_news(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    svc = EnvSettingsService(env_path=env_file)
+    svc.apply_updates(
+        updates={
+            "LIVE_ALLOWED_SOURCES": "FINNHUB, SEC, Cnbc, FINNHUB",
+            "ENABLE_FINNHUB_COMPANY_NEWS_LIVE": True,
+            "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS": "3",
+        }
+    )
+    rendered = env_file.read_text(encoding="utf-8")
+    assert "LIVE_ALLOWED_SOURCES=finnhub,sec,cnbc" in rendered
+    assert "ENABLE_FINNHUB_COMPANY_NEWS_LIVE=true" in rendered
+    assert "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS=3" in rendered

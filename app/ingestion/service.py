@@ -91,6 +91,22 @@ class IngestionService:
         items.extend(finnhub_items)
         checks.append(finnhub_check)
 
+        if (
+            profile == "live_fast"
+            and bool(getattr(self.settings, "enable_finnhub_company_news_live", True))
+            and bool(tickers_to_fetch)
+        ):
+            lookback_days = max(1, int(getattr(self.settings, "finnhub_company_news_live_lookback_days", 2) or 2))
+            to_date = utc_now().date()
+            from_date = to_date - timedelta(days=lookback_days)
+            company_news_items, company_news_check = self.finnhub.fetch_company_news(
+                tickers=tickers_to_fetch,
+                from_date=from_date.isoformat(),
+                to_date=to_date.isoformat(),
+            )
+            items.extend(company_news_items)
+            checks.append(company_news_check)
+
         earnings_items, earnings_check = self.earnings_release.fetch_recent(session)
         items.extend(earnings_items)
         checks.append(earnings_check)

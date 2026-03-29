@@ -173,7 +173,7 @@ tests/           pytest 测试集
 | 方法 | 路径 | 返回格式 |
 |------|------|---------|
 | GET | `/api/health` | `{status, llm_configured, llm_model, sources_online, ...}` |
-| GET | `/api/live/status` | **平铺字段**：`{enabled, market_tradeable, market_session(字符串), market_time, tickers, live_min_confidence, worker, supervisor, command_queue, ...}` |
+| GET | `/api/live/status` | **平铺字段**：`{enabled, market_tradeable, market_session(字符串), market_time, tickers, live_min_confidence, live_allowed_sources, enable_finnhub_company_news_live, worker, supervisor, command_queue, ...}` |
 | GET | `/api/worker/status` | worker + supervisor heartbeat + command queue 快照 |
 | GET | `/api/worker/history` | recent worker runs + commands + runtime events |
 | GET | `/api/agent/runs` | **包装对象**：`{"runs": [...]}` — 每项用 `*_result` 字段名 |
@@ -305,6 +305,9 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 - `LIVE_FAST_PATH_FUND_TTL_MIN=120`
 - `LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS=20`
 - `LIVE_PORTFOLIO_LLM_MAX_RETRIES=2`
+- `LIVE_ALLOWED_SOURCES=`（空=全部；可填 `finnhub,sec,cnbc,...`）
+- `ENABLE_FINNHUB_COMPANY_NEWS_LIVE=true`
+- `FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS=2`
 - `FLOW_CONFIRMATION_ENABLED=true`
 - `FLOW_CONFIRMATION_SOFT_GATE=true`
 - `AGENT_WEIGHT_NEWS=0.60`
