@@ -300,3 +300,98 @@ def test_batch_score_runs_supports_as_of_and_ready_cutoff(session):
     scored_runs = {row.agent_run_id for row in session.query(AgentScore).all()}
     assert ready_run.id in scored_runs
     assert too_recent_run.id not in scored_runs
+
+
+def test_batch_score_runs_limit_applies_after_excluding_scored_runs(session):
+    base = datetime(2026, 2, 12, 15, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            Bar1m(
+                ticker="AAPL",
+                ts=base,
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000,
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=base + timedelta(days=2),
+                open=102.0,
+                high=103.0,
+                low=101.0,
+                close=102.0,
+                volume=1000,
+            ),
+        ]
+    )
+    session.flush()
+
+    runs: list[AgentRun] = []
+    for i in range(4):
+        run = AgentRun(
+            ticker="AAPL",
+            trigger="test",
+            status="COMPLETED",
+            created_at=base + timedelta(minutes=i),
+            macro_output={"signal": "BUY", "confidence": 70, "reasoning": f"run-{i}"},
+            final_action="BUY",
+        )
+        runs.append(run)
+    session.add_all(runs)
+    session.flush()
+
+    # Pre-score the first two runs so SQL-side exclusion must skip them.
+    session.add_all(
+        [
+            AgentScore(
+                agent_run_id=runs[0].id,
+                agent_name="macro_analyst",
+                ticker="AAPL",
+                signal="BUY",
+                confidence=70,
+                predicted_at=runs[0].created_at,
+                price_at_prediction=100.0,
+                price_after=102.0,
+                actual_return_pct=2.0,
+                eval_horizon_days=2,
+                score=10.0,
+                score_reasoning="pre-scored",
+            ),
+            AgentScore(
+                agent_run_id=runs[1].id,
+                agent_name="macro_analyst",
+                ticker="AAPL",
+                signal="BUY",
+                confidence=70,
+                predicted_at=runs[1].created_at,
+                price_at_prediction=100.0,
+                price_after=102.0,
+                actual_return_pct=2.0,
+                eval_horizon_days=2,
+                score=10.0,
+                score_reasoning="pre-scored",
+            ),
+        ]
+    )
+    session.flush()
+
+    created = batch_score_runs(
+        session,
+        since=base - timedelta(days=1),
+        eval_horizon_days=2,
+        as_of=base + timedelta(days=3),
+        limit=2,
+    )
+    session.flush()
+
+    # Each newly selected run emits one macro_analyst score.
+    assert created == 2
+    newly_scored_run_ids = {
+        row.agent_run_id
+        for row in session.query(AgentScore).all()
+        if row.score_reasoning != "pre-scored"
+    }
+    assert runs[2].id in newly_scored_run_ids
+    assert runs[3].id in newly_scored_run_ids

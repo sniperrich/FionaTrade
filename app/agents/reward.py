@@ -160,27 +160,25 @@ def batch_score_runs(
     ref_time = as_of or datetime.now(timezone.utc)
     ready_cutoff = ref_time - timedelta(days=max(1, int(eval_horizon_days)))
 
-    # Find runs that haven't been scored yet.
-    scored_ids = {
-        int(run_id)
-        for run_id in session.execute(
-            select(AgentScore.agent_run_id).where(AgentScore.agent_run_id.is_not(None)).distinct()
-        ).scalars().all()
-        if run_id is not None
-    }
+    already_scored = (
+        select(AgentScore.agent_run_id)
+        .where(AgentScore.agent_run_id.is_not(None))
+        .distinct()
+        .scalar_subquery()
+    )
 
     query = select(AgentRun).where(
         AgentRun.status == "COMPLETED",
         AgentRun.created_at <= ready_cutoff,
+        AgentRun.id.notin_(already_scored),
     )
     if since:
         query = query.where(AgentRun.created_at >= since)
+    query = query.order_by(AgentRun.created_at)
     if limit:
         query = query.limit(max(1, int(limit)))
 
-    runs = session.execute(query.order_by(AgentRun.created_at)).scalars().all()
-    if scored_ids:
-        runs = [run for run in runs if int(run.id) not in scored_ids]
+    runs = session.execute(query).scalars().all()
     total_scored = 0
 
     for run in runs:

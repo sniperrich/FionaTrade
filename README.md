@@ -227,6 +227,7 @@ tests/           pytest 测试集
 > - `/api/attribution/overview` 支持 `start_date/end_date` 或 `lookback_days`、`mode`、`run_ids`、`tickers`、`min_sample`
 > - `Module Attribution` 面板默认用 30 天窗口；`Backfill Agent Scores` 会触发 `/api/attribution/agent-scores/backfill`
 > - `batch_score_runs` 已支持 `as_of` + ready cutoff，不再因参数不匹配导致 `agent_scores` 长期为 0
+> - `batch_score_runs(limit=...)` 现在先在 SQL 层排除已评分 run，再应用 limit，避免“请求 10 条但实际处理更少”的偏差
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
 > - 若当前是周末/美股闭市，live cycle 会显示 `analysis mode`，这是预期行为，不是失败
 > - 若 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 都为空，live cycle 会明确显示 `no live tickers configured`
