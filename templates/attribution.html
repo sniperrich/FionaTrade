@@ -94,7 +94,7 @@
   </div>
 </div>
 
-<div class="grid g2 mb16">
+<div class="grid g3 mb16">
   <div class="card">
     <div class="section-header mb8">
       <div class="section-title">B. Event Type 分桶表现</div>
@@ -133,6 +133,27 @@
           </tr>
         </thead>
         <tbody id="att-source-tier-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Source 分桶表现</div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Bucket</th>
+            <th class="num">Trades</th>
+            <th class="num">Win Rate</th>
+            <th class="num">PnL Sum</th>
+            <th class="num">Avg PnL</th>
+            <th class="num">Drawdown</th>
+          </tr>
+        </thead>
+        <tbody id="att-source-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -353,6 +374,7 @@ async function refreshAttribution(){
     renderDistributions(payload);
     renderBucketTable('att-event-type-body', payload.event_type_buckets || []);
     renderBucketTable('att-source-tier-body', payload.source_tier_buckets || []);
+    renderBucketTable('att-source-body', payload.source_buckets || []);
     renderBucketTable('att-flow-bucket-body', payload.flow_bucket_buckets || []);
     renderFilterRank(payload.filter_value_rank || []);
     renderQuality(payload.data_quality || {});

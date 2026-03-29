@@ -63,7 +63,7 @@ class ModuleAttributionService:
         if filters.tickers:
             ticker_set = set(filters.tickers)
             trade_rows = [row for row in trade_rows if str(row.get("ticker") or "").upper() in ticker_set]
-        source_tier_map = self._event_source_tier_map(
+        source_tier_map, source_map = self._event_source_maps(
             session,
             event_ids={int(row.get("event_id")) for row in trade_rows if row.get("event_id") is not None},
         )
@@ -72,6 +72,13 @@ class ModuleAttributionService:
         source_tier_buckets = self._bucketize(
             trade_rows,
             key_getter=lambda row: self._source_tier_label(source_tier_map.get(self._safe_int(row.get("event_id")))),
+        )
+        source_buckets = self._bucketize(
+            trade_rows,
+            key_getter=lambda row: self._source_label(
+                source_map.get(self._safe_int(row.get("event_id"))),
+                fallback=row.get("source"),
+            ),
         )
         flow_bucket_buckets = self._bucketize(trade_rows, key_getter=lambda row: self._label(row.get("flow_bucket"), "UNKNOWN"))
         tradeability_reason_buckets = self._bucketize(
@@ -130,6 +137,7 @@ class ModuleAttributionService:
             "agent_contribution": agent_contribution,
             "event_type_buckets": event_type_buckets,
             "source_tier_buckets": source_tier_buckets,
+            "source_buckets": source_buckets,
             "flow_bucket_buckets": flow_bucket_buckets,
             "tradeability_reason_buckets": tradeability_reason_buckets,
             "conviction_distribution": agent_distributions["conviction_distribution"],
@@ -146,7 +154,7 @@ class ModuleAttributionService:
 
         payload = self._run_payload(run)
         trades = list(payload.get("trade_log") or [])
-        source_tier_map = self._event_source_tier_map(
+        source_tier_map, source_map = self._event_source_maps(
             session,
             event_ids={int(row.get("event_id")) for row in trades if row.get("event_id") is not None},
         )
@@ -155,6 +163,13 @@ class ModuleAttributionService:
         source_tier_buckets = self._bucketize(
             trades,
             key_getter=lambda row: self._source_tier_label(source_tier_map.get(self._safe_int(row.get("event_id")))),
+        )
+        source_buckets = self._bucketize(
+            trades,
+            key_getter=lambda row: self._source_label(
+                source_map.get(self._safe_int(row.get("event_id"))),
+                fallback=row.get("source"),
+            ),
         )
         flow_bucket_buckets = self._bucketize(trades, key_getter=lambda row: self._label(row.get("flow_bucket"), "UNKNOWN"))
         tradeability_reason_buckets = self._bucketize(
@@ -185,6 +200,7 @@ class ModuleAttributionService:
             },
             "event_type_buckets": event_type_buckets,
             "source_tier_buckets": source_tier_buckets,
+            "source_buckets": source_buckets,
             "flow_bucket_buckets": flow_bucket_buckets,
             "tradeability_reason_buckets": tradeability_reason_buckets,
             "filter_hits": filter_hits,
@@ -362,21 +378,35 @@ class ModuleAttributionService:
         out.sort(key=lambda row: (self._parse_iso_dt(row.get("entry_ts")) or datetime.min.replace(tzinfo=timezone.utc)))
         return out
 
-    def _event_source_tier_map(self, session: Session, event_ids: set[int]) -> dict[int, int]:
+    def _event_source_maps(self, session: Session, event_ids: set[int]) -> tuple[dict[int, int], dict[int, str]]:
         if not event_ids:
-            return {}
+            return {}, {}
         rows = session.execute(
-            select(EventEvidence.event_id, EventEvidence.source_tier).where(EventEvidence.event_id.in_(sorted(event_ids)))
+            select(EventEvidence.event_id, EventEvidence.source_tier, EventEvidence.source).where(
+                EventEvidence.event_id.in_(sorted(event_ids))
+            )
         ).all()
-        out: dict[int, int] = {}
-        for event_id, source_tier in rows:
+        source_tier_map: dict[int, int] = {}
+        source_map_ranked: dict[int, tuple[int, str]] = {}
+        for event_id, source_tier, source in rows:
             event_id_i = int(event_id)
             tier_i = int(source_tier) if source_tier is not None else 9
-            if event_id_i not in out:
-                out[event_id_i] = tier_i
+            source_i = self._source_label(source)
+
+            if event_id_i not in source_tier_map:
+                source_tier_map[event_id_i] = tier_i
             else:
-                out[event_id_i] = min(out[event_id_i], tier_i)
-        return out
+                source_tier_map[event_id_i] = min(source_tier_map[event_id_i], tier_i)
+
+            if event_id_i not in source_map_ranked:
+                source_map_ranked[event_id_i] = (tier_i, source_i)
+            else:
+                prev_tier, prev_source = source_map_ranked[event_id_i]
+                if tier_i < prev_tier or (tier_i == prev_tier and source_i < prev_source):
+                    source_map_ranked[event_id_i] = (tier_i, source_i)
+
+        source_map = {event_id: item[1] for event_id, item in source_map_ranked.items()}
+        return source_tier_map, source_map
 
     def _bucketize(self, rows: list[dict[str, Any]], key_getter) -> list[dict[str, Any]]:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -546,6 +576,16 @@ class ModuleAttributionService:
         if not text:
             return default
         return text
+
+    @staticmethod
+    def _source_label(value: Any, fallback: Any = None) -> str:
+        primary = str(value or "").strip().lower()
+        if primary:
+            return primary
+        fallback_text = str(fallback or "").strip().lower()
+        if fallback_text:
+            return fallback_text
+        return "unknown_source"
 
     @staticmethod
     def _safe_int(value: Any) -> int | None:

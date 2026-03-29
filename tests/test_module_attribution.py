@@ -218,6 +218,10 @@ def test_module_attribution_overview_and_run_detail(session):
     tier_buckets = {row["bucket"]: row for row in payload["source_tier_buckets"]}
     assert "tier0" in tier_buckets
     assert "tier2" in tier_buckets
+    source_buckets = {row["bucket"]: row for row in payload["source_buckets"]}
+    assert "sec" in source_buckets
+    assert "yahoo_finance" in source_buckets
+    assert source_buckets["sec"]["trades"] == 2
 
     filter_rows = {row["filter"]: row for row in payload["filter_value_rank"]}
     assert filter_rows["use_signal_validation"]["sample_pairs"] == 1
@@ -231,3 +235,6 @@ def test_module_attribution_overview_and_run_detail(session):
     assert detail["filter_hits"]["validation_blocked"] == 3
     detail_tiers = {row["bucket"] for row in detail["source_tier_buckets"]}
     assert "tier0" in detail_tiers
+    detail_sources = {row["bucket"] for row in detail["source_buckets"]}
+    assert "sec" in detail_sources
+    assert "yahoo_finance" in detail_sources

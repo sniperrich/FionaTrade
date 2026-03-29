@@ -134,7 +134,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页** |
 | `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果列表与快速检查 |
 | `/backtests/{run_id}` | Backtest 详情页：大图模式（收益率曲线 + 回撤曲线）+ Sharpe/回撤/PF + 全量交易明细 |
-| `/attribution` | 模块归因面板：Agent 边际贡献、事件类型/source tier/flow bucket 分桶、过滤器价值排行、评分回填 |
+| `/attribution` | 模块归因面板：Agent 边际贡献、事件类型/source/source tier/flow bucket 分桶、过滤器价值排行、评分回填 |
 | `/settings` | 配置控制台：可视化增删 ticker、编辑常用 env、保存到 `.env` |
 
 ---
@@ -226,6 +226,7 @@ tests/           pytest 测试集
 > - `/api/backtests` / `/api/backtests/{run_id}` 现在额外返回 `phase / phase_label / phase_current / phase_total / phase_pct / phase_detail / last_progress_at`
 > - `/api/attribution/overview` 支持 `start_date/end_date` 或 `lookback_days`、`mode`、`run_ids`、`tickers`、`min_sample`
 > - `Module Attribution` 面板默认用 30 天窗口；`Backfill Agent Scores` 会触发 `/api/attribution/agent-scores/backfill`
+> - `/api/attribution/overview` 与 `/api/attribution/runs/{run_id}` 现在都会返回 `source_buckets`（按具体消息源统计 trades/win_rate/pnl/drawdown）
 > - `batch_score_runs` 已支持 `as_of` + ready cutoff，不再因参数不匹配导致 `agent_scores` 长期为 0
 > - `batch_score_runs(limit=...)` 现在先在 SQL 层排除已评分 run，再应用 limit，避免“请求 10 条但实际处理更少”的偏差
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker

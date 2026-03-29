@@ -95,11 +95,13 @@ def test_attribution_overview_and_run_detail_api(session):
     assert "agent_contribution" in overview
     assert "event_type_buckets" in overview
     assert "source_tier_buckets" in overview
+    assert "source_buckets" in overview
     assert "filter_value_rank" in overview
 
     detail = attribution_run_detail(run_id=run.id, session=session)
     assert detail["run"]["id"] == run.id
     assert detail["event_type_buckets"][0]["bucket"] == "major_litigation"
+    assert detail["source_buckets"][0]["bucket"] == "sec"
 
 
 def test_attribution_backfill_agent_scores_api(session):
