@@ -230,3 +230,73 @@ class TestComputeDynamicWeights:
         )
         assert weights["technicals"] > weights["macro_analyst"]
         assert abs(sum(weights.values()) - 1.0) < 0.01
+
+
+def test_batch_score_runs_supports_as_of_and_ready_cutoff(session):
+    base = datetime(2026, 2, 10, 15, 0, tzinfo=timezone.utc)
+    # Bars around prediction time and +2d eval horizon.
+    session.add_all(
+        [
+            Bar1m(
+                ticker="AAPL",
+                ts=base,
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000,
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=base + timedelta(days=2),
+                open=103.0,
+                high=104.0,
+                low=102.0,
+                close=103.0,
+                volume=1000,
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=base + timedelta(days=3),
+                open=104.0,
+                high=105.0,
+                low=103.0,
+                close=104.0,
+                volume=1000,
+            ),
+        ]
+    )
+    session.flush()
+
+    ready_run = AgentRun(
+        ticker="AAPL",
+        trigger="test",
+        status="COMPLETED",
+        created_at=base,
+        macro_output={"signal": "BUY", "confidence": 80, "reasoning": "ready"},
+        final_action="BUY",
+    )
+    too_recent_run = AgentRun(
+        ticker="AAPL",
+        trigger="test",
+        status="COMPLETED",
+        created_at=base + timedelta(days=2),
+        macro_output={"signal": "BUY", "confidence": 80, "reasoning": "too_recent"},
+        final_action="BUY",
+    )
+    session.add_all([ready_run, too_recent_run])
+    session.flush()
+
+    created = batch_score_runs(
+        session,
+        since=base - timedelta(days=1),
+        eval_horizon_days=2,
+        as_of=base + timedelta(days=3),
+        limit=50,
+    )
+    session.flush()
+
+    assert created >= 1
+    scored_runs = {row.agent_run_id for row in session.query(AgentScore).all()}
+    assert ready_run.id in scored_runs
+    assert too_recent_run.id not in scored_runs

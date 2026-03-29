@@ -272,6 +272,29 @@ def backtest_detail_page(
     )
 
 
+@router.get("/attribution", response_class=HTMLResponse)
+def attribution_page(
+    request: Request,
+    settings: Settings = Depends(get_app_settings),
+):
+    now = utc_now()
+    return templates.TemplateResponse(
+        request,
+        "attribution.html",
+        {
+            "title": "Module Attribution",
+            "defaults": {
+                "start_date": (now - timedelta(days=30)).date().isoformat(),
+                "end_date": now.date().isoformat(),
+                "mode": "all",
+                "lookback_days": 30,
+                "min_sample": 5,
+            },
+            "live_min_confidence": settings.live_min_confidence,
+        },
+    )
+
+
 @router.get("/live", response_class=HTMLResponse)
 def live_trading_page(
     request: Request,

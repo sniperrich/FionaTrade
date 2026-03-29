@@ -134,6 +134,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页** |
 | `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果列表与快速检查 |
 | `/backtests/{run_id}` | Backtest 详情页：大图模式（收益率曲线 + 回撤曲线）+ Sharpe/回撤/PF + 全量交易明细 |
+| `/attribution` | 模块归因面板：Agent 边际贡献、事件类型/source tier/flow bucket 分桶、过滤器价值排行、评分回填 |
 | `/settings` | 配置控制台：可视化增删 ticker、编辑常用 env、保存到 `.env` |
 
 ---
@@ -183,6 +184,9 @@ tests/           pytest 测试集
 | GET | `/api/backtests` | 最近回测 runs 列表 |
 | GET | `/api/backtests/{run_id}` | 单个回测详情：params / metrics / equity_curve / trade_log |
 | POST | `/api/backtests/run` | 给 worker 排队一条 backtest 任务 |
+| GET | `/api/attribution/overview` | 模块归因总览（回测分桶 + Agent 贡献 + 过滤器价值） |
+| GET | `/api/attribution/runs/{run_id}` | 单 run 归因详情（分桶 + filter hits） |
+| POST | `/api/attribution/agent-scores/backfill` | 回填 AgentScore（历史评分批处理） |
 | POST | `/api/live/set_enabled` | 写入共享 runtime control，并给 worker 排队 live backfill/cycle |
 | GET | `/api/settings/editable` | 返回可编辑的 `.env` 配置快照 |
 | POST | `/api/settings/editable` | 保存配置到 `.env`（支持额外 `KEY=VALUE` 覆盖） |
@@ -220,6 +224,9 @@ tests/           pytest 测试集
 > - `/api/worker/history` 用于 `/live` 的专门排障面板（command queue / worker history）
 > - `/api/backtests/run` 会先创建 `QUEUED` 的 `BacktestRun`，再给 worker 排队命令；浏览器关闭后任务照样继续
 > - `/api/backtests` / `/api/backtests/{run_id}` 现在额外返回 `phase / phase_label / phase_current / phase_total / phase_pct / phase_detail / last_progress_at`
+> - `/api/attribution/overview` 支持 `start_date/end_date` 或 `lookback_days`、`mode`、`run_ids`、`tickers`、`min_sample`
+> - `Module Attribution` 面板默认用 30 天窗口；`Backfill Agent Scores` 会触发 `/api/attribution/agent-scores/backfill`
+> - `batch_score_runs` 已支持 `as_of` + ready cutoff，不再因参数不匹配导致 `agent_scores` 长期为 0
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
 > - 若当前是周末/美股闭市，live cycle 会显示 `analysis mode`，这是预期行为，不是失败
 > - 若 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 都为空，live cycle 会明确显示 `no live tickers configured`

@@ -18,7 +18,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select, func, and_
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_app_logger
@@ -153,18 +153,34 @@ def batch_score_runs(
     session: Session,
     since: datetime | None = None,
     eval_horizon_days: int = _DEFAULT_EVAL_HORIZON,
+    as_of: datetime | None = None,
+    limit: int | None = None,
 ) -> int:
     """Score all unscored AgentRuns. Returns count of new scores created."""
-    # Find runs that haven't been scored yet
-    already_scored = select(AgentScore.agent_run_id).distinct()
+    ref_time = as_of or datetime.now(timezone.utc)
+    ready_cutoff = ref_time - timedelta(days=max(1, int(eval_horizon_days)))
+
+    # Find runs that haven't been scored yet.
+    scored_ids = {
+        int(run_id)
+        for run_id in session.execute(
+            select(AgentScore.agent_run_id).where(AgentScore.agent_run_id.is_not(None)).distinct()
+        ).scalars().all()
+        if run_id is not None
+    }
+
     query = select(AgentRun).where(
         AgentRun.status == "COMPLETED",
-        AgentRun.id.notin_(already_scored),
+        AgentRun.created_at <= ready_cutoff,
     )
     if since:
         query = query.where(AgentRun.created_at >= since)
+    if limit:
+        query = query.limit(max(1, int(limit)))
 
     runs = session.execute(query.order_by(AgentRun.created_at)).scalars().all()
+    if scored_ids:
+        runs = [run for run in runs if int(run.id) not in scored_ids]
     total_scored = 0
 
     for run in runs:

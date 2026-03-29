@@ -13,11 +13,13 @@ from app.api.deps import get_app_settings, get_db
 from app.core.config import Settings, get_settings
 from app.core.utils import ensure_utc, utc_now
 from app.backtest_engine.service import BacktestEngineService
+from app.agents.reward import batch_score_runs
 from app.db.database import db_backend_name, db_connection_ok, is_sqlite_lock_error
 from app.db.models import BacktestRun, EntryPlan, EventEvidence, RawItem, SourceStatus, WorkerRunEvent
 from app.monitoring.health import HealthAuditService
 from app.services.env_settings import EnvSettingsService
 from app.services.market_data import MarketDataService
+from app.services.module_attribution import ModuleAttributionService
 from app.services.runtime_control import RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
@@ -103,6 +105,64 @@ def _normalize_source_list(value: Any) -> list[str]:
     else:
         items = [str(value).strip().lower()]
     return [item for item in items if item]
+
+
+def _normalize_int_list(value: Any) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, str):
+        chunks = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        chunks = []
+        for item in value:
+            chunks.extend(str(item).split(","))
+    else:
+        chunks = [str(value)]
+    out: list[int] = []
+    for chunk in chunks:
+        text = str(chunk).strip()
+        if not text:
+            continue
+        try:
+            out.append(int(text))
+        except ValueError:
+            continue
+    return sorted(set(out))
+
+
+def _normalize_upper_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        chunks = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        chunks = []
+        for item in value:
+            chunks.extend(str(item).split(","))
+    else:
+        chunks = [str(value)]
+    return sorted({chunk.upper() for chunk in chunks if chunk and str(chunk).strip()})
+
+
+def _parse_query_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    text = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+        return ensure_utc(dt)
+    except ValueError:
+        pass
+    try:
+        dt = datetime.fromisoformat(f"{text}T00:00:00+00:00")
+        return ensure_utc(dt)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid datetime/date: {value}") from exc
 
 
 def _news_backfill_meta(
@@ -571,6 +631,86 @@ def get_backtest_run(
     if row is None:
         raise HTTPException(status_code=404, detail="backtest run not found")
     return _serialize_backtest_run(row, include_detail=True)
+
+
+@router.get("/attribution/overview")
+def attribution_overview(
+    session: Session = Depends(get_db),
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
+    lookback_days: int = Query(default=30, ge=1, le=3650),
+    mode: str = Query(default="all"),
+    run_ids: str | None = Query(default=None),
+    tickers: str | None = Query(default=None),
+    min_sample: int = Query(default=5, ge=1, le=200),
+) -> dict[str, Any]:
+    start_dt = _parse_query_dt(start_date)
+    end_dt = _parse_query_dt(end_date)
+    if start_dt and end_dt and end_dt < start_dt:
+        raise HTTPException(status_code=400, detail="end_date must be >= start_date")
+    normalized_run_ids = _normalize_int_list(run_ids)
+    normalized_tickers = _normalize_upper_list(tickers)
+
+    cache_key = (
+        "attribution:overview:"
+        f"{start_date or ''}:{end_date or ''}:{lookback_days}:{mode}:"
+        f"{','.join(str(v) for v in normalized_run_ids)}:{','.join(normalized_tickers)}:{min_sample}"
+    )
+    cached = _cache_get(cache_key, ttl_seconds=10.0)
+    if cached is not None:
+        return cached
+
+    payload = ModuleAttributionService().overview(
+        session,
+        start_date=start_dt,
+        end_date=end_dt,
+        lookback_days=lookback_days,
+        mode=mode,
+        run_ids=normalized_run_ids,
+        tickers=normalized_tickers,
+        min_sample=min_sample,
+    )
+    return _cache_set(cache_key, payload)
+
+
+@router.get("/attribution/runs/{run_id}")
+def attribution_run_detail(
+    run_id: int,
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    payload = ModuleAttributionService().run_detail(session, run_id=run_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+    return payload
+
+
+@router.post("/attribution/agent-scores/backfill")
+def attribution_backfill_agent_scores(
+    body: dict[str, Any] = Body(default_factory=dict),
+    session: Session = Depends(get_db),
+) -> dict[str, Any]:
+    lookback_days = max(1, int(body.get("lookback_days", 30)))
+    eval_horizon_days = max(1, int(body.get("eval_horizon_days", 3)))
+    limit = max(1, min(20000, int(body.get("limit", 2000))))
+    as_of = utc_now()
+    since = as_of - timedelta(days=lookback_days)
+    created = batch_score_runs(
+        session,
+        since=since,
+        eval_horizon_days=eval_horizon_days,
+        as_of=as_of,
+        limit=limit,
+    )
+    session.commit()
+    _cache_invalidate("attribution:")
+    return {
+        "ok": True,
+        "created_scores": created,
+        "lookback_days": lookback_days,
+        "eval_horizon_days": eval_horizon_days,
+        "limit": limit,
+        "as_of": as_of.isoformat(),
+    }
 
 
 @router.post("/market/backfill")

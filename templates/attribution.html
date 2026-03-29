@@ -1,0 +1,395 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
+    <div>
+      <div class="page-title">Module Attribution</div>
+      <div class="page-sub">回测 + 实盘双栈归因：模块边际贡献、分桶表现、过滤器价值。</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn btn-ghost btn-sm" onclick="refreshAttribution()">↻ Refresh</button>
+      <button class="btn btn-primary btn-sm" id="backfill-btn" onclick="backfillAgentScores()">Backfill Agent Scores</button>
+    </div>
+  </div>
+</div>
+
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">Filters</div>
+  </div>
+  <div class="form-row mb8">
+    <div class="form-group">
+      <label>Start Date</label>
+      <input type="date" id="att-start-date" value="{{ defaults.start_date }}" />
+    </div>
+    <div class="form-group">
+      <label>End Date</label>
+      <input type="date" id="att-end-date" value="{{ defaults.end_date }}" />
+    </div>
+    <div class="form-group">
+      <label>Mode</label>
+      <select id="att-mode">
+        <option value="all" selected>All</option>
+        <option value="llm">LLM</option>
+        <option value="rules">Rules</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Min Sample</label>
+      <input type="number" id="att-min-sample" min="1" max="200" value="{{ defaults.min_sample }}" />
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label>Run IDs (comma-separated)</label>
+      <input type="text" id="att-run-ids" placeholder="e.g. 67,71,73" />
+    </div>
+    <div class="form-group">
+      <label>Tickers (comma-separated)</label>
+      <input type="text" id="att-tickers" placeholder="e.g. AAPL,NVDA" />
+    </div>
+    <div class="form-group">
+      <label>Lookback Days (used when date empty)</label>
+      <input type="number" id="att-lookback-days" min="1" max="3650" value="{{ defaults.lookback_days }}" />
+    </div>
+  </div>
+</div>
+
+<div class="grid g3 mb16" id="att-kpi-cards">
+  <div class="card card-sm"><div class="card-title">Loading</div><div class="card-value">…</div><div class="card-sub">Fetching attribution</div></div>
+</div>
+
+<div class="grid g2 mb16" style="grid-template-columns:1.2fr 1fr">
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">A. Agent 边际贡献榜</div>
+      <span class="text-muted text-sm" id="att-agent-updated">Waiting…</span>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th class="num">Predictions</th>
+            <th class="num">Hit Rate</th>
+            <th class="num">Avg Score</th>
+            <th class="num">Avg Return</th>
+            <th class="num">Uplift</th>
+          </tr>
+        </thead>
+        <tbody id="att-agent-body">
+          <tr><td colspan="6" class="empty-state">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">D. Conviction / Risk / Final Action</div>
+    </div>
+    <div id="att-distributions" class="stack">
+      <div class="empty-state">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<div class="grid g2 mb16">
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">B. Event Type 分桶表现</div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Bucket</th>
+            <th class="num">Trades</th>
+            <th class="num">Win Rate</th>
+            <th class="num">PnL Sum</th>
+            <th class="num">Avg PnL</th>
+            <th class="num">Drawdown</th>
+          </tr>
+        </thead>
+        <tbody id="att-event-type-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">C. Source Tier 分桶表现</div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Bucket</th>
+            <th class="num">Trades</th>
+            <th class="num">Win Rate</th>
+            <th class="num">PnL Sum</th>
+            <th class="num">Avg PnL</th>
+            <th class="num">Drawdown</th>
+          </tr>
+        </thead>
+        <tbody id="att-source-tier-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="grid g2 mb16">
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">Flow Bucket 分桶表现</div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Bucket</th>
+            <th class="num">Trades</th>
+            <th class="num">Win Rate</th>
+            <th class="num">PnL Sum</th>
+            <th class="num">Avg PnL</th>
+            <th class="num">Drawdown</th>
+          </tr>
+        </thead>
+        <tbody id="att-flow-bucket-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-header mb8">
+      <div class="section-title">E. Filter Value Rank</div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Filter</th>
+            <th class="num">Δ Return</th>
+            <th class="num">Δ Win Rate</th>
+            <th class="num">Δ Drawdown</th>
+            <th class="num">Pairs</th>
+            <th>Confidence</th>
+          </tr>
+        </thead>
+        <tbody id="att-filter-rank-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-header mb8">
+    <div class="section-title">Data Quality</div>
+    <span class="text-muted text-sm" id="att-quality-updated">Waiting…</span>
+  </div>
+  <div id="att-quality" class="text-sm text-muted">Loading…</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function fmtPct(v, digits=2){
+  if(v == null || Number.isNaN(Number(v))) return '—';
+  return `${(Number(v) * 100).toFixed(digits)}%`;
+}
+function fmtNum(v, digits=2){
+  if(v == null || Number.isNaN(Number(v))) return '—';
+  return Number(v).toFixed(digits);
+}
+function fmtUsd(v){
+  if(v == null || Number.isNaN(Number(v))) return '—';
+  return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+
+function readFilters(){
+  return {
+    start_date: document.getElementById('att-start-date').value,
+    end_date: document.getElementById('att-end-date').value,
+    mode: document.getElementById('att-mode').value || 'all',
+    min_sample: Number(document.getElementById('att-min-sample').value || 5),
+    run_ids: document.getElementById('att-run-ids').value.trim(),
+    tickers: document.getElementById('att-tickers').value.trim(),
+    lookback_days: Number(document.getElementById('att-lookback-days').value || 30),
+  };
+}
+
+function buildOverviewUrl(){
+  const f = readFilters();
+  const p = new URLSearchParams();
+  if(f.start_date) p.set('start_date', f.start_date);
+  if(f.end_date) p.set('end_date', f.end_date);
+  p.set('mode', f.mode);
+  p.set('min_sample', String(f.min_sample));
+  p.set('lookback_days', String(f.lookback_days));
+  if(f.run_ids) p.set('run_ids', f.run_ids);
+  if(f.tickers) p.set('tickers', f.tickers);
+  return `/api/attribution/overview?${p.toString()}`;
+}
+
+function renderKpis(kpi){
+  const cards = [
+    { title: 'Sample Runs', value: String(kpi.sample_runs ?? 0), sub: 'Backtest runs in scope' },
+    { title: 'Sample Trades', value: String(kpi.sample_trades ?? 0), sub: 'Trades in scope' },
+    { title: 'Coverage', value: fmtPct((kpi.coverage_pct || 0) / 100, 2), sub: 'Agent score coverage' },
+    { title: 'Total Return', value: fmtPct(kpi.total_return || 0), sub: `Comparable pairs ${kpi.comparable_pairs ?? 0}` },
+    { title: 'Overall Drawdown', value: fmtPct(kpi.overall_drawdown || 0), sub: 'Across selected runs' },
+    { title: 'Live Min Confidence', value: '{{ live_min_confidence }}', sub: 'Current setting baseline' },
+  ];
+  document.getElementById('att-kpi-cards').innerHTML = cards.map(card => `
+    <div class="card card-sm">
+      <div class="card-title">${card.title}</div>
+      <div class="card-value">${card.value}</div>
+      <div class="card-sub">${card.sub}</div>
+    </div>
+  `).join('');
+}
+
+function renderBucketTable(elId, rows){
+  const body = document.getElementById(elId);
+  if(!rows || !rows.length){
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">No data in current window.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(row => `
+    <tr>
+      <td>${escapeHtml(row.bucket || 'unknown')}</td>
+      <td class="num">${row.trades ?? 0}</td>
+      <td class="num">${fmtPct(row.win_rate || 0)}</td>
+      <td class="num">${fmtUsd(row.pnl_sum || 0)}</td>
+      <td class="num">${fmtUsd(row.avg_pnl || 0)}</td>
+      <td class="num">${fmtUsd(row.bucket_drawdown || 0)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderAgentContribution(data){
+  const rows = (data && data.rows) || [];
+  const body = document.getElementById('att-agent-body');
+  if(!rows.length){
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">No scored agent predictions yet. Click "Backfill Agent Scores".</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(row => `
+    <tr>
+      <td>${escapeHtml(row.agent || 'unknown')}${row.low_sample ? ' <span class="badge badge-grey">low sample</span>' : ''}</td>
+      <td class="num">${row.predictions ?? 0}</td>
+      <td class="num">${fmtPct(row.hit_rate || 0)}</td>
+      <td class="num">${fmtNum(row.avg_score || 0, 2)}</td>
+      <td class="num">${fmtPct((row.avg_actual_return || 0) / 100, 2)}</td>
+      <td class="num">${fmtPct((row.uplift_vs_baseline || 0) / 100, 2)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderDistributions(payload){
+  function renderMini(title, rows){
+    if(!rows || !rows.length){
+      return `<div class="card card-sm"><div class="card-title">${escapeHtml(title)}</div><div class="empty-state">No data</div></div>`;
+    }
+    return `
+      <div class="card card-sm">
+        <div class="card-title">${escapeHtml(title)}</div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Bucket</th><th class="num">Count</th><th class="num">Ratio</th></tr></thead>
+            <tbody>
+              ${rows.map(r => `<tr><td>${escapeHtml(r.bucket || 'unknown')}</td><td class="num">${r.count ?? 0}</td><td class="num">${fmtPct(r.ratio || 0)}</td></tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+  document.getElementById('att-distributions').innerHTML = [
+    renderMini('Conviction', payload.conviction_distribution || []),
+    renderMini('Risk Approved', payload.risk_approved_distribution || []),
+    renderMini('Final Action', payload.final_action_distribution || []),
+  ].join('');
+}
+
+function renderFilterRank(rows){
+  const body = document.getElementById('att-filter-rank-body');
+  if(!rows || !rows.length){
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">No comparable pairs in current scope.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(row => `
+    <tr>
+      <td>${escapeHtml(row.filter || '')}</td>
+      <td class="num">${fmtPct(row.delta_return || 0)}</td>
+      <td class="num">${fmtPct(row.delta_win_rate || 0)}</td>
+      <td class="num">${fmtPct(row.delta_drawdown || 0)}</td>
+      <td class="num">${row.sample_pairs ?? 0}</td>
+      <td><span class="badge ${row.confidence === 'HIGH' ? 'badge-green' : 'badge-grey'}">${escapeHtml(row.confidence || 'LOW')}</span></td>
+    </tr>
+  `).join('');
+}
+
+function renderQuality(dataQuality){
+  const warnings = (dataQuality && dataQuality.warnings) || [];
+  const warningHtml = warnings.length
+    ? warnings.map(w => `<span class="badge badge-red">${escapeHtml(w)}</span>`).join(' ')
+    : '<span class="badge badge-green">ok</span>';
+  document.getElementById('att-quality').innerHTML = `
+    <div>Backtest runs: ${dataQuality.backtest_runs ?? 0} · Trades: ${dataQuality.backtest_trades ?? 0}</div>
+    <div class="mt4">Agent runs: ${dataQuality.agent_runs ?? 0} · Scored predictions: ${dataQuality.agent_scored_predictions ?? 0} · Coverage: ${fmtPct((dataQuality.agent_score_coverage_pct || 0)/100)}</div>
+    <div class="mt4">Comparable filter pairs: ${dataQuality.comparable_filter_pairs ?? 0}</div>
+    <div class="mt8">Warnings: ${warningHtml}</div>
+  `;
+}
+
+async function refreshAttribution(){
+  const url = buildOverviewUrl();
+  try {
+    const payload = await apiFetch(url, {timeout: 20000});
+    renderKpis(payload.kpi || {});
+    renderAgentContribution(payload.agent_contribution || {});
+    renderDistributions(payload);
+    renderBucketTable('att-event-type-body', payload.event_type_buckets || []);
+    renderBucketTable('att-source-tier-body', payload.source_tier_buckets || []);
+    renderBucketTable('att-flow-bucket-body', payload.flow_bucket_buckets || []);
+    renderFilterRank(payload.filter_value_rank || []);
+    renderQuality(payload.data_quality || {});
+    const ts = 'Updated ' + new Date().toLocaleTimeString();
+    document.getElementById('att-agent-updated').textContent = ts;
+    document.getElementById('att-quality-updated').textContent = ts;
+  } catch (e) {
+    toast(`Attribution load failed: ${e.message}`, 'error');
+  }
+}
+
+async function backfillAgentScores(){
+  const btn = document.getElementById('backfill-btn');
+  btn.disabled = true;
+  btn.textContent = 'Backfilling...';
+  try {
+    const payload = await apiFetch('/api/attribution/agent-scores/backfill', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lookback_days: Number(document.getElementById('att-lookback-days').value || 30), eval_horizon_days: 3, limit: 5000}),
+      timeout: 120000,
+    });
+    toast(`Backfill done: +${payload.created_scores} scores`, 'success');
+    await refreshAttribution();
+  } catch (e) {
+    toast(`Backfill failed: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Backfill Agent Scores';
+  }
+}
+
+for (const id of ['att-start-date','att-end-date','att-mode','att-min-sample','att-run-ids','att-tickers','att-lookback-days']) {
+  document.getElementById(id).addEventListener('change', refreshAttribution);
+}
+
+refreshAttribution();
+setInterval(refreshAttribution, 30000);
+</script>
+{% endblock %}
