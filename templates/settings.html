@@ -210,10 +210,10 @@ applyEditorSettings({ editable: {
   LLM_BASE_URL: document.getElementById('cfg-llm-base-url').value,
   POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
   MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
-  ENABLE_SEC: {{ 'true' if ed.get('ENABLE_SEC', settings.enable_sec) else 'false' }},
-  ENABLE_RSS: {{ 'true' if ed.get('ENABLE_RSS', settings.enable_rss) else 'false' }},
-  ENABLE_FINNHUB: {{ 'true' if ed.get('ENABLE_FINNHUB', settings.enable_finnhub) else 'false' }},
-  ENABLE_EARNINGS_RELEASE_SOURCE: {{ 'true' if ed.get('ENABLE_EARNINGS_RELEASE_SOURCE', settings.enable_earnings_release_source) else 'false' }},
+  ENABLE_SEC: {{ 'true' if settings.enable_sec else 'false' }},
+  ENABLE_RSS: {{ 'true' if settings.enable_rss else 'false' }},
+  ENABLE_FINNHUB: {{ 'true' if settings.enable_finnhub else 'false' }},
+  ENABLE_EARNINGS_RELEASE_SOURCE: {{ 'true' if settings.enable_earnings_release_source else 'false' }},
 }});
 
 document.getElementById('settings-editor-form').addEventListener('submit', saveSettings);
