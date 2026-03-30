@@ -199,6 +199,12 @@
       <div class="settings-section-sub">交易品种、风控阈值、执行节奏</div>
     </div>
   </div>
+  <div class="filter-bar mb12">
+    <span class="badge badge-blue">Tickers: <span id="s-ticker-count">0</span></span>
+    <span class="badge badge-accent">Sources: <span id="s-source-count-badge">ALL</span></span>
+    <span class="badge badge-grey">Open: <span id="s-open-cycle-badge">{{ led.get('LIVE_OPEN_CYCLE_SECONDS', 900) }}</span>s</span>
+    <span class="badge badge-grey">Closed: <span id="s-closed-cycle-badge">{{ led.get('LIVE_CLOSED_CYCLE_SECONDS', 7200) }}</span>s</span>
+  </div>
 
   <!-- Tickers -->
   <div class="settings-section">
@@ -212,6 +218,20 @@
     </div>
     <input type="hidden" id="s-tickers-hidden" value="{{ led.get('LIVE_TRADING_TICKERS', '') }}" />
     <div id="s-ticker-chips" style="display:flex;flex-wrap:wrap;gap:6px;min-height:26px"></div>
+  </div>
+
+  <!-- Source whitelist -->
+  <div class="settings-section">
+    <div style="margin-bottom:8px">
+      <div class="setting-label">News Source Whitelist</div>
+      <div class="setting-desc">仅对这些来源做 live 决策；留空表示不过滤（ALL）</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <input type="text" id="s-source-input" placeholder="e.g. finnhub" style="max-width:180px" />
+      <button type="button" class="btn btn-ghost btn-sm" onclick="sAddSource()">+ 添加</button>
+    </div>
+    <input type="hidden" id="s-sources-hidden" value="{{ led.get('LIVE_ALLOWED_SOURCES', '') }}" />
+    <div id="s-source-chips" style="display:flex;flex-wrap:wrap;gap:6px;min-height:26px"></div>
   </div>
 
   <!-- Risk -->
@@ -329,6 +349,60 @@
         <input type="checkbox" id="s-flow-soft-gate" {% if led.get('FLOW_CONFIRMATION_SOFT_GATE', true) %}checked{% endif %} />
         <span class="toggle-track"></span>
       </label>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted2);margin-bottom:10px">执行内核参数</div>
+    <div class="sg3">
+      <div class="form-group">
+        <label>数据新鲜度上限</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-data-max-age" min="1" step="1"
+            value="{{ led.get('LIVE_DATA_MAX_AGE_MINUTES', 20) }}" />
+          <span class="input-unit">分钟</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Macro 缓存 TTL</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-fast-macro-ttl" min="1" step="1"
+            value="{{ led.get('LIVE_FAST_PATH_MACRO_TTL_MIN', 60) }}" />
+          <span class="input-unit">分钟</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Fund 缓存 TTL</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-fast-fund-ttl" min="1" step="1"
+            value="{{ led.get('LIVE_FAST_PATH_FUND_TTL_MIN', 120) }}" />
+          <span class="input-unit">分钟</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Finnhub News 回看窗口</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-finnhub-lookback-days" min="1" step="1"
+            value="{{ led.get('FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS', 2) }}" />
+          <span class="input-unit">天</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Portfolio LLM 超时</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-portfolio-llm-timeout" min="1" step="1"
+            value="{{ led.get('LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS', 20) }}" />
+          <span class="input-unit">秒</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Portfolio LLM 重试</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-portfolio-llm-retries" min="0" step="1"
+            value="{{ led.get('LIVE_PORTFOLIO_LLM_MAX_RETRIES', 2) }}" />
+          <span class="input-unit">次</span>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -506,8 +580,11 @@
 
 {% block scripts %}
 <script>
+const INITIAL_EDITABLE = {{ (live_editor.editable if live_editor else {}) | tojson }};
+
 // ── Ticker chips ─────────────────────────────────────────────
 let sTickers = [];
+let sSources = [];
 
 function parseCsv(raw, mode='upper'){
   return [...new Set(String(raw||'').split(',').map(s=>s.trim()).filter(Boolean)
@@ -519,12 +596,16 @@ function renderTickerChips(){
   if(!el) return;
   if(!sTickers.length){
     el.innerHTML = '<span class="text-muted text-xs">未设置标的</span>';
+    const countEl0 = document.getElementById('s-ticker-count');
+    if(countEl0) countEl0.textContent = '0';
     return;
   }
   el.innerHTML = sTickers.map(t => `
     <span class="chip">${escapeHtml(t)}
       <button class="chip-rm" onclick="sRemoveTicker('${t}')" title="移除">×</button>
     </span>`).join('');
+  const countEl = document.getElementById('s-ticker-count');
+  if(countEl) countEl.textContent = String(sTickers.length);
 }
 
 function sAddTicker(){
@@ -548,6 +629,44 @@ document.getElementById('s-ticker-input').addEventListener('keydown', e=>{
   if(e.key==='Enter'){ e.preventDefault(); sAddTicker(); }
 });
 
+function renderSourceChips(){
+  const el = document.getElementById('s-source-chips');
+  if(!el) return;
+  if(!sSources.length){
+    el.innerHTML = '<span class="text-muted text-xs">ALL（不过滤来源）</span>';
+    const badge = document.getElementById('s-source-count-badge');
+    if(badge) badge.textContent = 'ALL';
+    return;
+  }
+  el.innerHTML = sSources.map(s => `
+    <span class="chip">${escapeHtml(s)}
+      <button class="chip-rm" onclick="sRemoveSource('${s}')" title="移除">×</button>
+    </span>`).join('');
+  const badge = document.getElementById('s-source-count-badge');
+  if(badge) badge.textContent = String(sSources.length);
+}
+
+function sAddSource(){
+  const inp = document.getElementById('s-source-input');
+  const raw = String(inp?.value || '').trim().toLowerCase().replace(/\s+/g, '_');
+  if(!raw){ toast('请输入来源标识','warn'); return; }
+  if(!/^[a-z0-9_.-]{2,40}$/.test(raw)){ toast('来源格式不合法','error'); return; }
+  if(!sSources.includes(raw)) sSources.push(raw);
+  if(inp) inp.value = '';
+  document.getElementById('s-sources-hidden').value = sSources.join(',');
+  renderSourceChips();
+}
+
+function sRemoveSource(source){
+  sSources = sSources.filter(x => x !== source);
+  document.getElementById('s-sources-hidden').value = sSources.join(',');
+  renderSourceChips();
+}
+
+document.getElementById('s-source-input').addEventListener('keydown', e=>{
+  if(e.key==='Enter'){ e.preventDefault(); sAddSource(); }
+});
+
 // ── Sliders ──────────────────────────────────────────────────
 function linkSlider(rangeId, hiddenId, valId, toHidden){
   const range = document.getElementById(rangeId);
@@ -568,6 +687,14 @@ document.getElementById('s-min-confidence-range').addEventListener('input', func
 document.getElementById('s-max-position-range').addEventListener('input', function(){
   document.getElementById('s-max-position').value = (this.value / 100).toFixed(2);
   document.getElementById('s-max-position-val').textContent = this.value + '%';
+});
+document.getElementById('s-open-cycle').addEventListener('input', function(){
+  const b = document.getElementById('s-open-cycle-badge');
+  if(b) b.textContent = this.value || '0';
+});
+document.getElementById('s-closed-cycle').addEventListener('input', function(){
+  const b = document.getElementById('s-closed-cycle-badge');
+  if(b) b.textContent = this.value || '0';
 });
 
 // ── Agent weight bars ─────────────────────────────────────────
@@ -610,11 +737,18 @@ async function saveAllSettings(){
   const updates = {
     // Live Trading
     LIVE_TRADING_TICKERS: document.getElementById('s-tickers-hidden').value,
+    LIVE_ALLOWED_SOURCES: document.getElementById('s-sources-hidden').value,
     LIVE_MIN_CONFIDENCE: document.getElementById('s-min-confidence').value,
     LIVE_MAX_POSITION_PCT: document.getElementById('s-max-position').value,
     LIVE_OPEN_CYCLE_SECONDS: document.getElementById('s-open-cycle').value,
     LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('s-closed-cycle').value,
     LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('s-ticker-cooldown').value,
+    LIVE_DATA_MAX_AGE_MINUTES: document.getElementById('s-data-max-age').value,
+    LIVE_FAST_PATH_MACRO_TTL_MIN: document.getElementById('s-fast-macro-ttl').value,
+    LIVE_FAST_PATH_FUND_TTL_MIN: document.getElementById('s-fast-fund-ttl').value,
+    FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS: document.getElementById('s-finnhub-lookback-days').value,
+    LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS: document.getElementById('s-portfolio-llm-timeout').value,
+    LIVE_PORTFOLIO_LLM_MAX_RETRIES: document.getElementById('s-portfolio-llm-retries').value,
     LIVE_EVENT_DRIVEN_MODE: document.getElementById('s-event-driven').checked,
     LIVE_ALLOW_PREMARKET: document.getElementById('s-allow-premarket').checked,
     FLOW_CONFIRMATION_ENABLED: document.getElementById('s-flow-enabled').checked,
@@ -672,6 +806,9 @@ function applyAll(ed){
   sTickers = parseCsv(ed.LIVE_TRADING_TICKERS||'', 'upper');
   document.getElementById('s-tickers-hidden').value = sTickers.join(',');
   renderTickerChips();
+  sSources = parseCsv(ed.LIVE_ALLOWED_SOURCES||'', 'lower');
+  document.getElementById('s-sources-hidden').value = sSources.join(',');
+  renderSourceChips();
 
   // Risk sliders
   const conf = parseInt(ed.LIVE_MIN_CONFIDENCE ?? 50);
@@ -688,6 +825,14 @@ function applyAll(ed){
   setVal('s-open-cycle', ed.LIVE_OPEN_CYCLE_SECONDS ?? 900);
   setVal('s-closed-cycle', ed.LIVE_CLOSED_CYCLE_SECONDS ?? 7200);
   setVal('s-ticker-cooldown', ed.LIVE_TICKER_COOLDOWN_MINUTES ?? 60);
+  setVal('s-data-max-age', ed.LIVE_DATA_MAX_AGE_MINUTES ?? 20);
+  setVal('s-fast-macro-ttl', ed.LIVE_FAST_PATH_MACRO_TTL_MIN ?? 60);
+  setVal('s-fast-fund-ttl', ed.LIVE_FAST_PATH_FUND_TTL_MIN ?? 120);
+  setVal('s-finnhub-lookback-days', ed.FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS ?? 2);
+  setVal('s-portfolio-llm-timeout', ed.LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS ?? 20);
+  setVal('s-portfolio-llm-retries', ed.LIVE_PORTFOLIO_LLM_MAX_RETRIES ?? 2);
+  setText('s-open-cycle-badge', ed.LIVE_OPEN_CYCLE_SECONDS ?? 900);
+  setText('s-closed-cycle-badge', ed.LIVE_CLOSED_CYCLE_SECONDS ?? 7200);
 
   // Flags
   setChk('s-event-driven', ed.LIVE_EVENT_DRIVEN_MODE !== false);
@@ -718,13 +863,17 @@ function applyAll(ed){
 function setVal(id, v){ const el=document.getElementById(id); if(el) el.value=v; }
 function setChk(id, v){ const el=document.getElementById(id); if(el) el.checked=!!v; }
 function setRange(id, v){ const el=document.getElementById(id); if(el) el.value=v; }
+function setText(id, v){ const el=document.getElementById(id); if(el) el.textContent=String(v ?? ''); }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 // ── Boot ─────────────────────────────────────────────────────
 (function init(){
-  sTickers = parseCsv('{{ led.get("LIVE_TRADING_TICKERS", "") }}', 'upper');
+  sTickers = parseCsv(INITIAL_EDITABLE.LIVE_TRADING_TICKERS || '', 'upper');
   document.getElementById('s-tickers-hidden').value = sTickers.join(',');
   renderTickerChips();
+  sSources = parseCsv(INITIAL_EDITABLE.LIVE_ALLOWED_SOURCES || '', 'lower');
+  document.getElementById('s-sources-hidden').value = sSources.join(',');
+  renderSourceChips();
   onWeightChange();
 
   // dim soft gate row when flow disabled
