@@ -291,7 +291,7 @@ curl -X POST http://localhost:6888/api/live/set_enabled \
 
 # 当前默认 `.env`：
 LIVE_TRADING_ENABLED=true
-LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
+LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,JNJ,PG,HD,AVGO,BAC
 ```
 或直接点击 `/live` 页面右上角的 **▶ Enable Live** 按钮。
 
@@ -319,6 +319,7 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,JPM,XOM
 
 归因与来源过滤修正：
 - `Module Attribution` 的同 tier source 选择改为稳定顺序：`event_id -> source_tier -> captured_at -> id`，不再用字母序 tie-break。
+- `Module Attribution` 页面已修正宽表溢出：卡片与表格在窄屏会自适应，长 bucket/source 文本会自动换行并保留 title 提示。
 - source 归一化补齐 `Yahoo Finance` / `yahoo-finance`，并统一空格与连字符，保证白名单匹配一致。
 
 > Enable Live 现在不会再让 Web 进程直接起后台线程。

@@ -1,5 +1,32 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+  .att-page .grid > .card { min-width: 0; }
+  .att-page .att-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .att-page .att-top-grid { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+  .att-page .att-triple-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .att-page .att-bucket {
+    max-width: 260px;
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
+  .att-page .tbl-wrap table { min-width: 640px; }
+  .att-page .att-distributions .tbl-wrap table { min-width: 360px; }
+  @media (max-width: 1200px) {
+    .att-page .att-top-grid { grid-template-columns: 1fr; }
+    .att-page .att-triple-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 760px) {
+    .att-page .att-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .att-page .att-triple-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 520px) {
+    .att-page .att-kpi-grid { grid-template-columns: 1fr; }
+  }
+</style>
+<div class="att-page">
 <div class="page-header">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
     <div>
@@ -55,11 +82,11 @@
   </div>
 </div>
 
-<div class="grid g3 mb16" id="att-kpi-cards">
+<div class="grid g3 mb16 att-kpi-grid" id="att-kpi-cards">
   <div class="card card-sm"><div class="card-title">Loading</div><div class="card-value">…</div><div class="card-sub">Fetching attribution</div></div>
 </div>
 
-<div class="grid g2 mb16" style="grid-template-columns:1.2fr 1fr">
+<div class="grid g2 mb16 att-top-grid">
   <div class="card">
     <div class="section-header mb8">
       <div class="section-title">A. Agent 边际贡献榜</div>
@@ -88,13 +115,13 @@
     <div class="section-header mb8">
       <div class="section-title">D. Conviction / Risk / Final Action</div>
     </div>
-    <div id="att-distributions" class="stack">
+    <div id="att-distributions" class="stack att-distributions">
       <div class="empty-state">Loading…</div>
     </div>
   </div>
 </div>
 
-<div class="grid g3 mb16">
+<div class="grid g3 mb16 att-triple-grid">
   <div class="card">
     <div class="section-header mb8">
       <div class="section-title">B. Event Type 分桶表现</div>
@@ -210,6 +237,7 @@
   </div>
   <div id="att-quality" class="text-sm text-muted">Loading…</div>
 </div>
+ </div>
 {% endblock %}
 
 {% block scripts %}
@@ -279,7 +307,7 @@ function renderBucketTable(elId, rows){
   }
   body.innerHTML = rows.map(row => `
     <tr>
-      <td>${escapeHtml(row.bucket || 'unknown')}</td>
+      <td><div class="att-bucket" title="${escapeHtml(row.bucket || 'unknown')}">${escapeHtml(row.bucket || 'unknown')}</div></td>
       <td class="num">${row.trades ?? 0}</td>
       <td class="num">${fmtPct(row.win_rate || 0)}</td>
       <td class="num">${fmtUsd(row.pnl_sum || 0)}</td>
@@ -320,7 +348,7 @@ function renderDistributions(payload){
           <table>
             <thead><tr><th>Bucket</th><th class="num">Count</th><th class="num">Ratio</th></tr></thead>
             <tbody>
-              ${rows.map(r => `<tr><td>${escapeHtml(r.bucket || 'unknown')}</td><td class="num">${r.count ?? 0}</td><td class="num">${fmtPct(r.ratio || 0)}</td></tr>`).join('')}
+              ${rows.map(r => `<tr><td><div class="att-bucket" title="${escapeHtml(r.bucket || 'unknown')}">${escapeHtml(r.bucket || 'unknown')}</div></td><td class="num">${r.count ?? 0}</td><td class="num">${fmtPct(r.ratio || 0)}</td></tr>`).join('')}
             </tbody>
           </table>
         </div>
@@ -342,7 +370,7 @@ function renderFilterRank(rows){
   }
   body.innerHTML = rows.map(row => `
     <tr>
-      <td>${escapeHtml(row.filter || '')}</td>
+      <td><div class="att-bucket" title="${escapeHtml(row.filter || '')}">${escapeHtml(row.filter || '')}</div></td>
       <td class="num">${fmtPct(row.delta_return || 0)}</td>
       <td class="num">${fmtPct(row.delta_win_rate || 0)}</td>
       <td class="num">${fmtPct(row.delta_drawdown || 0)}</td>

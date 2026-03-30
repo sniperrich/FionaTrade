@@ -9,6 +9,12 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.universe import SP100_TICKERS
 
+DEFAULT_LIVE_TICKERS = [
+    "AAPL", "NVDA", "MSFT", "AMZN", "GOOGL",
+    "META", "TSLA", "JPM", "XOM", "UNH",
+    "JNJ", "PG", "HD", "AVGO", "BAC",
+]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -182,7 +188,9 @@ class Settings(BaseSettings):
     # ── Live Trading ──────────────────────────────────────────────────────────
     live_trading_enabled: bool = False
     # Tickers to trade live; falls back to agent_tickers_override if empty
-    live_trading_tickers: Annotated[list[str], NoDecode] = []
+    live_trading_tickers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: DEFAULT_LIVE_TICKERS.copy()
+    )
     # Optional source whitelist for live news analysis/triggering.
     # Empty list means "all sources".
     live_allowed_sources: Annotated[list[str], NoDecode] = []
