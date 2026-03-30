@@ -15,7 +15,7 @@ from app.core.utils import ensure_utc, utc_now
 from app.backtest_engine.service import BacktestEngineService
 from app.agents.reward import batch_score_runs
 from app.db.database import db_backend_name, db_connection_ok, is_sqlite_lock_error
-from app.db.models import BacktestRun, EntryPlan, EventEvidence, RawItem, SourceStatus, WorkerRunEvent
+from app.db.models import BacktestRun, EntryPlan, Event, EventEvidence, LiveTrade, RawItem, SourceStatus, WorkerRunEvent
 from app.monitoring.health import HealthAuditService
 from app.services.env_settings import EnvSettingsService
 from app.services.market_data import MarketDataService
@@ -371,9 +371,13 @@ def list_news(
     before_id: int | None = Query(default=None, ge=1),
     source: str | None = Query(default=None),
     q: str | None = Query(default=None, min_length=1),
+    purpose: str = Query(default="all"),
 ) -> dict[str, Any]:
     if since_id is not None and before_id is not None:
         raise HTTPException(status_code=400, detail="since_id and before_id cannot be used together")
+    normalized_purpose = str(purpose or "all").strip().lower()
+    if normalized_purpose not in {"all", "raw", "event", "agent", "live"}:
+        raise HTTPException(status_code=400, detail="purpose must be one of: all, raw, event, agent, live")
 
     stmt = select(RawItem)
     if source:
@@ -393,7 +397,46 @@ def list_news(
         stmt = stmt.order_by(RawItem.published_at.desc(), RawItem.id.desc()).limit(limit)
 
     rows = session.execute(stmt).scalars().all()
+    row_ids = [int(row.id) for row in rows]
     backfill_threshold_minutes = max(1, int(settings.news_backfill_delay_minutes))
+
+    raw_event_map: dict[int, set[int]] = {}
+    event_agent_map: dict[int, set[int]] = {}
+    agent_live_map: dict[int, set[int]] = {}
+    if row_ids:
+        evidence_links = session.execute(
+            select(EventEvidence.raw_item_id, EventEvidence.event_id).where(EventEvidence.raw_item_id.in_(row_ids))
+        ).all()
+        event_ids: set[int] = set()
+        for raw_item_id, event_id in evidence_links:
+            raw_id_i = int(raw_item_id)
+            event_id_i = int(event_id)
+            raw_event_map.setdefault(raw_id_i, set()).add(event_id_i)
+            event_ids.add(event_id_i)
+
+        if event_ids:
+            from app.db.models import AgentRun
+
+            agent_links = session.execute(
+                select(AgentRun.id, AgentRun.trigger_event_id).where(AgentRun.trigger_event_id.in_(event_ids))
+            ).all()
+            agent_ids: set[int] = set()
+            for agent_run_id, trigger_event_id in agent_links:
+                if trigger_event_id is None:
+                    continue
+                event_id_i = int(trigger_event_id)
+                agent_id_i = int(agent_run_id)
+                event_agent_map.setdefault(event_id_i, set()).add(agent_id_i)
+                agent_ids.add(agent_id_i)
+
+            if agent_ids:
+                live_links = session.execute(
+                    select(LiveTrade.id, LiveTrade.agent_run_id).where(LiveTrade.agent_run_id.in_(agent_ids))
+                ).all()
+                for live_trade_id, agent_run_id in live_links:
+                    if agent_run_id is None:
+                        continue
+                    agent_live_map.setdefault(int(agent_run_id), set()).add(int(live_trade_id))
 
     latest_id = max((row.id for row in rows), default=since_id or 0)
     oldest_id = min((row.id for row in rows), default=before_id or 0)
@@ -419,8 +462,51 @@ def list_news(
         more_stmt = more_stmt.limit(1)
         has_more_older = session.execute(more_stmt).first() is not None
 
+    def _purpose_layer(raw_item_id: int) -> tuple[str, list[int], list[int], list[int]]:
+        event_ids = sorted(raw_event_map.get(raw_item_id, set()))
+        agent_ids: set[int] = set()
+        for event_id in event_ids:
+            agent_ids.update(event_agent_map.get(event_id, set()))
+        live_ids: set[int] = set()
+        for agent_id in agent_ids:
+            live_ids.update(agent_live_map.get(agent_id, set()))
+        agent_id_list = sorted(agent_ids)
+        live_id_list = sorted(live_ids)
+        if live_id_list:
+            layer = "LIVE_TRADE_INPUT"
+        elif agent_id_list:
+            layer = "AGENT_TRIGGER_INPUT"
+        elif event_ids:
+            layer = "EVENT_EVIDENCE"
+        else:
+            layer = "RAW_INGEST_ONLY"
+        return layer, event_ids, agent_id_list, live_id_list
+
+    def _purpose_match(layer: str) -> bool:
+        if normalized_purpose == "all":
+            return True
+        if normalized_purpose == "raw":
+            return layer == "RAW_INGEST_ONLY"
+        if normalized_purpose == "event":
+            return layer in {"EVENT_EVIDENCE", "AGENT_TRIGGER_INPUT", "LIVE_TRADE_INPUT"}
+        if normalized_purpose == "agent":
+            return layer in {"AGENT_TRIGGER_INPUT", "LIVE_TRADE_INPUT"}
+        if normalized_purpose == "live":
+            return layer == "LIVE_TRADE_INPUT"
+        return True
+
+    purpose_counts = {
+        "RAW_INGEST_ONLY": 0,
+        "EVENT_EVIDENCE": 0,
+        "AGENT_TRIGGER_INPUT": 0,
+        "LIVE_TRADE_INPUT": 0,
+    }
     items_payload: list[dict[str, Any]] = []
     for row in rows:
+        layer, linked_event_ids, linked_agent_run_ids, linked_live_trade_ids = _purpose_layer(int(row.id))
+        purpose_counts[layer] = int(purpose_counts.get(layer, 0)) + 1
+        if not _purpose_match(layer):
+            continue
         historical_backfill, backfill_delay_min = _news_backfill_meta(
             row.published_at,
             row.ingested_at,
@@ -440,15 +526,25 @@ def list_news(
                 "body_preview": (row.body or "")[:600],
                 "historical_backfill": historical_backfill,
                 "backfill_delay_min": backfill_delay_min,
+                "purpose_layer": layer,
+                "linked_event_ids": linked_event_ids,
+                "linked_agent_run_ids": linked_agent_run_ids,
+                "linked_live_trade_ids": linked_live_trade_ids,
+                "is_event_evidence": bool(linked_event_ids),
+                "is_agent_input": bool(linked_agent_run_ids),
+                "is_live_input": bool(linked_live_trade_ids),
             }
         )
 
     return {
         "mode": mode,
+        "purpose": normalized_purpose,
         "latest_id": latest_id,
         "oldest_id": oldest_id,
         "has_more_older": has_more_older,
-        "count": len(rows),
+        "count": len(items_payload),
+        "total_rows": len(rows),
+        "purpose_counts": purpose_counts,
         "items": items_payload,
     }
 
@@ -813,11 +909,83 @@ def list_agent_runs(
         stmt = stmt.where(AgentRun.final_action == action.upper())
 
     rows = session.execute(stmt).scalars().all()
+    run_ids = [int(r.id) for r in rows]
+    trigger_event_ids = sorted({int(r.trigger_event_id) for r in rows if r.trigger_event_id is not None})
+
+    event_map: dict[int, dict[str, Any]] = {}
+    event_evidence_count: dict[int, int] = {}
+    if trigger_event_ids:
+        event_rows = session.execute(
+            select(
+                Event.id,
+                Event.event_type,
+                Event.event_time,
+                Event.confidence,
+                Event.validation_status,
+                Event.summary,
+            ).where(Event.id.in_(trigger_event_ids))
+        ).all()
+        for event_id, event_type, event_time, confidence, validation_status, summary in event_rows:
+            event_map[int(event_id)] = {
+                "id": int(event_id),
+                "event_type": event_type,
+                "event_time": event_time.isoformat() if event_time else None,
+                "confidence": int(confidence or 0),
+                "validation_status": validation_status,
+                "summary": summary or "",
+            }
+        count_rows = session.execute(
+            select(EventEvidence.event_id, func.count(EventEvidence.id))
+            .where(EventEvidence.event_id.in_(trigger_event_ids))
+            .group_by(EventEvidence.event_id)
+        ).all()
+        event_evidence_count = {int(event_id): int(count) for event_id, count in count_rows}
+
+    live_trade_summary: dict[int, dict[str, Any]] = {}
+    if run_ids:
+        live_rows = session.execute(
+            select(
+                LiveTrade.agent_run_id,
+                LiveTrade.id,
+                LiveTrade.status,
+                LiveTrade.created_at,
+                LiveTrade.action,
+                LiveTrade.quantity,
+            )
+            .where(LiveTrade.agent_run_id.in_(run_ids))
+            .order_by(LiveTrade.agent_run_id.asc(), LiveTrade.created_at.desc(), LiveTrade.id.desc())
+        ).all()
+        for agent_run_id, trade_id, status_i, created_at_i, action_i, qty_i in live_rows:
+            if agent_run_id is None:
+                continue
+            run_id_i = int(agent_run_id)
+            bucket = live_trade_summary.setdefault(
+                run_id_i,
+                {
+                    "count": 0,
+                    "latest_trade_id": None,
+                    "latest_status": None,
+                    "latest_created_at": None,
+                    "latest_action": None,
+                    "latest_quantity": None,
+                },
+            )
+            bucket["count"] = int(bucket["count"]) + 1
+            if bucket["latest_trade_id"] is None:
+                bucket["latest_trade_id"] = int(trade_id)
+                bucket["latest_status"] = status_i
+                bucket["latest_created_at"] = created_at_i.isoformat() if created_at_i else None
+                bucket["latest_action"] = action_i
+                bucket["latest_quantity"] = qty_i
+
     return {
         "runs": [
             {
                 "id": r.id,
                 "ticker": r.ticker,
+                "trigger_event_id": r.trigger_event_id,
+                "trigger_event": event_map.get(int(r.trigger_event_id)) if r.trigger_event_id is not None else None,
+                "trigger_event_evidence_count": int(event_evidence_count.get(int(r.trigger_event_id), 0)) if r.trigger_event_id is not None else 0,
                 "final_action": r.final_action,
                 "final_confidence": r.final_confidence,
                 "final_position_pct": r.final_position_pct,
@@ -835,6 +1003,7 @@ def list_agent_runs(
                 "used_cached_macro": ((r.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("used_cached_macro"),
                 "used_cached_fundamentals": ((r.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("used_cached_fundamentals"),
                 "fast_path": ((r.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("fast_path"),
+                "live_trade_summary": live_trade_summary.get(int(r.id), {"count": 0}),
             }
             for r in rows
         ]
@@ -854,9 +1023,69 @@ def get_agent_run(
     row = session.execute(select(AgentRun).where(AgentRun.id == run_id)).scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="agent run not found")
+
+    trigger_event_payload: dict[str, Any] | None = None
+    if row.trigger_event_id is not None:
+        event_row = session.get(Event, int(row.trigger_event_id))
+        if event_row is not None:
+            evidence_rows = session.execute(
+                select(
+                    EventEvidence.id,
+                    EventEvidence.url,
+                    EventEvidence.source,
+                    EventEvidence.source_tier,
+                    EventEvidence.captured_at,
+                    EventEvidence.summary,
+                    RawItem.title,
+                    RawItem.published_at,
+                )
+                .join(RawItem, RawItem.id == EventEvidence.raw_item_id, isouter=True)
+                .where(EventEvidence.event_id == int(event_row.id))
+                .order_by(EventEvidence.source_tier.asc(), EventEvidence.captured_at.desc(), EventEvidence.id.asc())
+                .limit(24)
+            ).all()
+            trigger_event_payload = {
+                "id": int(event_row.id),
+                "event_type": event_row.event_type,
+                "event_time": event_row.event_time.isoformat() if event_row.event_time else None,
+                "confidence": int(event_row.confidence or 0),
+                "validation_status": event_row.validation_status,
+                "summary": event_row.summary or "",
+                "evidence": [
+                    {
+                        "id": int(evidence_id),
+                        "url": url,
+                        "source": source,
+                        "source_tier": int(source_tier or 9),
+                        "captured_at": captured_at.isoformat() if captured_at else None,
+                        "summary": summary or "",
+                        "title": title or "",
+                        "published_at": published_at.isoformat() if published_at else None,
+                    }
+                    for evidence_id, url, source, source_tier, captured_at, summary, title, published_at in evidence_rows
+                ],
+            }
+
+    linked_live_trades = session.execute(
+        select(
+            LiveTrade.id,
+            LiveTrade.action,
+            LiveTrade.quantity,
+            LiveTrade.status,
+            LiveTrade.market_session,
+            LiveTrade.order_id,
+            LiveTrade.created_at,
+        )
+        .where(LiveTrade.agent_run_id == int(row.id))
+        .order_by(LiveTrade.created_at.desc(), LiveTrade.id.desc())
+        .limit(20)
+    ).all()
+
     return {
         "id": row.id,
         "ticker": row.ticker,
+        "trigger_event_id": row.trigger_event_id,
+        "trigger_event": trigger_event_payload,
         "final_action": row.final_action,
         "final_confidence": row.final_confidence,
         "final_position_pct": row.final_position_pct,
@@ -874,6 +1103,18 @@ def get_agent_run(
         "used_cached_macro": ((row.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("used_cached_macro"),
         "used_cached_fundamentals": ((row.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("used_cached_fundamentals"),
         "fast_path": ((row.portfolio_output or {}).get("metadata") or {}).get("live_runtime", {}).get("fast_path"),
+        "linked_live_trades": [
+            {
+                "id": int(trade_id),
+                "action": action_i,
+                "quantity": qty_i,
+                "status": status_i,
+                "market_session": market_session_i,
+                "order_id": order_id_i,
+                "created_at": created_at_i.isoformat() if created_at_i else None,
+            }
+            for trade_id, action_i, qty_i, status_i, market_session_i, order_id_i, created_at_i in linked_live_trades
+        ],
     }
 
 

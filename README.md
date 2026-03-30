@@ -130,8 +130,8 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 |------|------|
 | `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot + worker/queue 状态** |
 | `/live` | 实盘：持仓、手动下单（market/limit/bracket）、挂单管理、**Live Strategy Config（ticker/news source filter/节奏/资金确认/agent权重） + Enable/Disable Live 按钮 + runtime activity + worker heartbeat + command queue + worker history + local bar cache + ticker K-line + entry plan 面板 + entry plan trigger log + 成交历史翻页** |
-| `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页 |
-| `/news` | 新闻流：全文展开、来源/ticker 过滤、**按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页** |
+| `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页、**Trigger Event 证据链可视化 + 关联 Live Trade 明细** |
+| `/news` | 新闻流：全文展开、来源/ticker 过滤、**用途分层（RAW/Event/Agent/Live）**、按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页 |
 | `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果列表与快速检查 |
 | `/backtests/{run_id}` | Backtest 详情页：大图模式（收益率曲线 + 回撤曲线）+ Sharpe/回撤/PF + 全量交易明细 |
 | `/attribution` | 模块归因面板：Agent 边际贡献、事件类型/source/source tier/flow bucket 分桶、过滤器价值排行、评分回填 |
@@ -215,9 +215,11 @@ tests/           pytest 测试集
 > - `/api/news` 现在额外返回 `metadata` 和 `body_preview`
 > - `/api/news` 默认排序改为 `published_at desc, id desc`（`since_id/before_id` 轮询兼容保留）
 > - `/api/news` 现在额外返回 `historical_backfill` 和 `backfill_delay_min`，用于前端标记历史补录
+> - `/api/news` 现支持 `purpose=all|raw|event|agent|live`，并返回 `purpose_layer / linked_event_ids / linked_agent_run_ids / linked_live_trade_ids / purpose_counts`
 > - `/api/live/set_enabled` 同时接受 `POST` 和 `PUT`
 > - Dashboard/Live 首屏改成 `snapshot + sessionStorage`，重新打开页面会先用上次结果秒开，再后台刷新
 > - `/api/agent/runs` 现支持 `ticker/action/limit/offset`
+> - `/api/agent/runs` 现返回 `trigger_event / trigger_event_evidence_count / live_trade_summary`；`/api/agent/runs/{id}` 返回 trigger event evidence 明细与 linked live trades
 > - `/api/live/trades` 现支持 `ticker/limit/offset`
 > - Live 页的 runtime 状态现在来自数据库 `worker_runs / worker_run_events`
 > - `/api/live/status` 现额外返回 `worker` / `supervisor` / `command_queue`

@@ -2,7 +2,7 @@
 {% block content %}
 <div class="page-header">
   <div class="page-title">AI Agents</div>
-  <div class="page-sub">6-agent LangGraph decision pipeline</div>
+  <div class="page-sub">6-agent LangGraph decision pipeline · 决策证据链可视化</div>
 </div>
 
 <!-- LLM + Agent status cards -->
@@ -85,12 +85,13 @@
         <th>Fund.</th>
         <th>Tech.</th>
         <th>Risk</th>
+        <th>Evidence</th>
         <th>Time (ms)</th>
         <th>Date</th>
         <th></th>
       </tr></thead>
       <tbody id="runs-body">
-        <tr><td colspan="12" class="empty-state">Loading…</td></tr>
+        <tr><td colspan="13" class="empty-state">Loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -109,6 +110,7 @@
 <script>
 let agentRunsPage = 1;
 const AGENT_RUNS_PER_PAGE = 20;
+const agentRunDetailCache = new Map();
 
 function sigBadge(s){
   if(!s||s==='NO_SIGNAL') return '<span class="text-muted text-xs">—</span>';
@@ -117,6 +119,124 @@ function sigBadge(s){
 }
 function actionBadge(a){const m={BUY:'badge-green',SHORT:'badge-red',SELL:'badge-red',HOLD:'badge-grey',COVER:'badge-blue'};return `<span class="badge ${m[a]||'badge-grey'}">${a||'—'}</span>`;}
 function convBadge(c){return c==='HIGH'?'<span class="badge badge-green">HIGH</span>':c==='MEDIUM'?'<span class="badge badge-accent">MED</span>':'<span class="badge badge-grey">'+(c||'?')+'</span>';}
+function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+function fmtAgo(iso){
+  if(!iso) return '—';
+  const diffSec=Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if(diffSec < 60) return `${diffSec}s ago`;
+  if(diffSec < 3600) return `${Math.round(diffSec/60)}m ago`;
+  if(diffSec < 86400) return `${(diffSec/3600).toFixed(1)}h ago`;
+  return `${(diffSec/86400).toFixed(1)}d ago`;
+}
+
+function renderEvidenceQuick(run){
+  const event = run.trigger_event || null;
+  const evidenceCount = Number(run.trigger_event_evidence_count || 0);
+  const liveSummary = run.live_trade_summary || {};
+  const liveCount = Number(liveSummary.count || 0);
+  if(!event){
+    return '<span class="badge badge-grey">No trigger event</span>';
+  }
+  return `
+    <div class="flex" style="flex-direction:column;gap:4px;align-items:flex-start">
+      <span class="badge badge-blue">Event #${event.id}</span>
+      <div class="flex gap4">
+        <span class="badge badge-accent">Evidence ${evidenceCount}</span>
+        <span class="badge ${liveCount>0?'badge-green':'badge-grey'}">Live ${liveCount}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderTriggerEventDetail(detail){
+  const event = detail?.trigger_event;
+  if(!event){
+    return '<div class="empty-state text-muted" style="padding:14px 8px">This run has no trigger_event_id. It was likely a schedule/manual cycle without a fresh tradeable event.</div>';
+  }
+  const evidence = Array.isArray(event.evidence) ? event.evidence : [];
+  return `
+    <div style="padding:12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--white);margin-bottom:10px">
+      <div class="flex-center gap8" style="justify-content:space-between;align-items:flex-start">
+        <div class="bold">Event #${event.id} · ${escapeHtml(event.event_type || 'unknown')}</div>
+        <div class="text-muted text-xs">${fmtAgo(event.event_time)}</div>
+      </div>
+      <div class="mt4">
+        <span class="badge badge-accent">confidence ${event.confidence ?? 0}</span>
+        <span class="badge badge-grey">${escapeHtml(event.validation_status || 'UNKNOWN')}</span>
+        <span class="badge badge-blue">evidence ${evidence.length}</span>
+      </div>
+      <div class="text-muted text-sm mt8">${escapeHtml(event.summary || '(no event summary)')}</div>
+    </div>
+    <div style="display:grid;gap:8px">
+      ${evidence.length ? evidence.map(item => `
+        <div style="padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+          <div class="flex-center gap8" style="justify-content:space-between;align-items:flex-start">
+            <div>
+              <span class="badge badge-blue">${escapeHtml(item.source || 'unknown')}</span>
+              <span class="badge badge-grey">tier ${item.source_tier ?? 9}</span>
+            </div>
+            <div class="text-muted text-xs">${fmtAgo(item.published_at || item.captured_at)}</div>
+          </div>
+          <div class="bold mt4">${escapeHtml(item.title || '(no title)')}</div>
+          <div class="text-muted text-sm mt4">${escapeHtml(item.summary || '').slice(0, 320) || '(no summary)'}</div>
+          ${item.url ? `<a href="${item.url}" target="_blank" class="text-xs mt4" style="display:inline-block;color:var(--accent)">↗ open source</a>` : ''}
+        </div>
+      `).join('') : '<div class="empty-state text-muted" style="padding:12px 8px">No evidence rows found for this event.</div>'}
+    </div>
+  `;
+}
+
+function renderLinkedTradesDetail(detail){
+  const rows = Array.isArray(detail?.linked_live_trades) ? detail.linked_live_trades : [];
+  if(!rows.length){
+    return '<div class="empty-state text-muted" style="padding:12px 8px">This agent run has not produced any live trade row.</div>';
+  }
+  return `
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Trade ID</th><th>Action</th><th class="num">Qty</th><th>Status</th><th>Session</th><th>Created</th></tr>
+        </thead>
+        <tbody>
+          ${rows.map(row => `
+            <tr>
+              <td class="mono text-xs">${row.id}</td>
+              <td>${actionBadge(row.action)}</td>
+              <td class="num">${row.quantity ?? '—'}</td>
+              <td>${sigBadge((row.status || '').toUpperCase())}</td>
+              <td><span class="badge badge-grey">${escapeHtml(row.market_session || '—')}</span></td>
+              <td class="text-muted text-xs">${fmtAgo(row.created_at)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function toggleRunDetail(domId, runId){
+  const panel = document.getElementById(domId);
+  if(!panel) return;
+  const isOpen = panel.classList.toggle('open');
+  if(!isOpen) return;
+  if(agentRunDetailCache.has(runId)){
+    const detail = agentRunDetailCache.get(runId);
+    panel.querySelector('[data-evidence-chain]').innerHTML = renderTriggerEventDetail(detail);
+    panel.querySelector('[data-linked-trades]').innerHTML = renderLinkedTradesDetail(detail);
+    return;
+  }
+  panel.querySelector('[data-evidence-chain]').innerHTML = '<div class="loading"><div class="spinner"></div>Loading evidence chain…</div>';
+  panel.querySelector('[data-linked-trades]').innerHTML = '<div class="loading"><div class="spinner"></div>Loading linked trades…</div>';
+  try{
+    const detail = await apiFetch(`/api/agent/runs/${runId}`, { timeout: 15000 });
+    agentRunDetailCache.set(runId, detail);
+    panel.querySelector('[data-evidence-chain]').innerHTML = renderTriggerEventDetail(detail);
+    panel.querySelector('[data-linked-trades]').innerHTML = renderLinkedTradesDetail(detail);
+  }catch(err){
+    panel.querySelector('[data-evidence-chain]').innerHTML = `<div class="empty-state text-red" style="padding:12px 8px">Evidence load failed: ${escapeHtml(err.message)}</div>`;
+    panel.querySelector('[data-linked-trades]').innerHTML = '';
+  }
+}
 
 async function loadLLMStatus(){
   try{
@@ -167,14 +287,16 @@ async function loadRuns(){
         agentRunsPage -= 1;
         return loadRuns();
       }
-      document.getElementById('runs-body').innerHTML='<tr><td colspan="12" class="empty-state text-muted">No agent runs yet</td></tr>';
+      document.getElementById('runs-body').innerHTML='<tr><td colspan="13" class="empty-state text-muted">No agent runs yet</td></tr>';
       return;
     }
     document.getElementById('runs-body').innerHTML=runs.map(r=>{
       const rid='ar-'+r.id;
+      const detailId=`${rid}-detail`;
       const portfolio=r.portfolio_result||{};
       const risk=r.risk_result||{};
       const ts=r.created_at?new Date(r.created_at).toLocaleString():'—';
+      const evidenceQuick=renderEvidenceQuick(r);
       return `<tr onclick="document.getElementById('${rid}').classList.toggle('open')" style="cursor:pointer">
         <td class="bold">${r.ticker}</td>
         <td>${actionBadge(r.final_action)}</td>
@@ -185,39 +307,54 @@ async function loadRuns(){
         <td>${sigBadge(r.fundamentals_result?.signal)}</td>
         <td>${sigBadge(r.technicals_result?.signal)}</td>
         <td>${(risk.metadata||{}).approved?'<span class="text-green bold">✓</span>':'<span class="text-red bold">✗</span>'}</td>
+        <td>${evidenceQuick}</td>
         <td class="num text-muted text-xs">${r.execution_time_ms||'—'}</td>
         <td class="text-muted text-xs nowrap">${ts}</td>
-        <td><span class="expand-btn text-xs">▼ reasoning</span></td>
+        <td><button class="expand-btn text-xs" onclick="event.stopPropagation(); toggleRunDetail('${detailId}', ${r.id});">▼ details</button></td>
       </tr>
-      <tr class="expand-row"><td colspan="12"><div class="expand-content" id="${rid}">
+      <tr class="expand-row"><td colspan="13"><div class="expand-content" id="${rid}">
         <div class="grid g2 gap12" style="font-size:12.5px">
           <div>
             <div class="bold mb4">📰 News Sentiment</div>
-            <div class="text-muted">${r.news_result?.reasoning||'—'}</div>
+            <div class="text-muted">${escapeHtml(r.news_result?.reasoning||'—')}</div>
           </div>
           <div>
             <div class="bold mb4">🌐 Macro Analysis</div>
-            <div class="text-muted">${r.macro_result?.reasoning||'—'}</div>
+            <div class="text-muted">${escapeHtml(r.macro_result?.reasoning||'—')}</div>
           </div>
           <div>
             <div class="bold mb4">📊 Technicals</div>
-            <div class="text-muted">${r.technicals_result?.reasoning||'—'}</div>
+            <div class="text-muted">${escapeHtml(r.technicals_result?.reasoning||'—')}</div>
           </div>
           <div>
             <div class="bold mb4">📈 Fundamentals</div>
-            <div class="text-muted">${r.fundamentals_result?.reasoning||'—'}</div>
+            <div class="text-muted">${escapeHtml(r.fundamentals_result?.reasoning||'—')}</div>
           </div>
         </div>
         <div class="divider"></div>
         <div class="bold mb4">⚖️ Risk Manager</div>
-        <div class="text-muted" style="font-size:12.5px">${r.risk_result?.reasoning||'—'}</div>
+        <div class="text-muted" style="font-size:12.5px">${escapeHtml(r.risk_result?.reasoning||'—')}</div>
         <div class="divider"></div>
         <div class="bold mb4">💼 Portfolio Manager Decision</div>
-        <div style="font-size:12.5px">${r.final_reasoning||'—'}</div>
-        ${r.error_message?`<div class="text-red mt8 text-sm">Error: ${r.error_message}</div>`:''}
-      </div></td></tr>`;
+        <div style="font-size:12.5px">${escapeHtml(r.final_reasoning||'—')}</div>
+        ${r.error_message?`<div class="text-red mt8 text-sm">Error: ${escapeHtml(r.error_message)}</div>`:''}
+      </div></td></tr>
+      <tr class="expand-row"><td colspan="13">
+        <div class="expand-content" id="${detailId}">
+          <div class="grid g2 gap12">
+            <div>
+              <div class="bold mb8">🔗 Trigger Event Evidence Chain</div>
+              <div data-evidence-chain class="text-muted text-sm">Click details to load evidence chain…</div>
+            </div>
+            <div>
+              <div class="bold mb8">🧾 Linked Live Trades</div>
+              <div data-linked-trades class="text-muted text-sm">Click details to load linked live trades…</div>
+            </div>
+          </div>
+        </div>
+      </td></tr>`;
     }).join('');
-  } catch(e){ document.getElementById('runs-body').innerHTML=`<tr><td colspan="12" class="empty-state text-red">Error loading runs</td></tr>`; }
+  } catch(e){ document.getElementById('runs-body').innerHTML=`<tr><td colspan="13" class="empty-state text-red">Error loading runs</td></tr>`; }
 }
 
 function updateRunsPager(count, hasMore){

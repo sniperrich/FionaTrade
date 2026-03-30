@@ -33,8 +33,31 @@
   </div>
 </div>
 
+<div class="card mb16 card-sm">
+  <div class="section-header mb8">
+    <div class="card-title" style="margin:0">用途分层（Purpose Layers）</div>
+    <span class="text-muted text-sm">明确区分：原始采集 → 事件证据 → Agent 输入 → Live 交易输入</span>
+  </div>
+  <div class="text-muted text-sm mb8">
+    News Feed 默认展示“全量采集流”。你可以切换用途层级，只看真正进入决策/交易链路的新闻。
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:8px" id="purpose-layer-summary">
+    <span class="badge badge-grey">RAW: 0</span>
+    <span class="badge badge-blue">EVENT: 0</span>
+    <span class="badge badge-accent">AGENT: 0</span>
+    <span class="badge badge-green">LIVE: 0</span>
+  </div>
+</div>
+
 <!-- Filter bar -->
 <div class="filter-bar mb12">
+  <select id="filter-purpose" onchange="onPurposeFilterChange()" style="max-width:180px">
+    <option value="all" selected>用途: 全量采集流</option>
+    <option value="raw">用途: 仅原始采集</option>
+    <option value="event">用途: 已进入事件层</option>
+    <option value="agent">用途: 已进入 Agent 决策</option>
+    <option value="live">用途: 已用于 Live 交易</option>
+  </select>
   <input type="text" id="filter-text" placeholder="Search headlines…" oninput="filterNews()" style="max-width:280px" />
   <select id="filter-source" onchange="filterNews()" style="max-width:180px">
     <option value="">All sources</option>
@@ -80,6 +103,10 @@
   data-source="{{ item.source }}"
   data-tickers="{{ item_ticker or '' }}"
   data-headline="{{ (item.title or '') | lower }}"
+  data-purpose-layer="UNKNOWN"
+  data-has-event="0"
+  data-has-agent="0"
+  data-has-live="0"
 >
   <div class="news-headline">{{ item.title or "(no title)" }}</div>
   <div class="news-meta">
@@ -87,6 +114,7 @@
     <span class="badge badge-accent">{{ item_ticker }}</span>
     {% endif %}
     <span class="badge badge-grey">{{ item.source or "unknown" }}</span>
+    <span class="badge badge-grey">用途未知（待刷新）</span>
     {% if backfill.get('historical_backfill') %}
     <span
       class="badge badge-warn"
@@ -141,6 +169,7 @@
 <script>
 let latestNewsId = {{ latest_id or 0 }};
 const NEWS_LIVE_PAGE = {{ 'true' if pager.page == 1 else 'false' }};
+let currentPurposeFilter = 'all';
 
 function escapeHtml(s){
   return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -184,16 +213,30 @@ function rebuildTickerFilter(){
   tickerSel.value=[...tickerSel.options].some(o=>o.value===current) ? current : '';
 }
 
+function purposeMatch(card, purpose){
+  if(purpose === 'all') return true;
+  const hasEvent = card.dataset.hasEvent === '1';
+  const hasAgent = card.dataset.hasAgent === '1';
+  const hasLive = card.dataset.hasLive === '1';
+  if(purpose === 'raw') return !hasEvent && !hasAgent && !hasLive;
+  if(purpose === 'event') return hasEvent;
+  if(purpose === 'agent') return hasAgent;
+  if(purpose === 'live') return hasLive;
+  return true;
+}
+
 function filterNews(){
+  const purpose=document.getElementById('filter-purpose').value || 'all';
   const text=document.getElementById('filter-text').value.toLowerCase();
   const source=document.getElementById('filter-source').value.toLowerCase();
   const ticker=document.getElementById('filter-ticker').value.toUpperCase();
   let visible=0;
   getNewsCards().forEach(c=>{
+    const matchPurpose=purposeMatch(c, purpose);
     const matchText=!text||c.dataset.headline.includes(text);
     const matchSource=!source||(c.dataset.source||'').toLowerCase()===source;
     const matchTicker=!ticker||(c.dataset.tickers||'').split(',').includes(ticker);
-    const show=matchText&&matchSource&&matchTicker;
+    const show=matchPurpose&&matchText&&matchSource&&matchTicker;
     c.style.display=show?'':'none';
     if(show) visible++;
   });
@@ -219,6 +262,46 @@ function renderSourceStatuses(items){
     : '<div class="text-muted text-sm mt4">All checked sources are healthy.</div>';
 }
 
+function renderPurposeSummary(payload){
+  const counts = payload?.purpose_counts || {};
+  const row = document.getElementById('purpose-layer-summary');
+  if(!row) return;
+  const raw = Number(counts.RAW_INGEST_ONLY || 0);
+  const event = Number(counts.EVENT_EVIDENCE || 0);
+  const agent = Number(counts.AGENT_TRIGGER_INPUT || 0);
+  const live = Number(counts.LIVE_TRADE_INPUT || 0);
+  const total = Number(payload?.total_rows || (raw + event + agent + live));
+  const shown = Number(payload?.count || 0);
+  row.innerHTML = `
+    <span class="badge badge-grey">RAW: ${raw}</span>
+    <span class="badge badge-blue">EVENT: ${event}</span>
+    <span class="badge badge-accent">AGENT: ${agent}</span>
+    <span class="badge badge-green">LIVE: ${live}</span>
+    <span class="badge badge-warn">Shown: ${shown}/${total}</span>
+  `;
+}
+
+function renderPurposeBadges(item){
+  const layer = String(item?.purpose_layer || 'RAW_INGEST_ONLY');
+  const linkedEvents = Array.isArray(item?.linked_event_ids) ? item.linked_event_ids : [];
+  const linkedAgents = Array.isArray(item?.linked_agent_run_ids) ? item.linked_agent_run_ids : [];
+  const linkedLives = Array.isArray(item?.linked_live_trade_ids) ? item.linked_live_trade_ids : [];
+  const badges = [];
+  if(layer === 'RAW_INGEST_ONLY'){
+    badges.push('<span class="badge badge-grey">RAW ONLY</span>');
+  }
+  if(linkedEvents.length){
+    badges.push(`<span class="badge badge-blue">EVENT ${linkedEvents.length}</span>`);
+  }
+  if(linkedAgents.length){
+    badges.push(`<span class="badge badge-accent">AGENT ${linkedAgents.length}</span>`);
+  }
+  if(linkedLives.length){
+    badges.push(`<span class="badge badge-green">LIVE ${linkedLives.length}</span>`);
+  }
+  return badges.join('');
+}
+
 function renderNewsCard(item){
   const ticker=item.metadata?.ticker || '';
   const source=item.source || 'unknown';
@@ -232,16 +315,27 @@ function renderNewsCard(item){
   const backfillBadge=historical
     ? `<span class="badge badge-warn" title="补录延迟 ${delayMin ?? '?'} 分钟">历史补录</span>`
     : '';
+  const hasEvent = Array.isArray(item.linked_event_ids) && item.linked_event_ids.length > 0;
+  const hasAgent = Array.isArray(item.linked_agent_run_ids) && item.linked_agent_run_ids.length > 0;
+  const hasLive = Array.isArray(item.linked_live_trade_ids) && item.linked_live_trade_ids.length > 0;
+  const purposeLayer = item.purpose_layer || 'RAW_INGEST_ONLY';
+  const purposeBadges = renderPurposeBadges(item);
+  const purposeTitle = [
+    hasEvent ? `event_ids=${item.linked_event_ids.join(',')}` : null,
+    hasAgent ? `agent_runs=${item.linked_agent_run_ids.join(',')}` : null,
+    hasLive ? `live_trades=${item.linked_live_trade_ids.join(',')}` : null,
+  ].filter(Boolean).join(' | ');
   const body=item.body_preview ? `
     <span class="news-expand" onclick="toggleBody(this)">▼ Read more</span>
     <div class="news-body">${escapeHtml(item.body_preview)}</div>
   ` : '';
   return `
-    <div class="news-card" data-id="${item.id}" data-sort-id="${item.id}" data-sort-ts="${publishedTs}" data-source="${escapeHtml(source)}" data-tickers="${escapeHtml(ticker)}" data-headline="${escapeHtml((item.title || '').toLowerCase())}">
+    <div class="news-card" data-id="${item.id}" data-sort-id="${item.id}" data-sort-ts="${publishedTs}" data-source="${escapeHtml(source)}" data-tickers="${escapeHtml(ticker)}" data-headline="${escapeHtml((item.title || '').toLowerCase())}" data-purpose-layer="${escapeHtml(purposeLayer)}" data-has-event="${hasEvent ? '1' : '0'}" data-has-agent="${hasAgent ? '1' : '0'}" data-has-live="${hasLive ? '1' : '0'}">
       <div class="news-headline">${escapeHtml(item.title || '(no title)')}</div>
       <div class="news-meta">
         ${ticker ? `<span class="badge badge-accent">${escapeHtml(ticker)}</span>` : ''}
         <span class="badge badge-grey">${escapeHtml(source)}</span>
+        ${purposeBadges ? `<span title="${escapeHtml(purposeTitle || 'no linkage')}">${purposeBadges}</span>` : ''}
         ${backfillBadge}
         ${publishedLabel ? `<span class="text-muted text-xs">${escapeHtml(publishedLabel)}</span>` : ''}
         ${ingestedLabel ? `<span class="text-muted text-xs">ingest ${escapeHtml(ingestedLabel)}</span>` : ''}
@@ -291,6 +385,38 @@ function prependNews(items){
   return fresh.length;
 }
 
+function replaceNewsList(items){
+  const list=document.getElementById('news-list');
+  const sorted=(items||[]).slice().sort((a,b)=>{
+    const ka=itemSortKey(a);
+    const kb=itemSortKey(b);
+    if(ka.ts!==kb.ts) return kb.ts-ka.ts;
+    return kb.id-ka.id;
+  });
+  if(!sorted.length){
+    list.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📭</div>
+        No news items in this purpose layer.
+      </div>
+    `;
+    rebuildTickerFilter();
+    filterNews();
+    return;
+  }
+  list.innerHTML = sorted.map(renderNewsCard).join('');
+  rebuildTickerFilter();
+  filterNews();
+}
+
+async function reloadNewsListFromApi(){
+  const purpose=document.getElementById('filter-purpose').value || 'all';
+  const d=await apiFetch(`/api/news?limit=200&purpose=${encodeURIComponent(purpose)}`, { timeout: 12000 });
+  latestNewsId = Math.max(latestNewsId, d.latest_id || 0);
+  replaceNewsList(d.items || []);
+  renderPurposeSummary(d);
+}
+
 async function refreshSourceStatus(){
   try{
     const d=await apiFetch('/api/news/sources/status', { timeout: 12000 });
@@ -301,8 +427,9 @@ async function refreshSourceStatus(){
 }
 
 async function pollLatestNews(){
+  const purpose=document.getElementById('filter-purpose').value || 'all';
   try{
-    const d=await apiFetch(`/api/news?since_id=${encodeURIComponent(latestNewsId)}&limit=50`, { timeout: 12000 });
+    const d=await apiFetch(`/api/news?since_id=${encodeURIComponent(latestNewsId)}&limit=50&purpose=${encodeURIComponent(purpose)}`, { timeout: 12000 });
     const items=d.items || [];
     const added=prependNews(items);
     latestNewsId=Math.max(latestNewsId, d.latest_id || 0);
@@ -314,18 +441,34 @@ async function pollLatestNews(){
   }
 }
 
+async function onPurposeFilterChange(){
+  currentPurposeFilter = document.getElementById('filter-purpose').value || 'all';
+  latestNewsId = 0;
+  if(NEWS_LIVE_PAGE){
+    try{
+      await reloadNewsListFromApi();
+    } catch(e){
+      toast(`Layer refresh failed: ${e.message}`, 'error');
+    }
+  } else {
+    filterNews();
+  }
+}
+
 async function loadNews(){
   if(!NEWS_LIVE_PAGE){
     window.location.reload();
     return;
   }
-  await Promise.allSettled([pollLatestNews(), refreshSourceStatus()]);
+  await Promise.allSettled([reloadNewsListFromApi(), refreshSourceStatus()]);
 }
 
 rebuildTickerFilter();
 filterNews();
 refreshSourceStatus();
 if(NEWS_LIVE_PAGE){
+  currentPurposeFilter = document.getElementById('filter-purpose').value || 'all';
+  reloadNewsListFromApi();
   setInterval(loadNews, 30000);
 }
 </script>
