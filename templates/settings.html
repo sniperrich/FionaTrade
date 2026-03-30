@@ -1,221 +1,726 @@
 {% extends "base.html" %}
 {% block content %}
 {% set ed = settings_editor.editable if settings_editor else {} %}
+{% set led = live_editor.editable if live_editor else {} %}
+
+<style>
+/* ── Toggle Switch ─────────────────────────────────────────── */
+.toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+}
+.toggle input { display: none; }
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  background: var(--border2);
+  border-radius: 11px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.toggle input:checked + .toggle-track { background: var(--accent); }
+.toggle-track::after {
+  content: '';
+  position: absolute;
+  width: 16px; height: 16px;
+  top: 3px; left: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform var(--transition);
+  box-shadow: 0 1px 3px rgba(0,0,0,.18);
+}
+.toggle input:checked + .toggle-track::after { transform: translateX(18px); }
+
+/* ── Slider ────────────────────────────────────────────────── */
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.slider-row input[type=range] {
+  flex: 1;
+  -webkit-appearance: none;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border2);
+  outline: none;
+  cursor: pointer;
+}
+.slider-row input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0,0,0,.18);
+  transition: transform .12s;
+}
+.slider-row input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.15); }
+.slider-val {
+  min-width: 42px;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Setting row (flag + description) ──────────────────────── */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--border);
+}
+.setting-row:last-child { border-bottom: none; }
+.setting-label {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text2);
+}
+.setting-desc {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* ── Section heading ────────────────────────────────────────── */
+.settings-section {
+  margin-bottom: 20px;
+}
+.settings-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-section-icon {
+  width: 28px; height: 28px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-bg);
+  color: var(--accent-dk);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.settings-section-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+}
+.settings-section-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+
+/* ── Number field with unit ─────────────────────────────────── */
+.input-unit-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.input-unit-wrap input { padding-right: 36px; min-width: 90px; }
+.input-unit {
+  position: absolute;
+  right: 10px;
+  font-size: 11px;
+  color: var(--muted2);
+  pointer-events: none;
+}
+
+/* ── Chip ───────────────────────────────────────────────────── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px 3px 10px;
+  border-radius: 99px;
+  background: var(--accent-bg);
+  color: var(--accent-dk);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--accent-bg2);
+}
+.chip-rm {
+  background: none;
+  border: none;
+  color: var(--accent-dk);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  opacity: .7;
+  transition: opacity .12s;
+}
+.chip-rm:hover { opacity: 1; }
+
+/* ── Weight bar ─────────────────────────────────────────────── */
+.weight-bars {
+  display: flex;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 14px;
+  background: var(--surface3);
+}
+.weight-bar-seg {
+  height: 100%;
+  transition: width .25s;
+}
+
+/* ── Grid helpers ────────────────────────────────────────────── */
+.sg2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.sg3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+</style>
+
 <div class="page-header">
   <div class="page-title">Settings</div>
-  <div class="page-sub">基础配置中心（实时交易参数已迁移到 Live 页面）</div>
+  <div class="page-sub">所有参数写入 <span class="mono">{{ settings_editor.env_file if settings_editor else '.env' }}</span> · Web 立即生效 · Worker 重启后完全生效</div>
 </div>
 
+<!-- ── Live Trading Config ───────────────────────────────────── -->
 <div class="card mb16">
-  <div class="section-header mb8">
-    <div class="section-title">Base Config</div>
-    <span class="text-muted text-sm">保存后 Web 立即生效；Worker/Supervisor 需重启</span>
+  <div class="settings-section-head mb16">
+    <div class="settings-section-icon">📡</div>
+    <div>
+      <div class="settings-section-title">Live Trading</div>
+      <div class="settings-section-sub">交易品种、风控阈值、执行节奏</div>
+    </div>
   </div>
-  <div class="text-muted text-sm mb12">
-    Live ticker、news 白名单、交易节奏、资金确认等参数已迁移到 <a href="/live">Live Trading</a> 页面统一管理。
+
+  <!-- Tickers -->
+  <div class="settings-section">
+    <div style="margin-bottom:8px">
+      <div class="setting-label">Trading Universe</div>
+      <div class="setting-desc">Agent 实盘监控的标的列表</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <input type="text" id="s-ticker-input" placeholder="e.g. AAPL" style="text-transform:uppercase;max-width:140px" />
+      <button type="button" class="btn btn-ghost btn-sm" onclick="sAddTicker()">+ 添加</button>
+    </div>
+    <input type="hidden" id="s-tickers-hidden" value="{{ led.get('LIVE_TRADING_TICKERS', '') }}" />
+    <div id="s-ticker-chips" style="display:flex;flex-wrap:wrap;gap:6px;min-height:26px"></div>
   </div>
 
-  <form id="settings-editor-form">
-    <div class="grid g2 mb12">
-      <div class="card card-sm" style="background:var(--surface2)">
-        <div class="card-title" style="margin-bottom:8px">LLM Gateway</div>
-        <div class="form-group mb8">
-          <label>LLM_MODEL</label>
-          <input type="text" id="cfg-llm-model" value="{{ ed.get('LLM_MODEL', settings.llm_model) }}" placeholder="claude-sonnet-4-5" />
+  <!-- Risk -->
+  <div class="settings-section">
+    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted2);margin-bottom:10px">风险控制</div>
+    <div class="sg2">
+      <div>
+        <div class="setting-label mb4">最低置信度</div>
+        <div class="setting-desc mb8">低于此值的信号不执行</div>
+        <div class="slider-row">
+          <input type="range" id="s-min-confidence-range" min="0" max="100" step="1"
+            value="{{ led.get('LIVE_MIN_CONFIDENCE', 50) }}"
+            oninput="document.getElementById('s-min-confidence-val').textContent=this.value" />
+          <span class="slider-val" id="s-min-confidence-val">{{ led.get('LIVE_MIN_CONFIDENCE', 50) }}</span>
         </div>
-        <div class="form-group">
-          <label>LLM_BASE_URL</label>
-          <input type="text" id="cfg-llm-base-url" value="{{ ed.get('LLM_BASE_URL', settings.llm_base_url) }}" placeholder="https://api.duojie.games" />
-        </div>
+        <input type="hidden" id="s-min-confidence" value="{{ led.get('LIVE_MIN_CONFIDENCE', 50) }}" />
       </div>
-
-      <div class="card card-sm" style="background:var(--surface2)">
-        <div class="card-title" style="margin-bottom:8px">Scheduler & Threshold</div>
-        <div class="form-row" style="grid-template-columns:1fr 1fr">
-          <div class="form-group">
-            <label>POLL_INTERVAL_SECONDS</label>
-            <input type="number" min="10" step="1" id="cfg-poll-interval" value="{{ ed.get('POLL_INTERVAL_SECONDS', settings.poll_interval_seconds) }}" />
-          </div>
-          <div class="form-group">
-            <label>MIN_TRADE_CONFIDENCE</label>
-            <input type="number" min="0" max="100" step="1" id="cfg-min-trade-confidence" value="{{ ed.get('MIN_TRADE_CONFIDENCE', settings.min_trade_confidence) }}" />
-          </div>
+      <div>
+        <div class="setting-label mb4">最大仓位比例</div>
+        <div class="setting-desc mb8">单笔最大资金占比</div>
+        <div class="slider-row">
+          <input type="range" id="s-max-position-range" min="1" max="100" step="1"
+            value="{{ (led.get('LIVE_MAX_POSITION_PCT', 0.1) * 100) | int }}"
+            oninput="document.getElementById('s-max-position-val').textContent=this.value+'%'" />
+          <span class="slider-val" id="s-max-position-val">{{ (led.get('LIVE_MAX_POSITION_PCT', 0.1) * 100) | int }}%</span>
         </div>
-      </div>
-    </div>
-
-    <div class="card card-sm mb12" style="background:var(--surface2)">
-      <div class="card-title" style="margin-bottom:8px">Data Sources</div>
-      <div class="form-row" style="grid-template-columns:repeat(2,minmax(0,1fr))">
-        <div class="form-group">
-          <label>ENABLE_SEC</label>
-          <div class="seg-group">
-            <input type="radio" name="cfg-enable-sec" id="cfg-enable-sec-on" value="true" />
-            <label for="cfg-enable-sec-on">ON</label>
-            <input type="radio" name="cfg-enable-sec" id="cfg-enable-sec-off" value="false" />
-            <label for="cfg-enable-sec-off">OFF</label>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>ENABLE_RSS</label>
-          <div class="seg-group">
-            <input type="radio" name="cfg-enable-rss" id="cfg-enable-rss-on" value="true" />
-            <label for="cfg-enable-rss-on">ON</label>
-            <input type="radio" name="cfg-enable-rss" id="cfg-enable-rss-off" value="false" />
-            <label for="cfg-enable-rss-off">OFF</label>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>ENABLE_FINNHUB</label>
-          <div class="seg-group">
-            <input type="radio" name="cfg-enable-finnhub" id="cfg-enable-finnhub-on" value="true" />
-            <label for="cfg-enable-finnhub-on">ON</label>
-            <input type="radio" name="cfg-enable-finnhub" id="cfg-enable-finnhub-off" value="false" />
-            <label for="cfg-enable-finnhub-off">OFF</label>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>ENABLE_EARNINGS_RELEASE_SOURCE</label>
-          <div class="seg-group">
-            <input type="radio" name="cfg-enable-earnings" id="cfg-enable-earnings-on" value="true" />
-            <label for="cfg-enable-earnings-on">ON</label>
-            <input type="radio" name="cfg-enable-earnings" id="cfg-enable-earnings-off" value="false" />
-            <label for="cfg-enable-earnings-off">OFF</label>
-          </div>
-        </div>
+        <input type="hidden" id="s-max-position" value="{{ led.get('LIVE_MAX_POSITION_PCT', 0.1) }}" />
       </div>
     </div>
+  </div>
 
-    <div class="form-group mb12">
-      <label>额外 ENV 覆盖（可选）</label>
-      <textarea id="cfg-extra-updates" rows="4" placeholder="例如：\nFINNHUB_API_KEY=xxxx\nLLM_API_KEY=sk-xxxx"></textarea>
-      <div class="text-muted text-xs">每行一个 KEY=VALUE，仅用于高级覆盖。</div>
+  <!-- Timing -->
+  <div class="settings-section">
+    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted2);margin-bottom:10px">执行节奏</div>
+    <div class="sg3">
+      <div class="form-group">
+        <label>盘中周期</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-open-cycle" min="60" step="60"
+            value="{{ led.get('LIVE_OPEN_CYCLE_SECONDS', 900) }}" />
+          <span class="input-unit">秒</span>
+        </div>
+        <div class="text-muted text-xs mt4">开盘时每轮扫描间隔</div>
+      </div>
+      <div class="form-group">
+        <label>盘后周期</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-closed-cycle" min="300" step="60"
+            value="{{ led.get('LIVE_CLOSED_CYCLE_SECONDS', 7200) }}" />
+          <span class="input-unit">秒</span>
+        </div>
+        <div class="text-muted text-xs mt4">休市时的扫描间隔</div>
+      </div>
+      <div class="form-group">
+        <label>标的冷却时间</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-ticker-cooldown" min="0" step="1"
+            value="{{ led.get('LIVE_TICKER_COOLDOWN_MINUTES', 60) }}" />
+          <span class="input-unit">分钟</span>
+        </div>
+        <div class="text-muted text-xs mt4">同一标的两次分析最小间隔</div>
+      </div>
     </div>
+  </div>
 
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button type="submit" class="btn btn-primary">保存到 .env</button>
-      <button type="button" class="btn btn-ghost" onclick="reloadEditableSettings()">从后端刷新</button>
-      <a class="btn btn-ghost" href="/live">去 Live 页面调交易参数</a>
-      <span class="text-muted text-sm mono">{{ settings_editor.env_file if settings_editor else '.env' }}</span>
+  <!-- Strategy flags -->
+  <div class="settings-section">
+    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted2);margin-bottom:4px">策略开关</div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">事件驱动模式</div>
+        <div class="setting-desc">有新事件时立即触发分析，而非等待定时周期</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-event-driven" {% if led.get('LIVE_EVENT_DRIVEN_MODE', true) %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
     </div>
-  </form>
-
-  <div id="settings-save-result" class="mt8 text-sm"></div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">允许盘前交易</div>
+        <div class="setting-desc">在正式开盘前执行信号（Pre-market）</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-allow-premarket" {% if led.get('LIVE_ALLOW_PREMARKET', false) %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">资金流向确认</div>
+        <div class="setting-desc">要求成交量/异常资金流向支撑信号后再执行</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-flow-enabled" {% if led.get('FLOW_CONFIRMATION_ENABLED', true) %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="setting-row" id="s-flow-soft-gate-row">
+      <div>
+        <div class="setting-label" style="color:var(--muted)">资金流向软性门控</div>
+        <div class="setting-desc">未满足资金流向时降权执行（而非直接拒绝）</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-flow-soft-gate" {% if led.get('FLOW_CONFIRMATION_SOFT_GATE', true) %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+  </div>
 </div>
 
-<div class="grid g3">
-  <div class="card">
-    <div class="card-title">Analysis Mode</div>
-    {% if settings.llm_base_url and settings.llm_api_key and settings.llm_model %}
-      <div class="card-value text-accent">LLM</div>
-      <div class="card-sub">Model: {{ settings.llm_model }}</div>
-    {% else %}
-      <div class="card-value text-muted">Rules</div>
-      <div class="card-sub">LLM 未完整配置，自动回退规则模式</div>
-    {% endif %}
+<!-- ── Agent Weights ──────────────────────────────────────────── -->
+<div class="card mb16">
+  <div class="settings-section-head mb16">
+    <div class="settings-section-icon">⚖️</div>
+    <div>
+      <div class="settings-section-title">Agent Base Weights</div>
+      <div class="settings-section-sub">各 Agent 基础权重（动态调整后在此基础上 ±10%）</div>
+    </div>
+    <span class="text-sm text-muted ml8" id="weight-sum-badge" style="margin-left:auto"></span>
   </div>
-  <div class="card">
-    <div class="card-title">Data Ingestion</div>
-    <div class="card-value">{{ settings.poll_interval_seconds }}s</div>
-    <div class="card-sub">每轮采集周期</div>
+
+  <div class="weight-bars" id="weight-bars-visual">
+    <div class="weight-bar-seg" id="wb-news" style="background:var(--accent)"></div>
+    <div class="weight-bar-seg" id="wb-tech" style="background:var(--blue)"></div>
+    <div class="weight-bar-seg" id="wb-macro" style="background:var(--green)"></div>
+    <div class="weight-bar-seg" id="wb-fund" style="background:var(--purple)"></div>
   </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <span class="setting-label" style="color:var(--accent)">📰 News Sentiment</span>
+        <span class="slider-val" id="w-news-val">{{ (led.get('AGENT_WEIGHT_NEWS', 0.6) * 100) | int }}%</span>
+      </div>
+      <input type="range" id="w-news" min="5" max="80" step="1"
+        value="{{ (led.get('AGENT_WEIGHT_NEWS', 0.6) * 100) | int }}"
+        oninput="onWeightChange()" class="w100" />
+    </div>
+    <div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <span class="setting-label" style="color:var(--blue)">📊 Technicals</span>
+        <span class="slider-val" id="w-tech-val">{{ (led.get('AGENT_WEIGHT_TECHNICALS', 0.2) * 100) | int }}%</span>
+      </div>
+      <input type="range" id="w-tech" min="5" max="80" step="1"
+        value="{{ (led.get('AGENT_WEIGHT_TECHNICALS', 0.2) * 100) | int }}"
+        oninput="onWeightChange()" class="w100" />
+    </div>
+    <div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <span class="setting-label" style="color:var(--green)">🌍 Macro</span>
+        <span class="slider-val" id="w-macro-val">{{ (led.get('AGENT_WEIGHT_MACRO', 0.1) * 100) | int }}%</span>
+      </div>
+      <input type="range" id="w-macro" min="5" max="80" step="1"
+        value="{{ (led.get('AGENT_WEIGHT_MACRO', 0.1) * 100) | int }}"
+        oninput="onWeightChange()" class="w100" />
+    </div>
+    <div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <span class="setting-label" style="color:var(--purple)">🏢 Fundamentals</span>
+        <span class="slider-val" id="w-fund-val">{{ (led.get('AGENT_WEIGHT_FUNDAMENTALS', 0.1) * 100) | int }}%</span>
+      </div>
+      <input type="range" id="w-fund" min="5" max="80" step="1"
+        value="{{ (led.get('AGENT_WEIGHT_FUNDAMENTALS', 0.1) * 100) | int }}"
+        oninput="onWeightChange()" class="w100" />
+    </div>
+  </div>
+  <input type="hidden" id="s-w-news" />
+  <input type="hidden" id="s-w-tech" />
+  <input type="hidden" id="s-w-macro" />
+  <input type="hidden" id="s-w-fund" />
+</div>
+
+<!-- ── LLM + Data Sources ─────────────────────────────────────── -->
+<div class="sg2 mb16">
   <div class="card">
-    <div class="card-title">Trade Gate</div>
-    <div class="card-value">{{ settings.min_trade_confidence }}</div>
-    <div class="card-sub">最小交易置信度</div>
+    <div class="settings-section-head mb12">
+      <div class="settings-section-icon">🤖</div>
+      <div>
+        <div class="settings-section-title">LLM Gateway</div>
+        <div class="settings-section-sub">OpenAI 兼容接口配置</div>
+      </div>
+    </div>
+    <div class="form-group mb10">
+      <label>Model</label>
+      <input type="text" id="cfg-llm-model"
+        value="{{ ed.get('LLM_MODEL', settings.llm_model) }}"
+        placeholder="claude-sonnet-4-5" />
+    </div>
+    <div class="form-group">
+      <label>Base URL</label>
+      <input type="text" id="cfg-llm-base-url"
+        value="{{ ed.get('LLM_BASE_URL', settings.llm_base_url) }}"
+        placeholder="https://api.example.com" />
+    </div>
+    <div class="mt12 pt12" style="border-top:1px solid var(--border)">
+      {% if settings.llm_base_url and settings.llm_api_key and settings.llm_model %}
+        <span class="badge badge-green">LLM Active</span>
+        <span class="text-muted text-xs ml8">{{ settings.llm_model }}</span>
+      {% else %}
+        <span class="badge badge-grey">Rules Fallback</span>
+        <span class="text-muted text-xs ml8">LLM 未完整配置</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="settings-section-head mb12">
+      <div class="settings-section-icon">🔌</div>
+      <div>
+        <div class="settings-section-title">Data Sources</div>
+        <div class="settings-section-sub">数据采集开关</div>
+      </div>
+    </div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Finnhub</div>
+        <div class="setting-desc">公司新闻 + 1m K线 + 基本面</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-enable-finnhub" {% if settings.enable_finnhub %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">RSS</div>
+        <div class="setting-desc">Reuters / AP / Bloomberg / FT</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-enable-rss" {% if settings.enable_rss %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">SEC EDGAR</div>
+        <div class="setting-desc">监管文件 8-K / 10-Q / S-1</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-enable-sec" {% if settings.enable_sec %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Earnings Release</div>
+        <div class="setting-desc">财报发布事件</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-enable-earnings" {% if settings.enable_earnings_release_source %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="mt12 pt12" style="border-top:1px solid var(--border)">
+      <div class="form-group">
+        <label>采集周期</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="cfg-poll-interval" min="10" step="1"
+            value="{{ ed.get('POLL_INTERVAL_SECONDS', settings.poll_interval_seconds) }}"
+            style="max-width:120px" />
+          <span class="input-unit">秒</span>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
+
+<!-- ── Save bar ───────────────────────────────────────────────── -->
+<div class="card" style="padding:14px 16px">
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button id="save-btn" class="btn btn-primary" onclick="saveAllSettings()">
+      保存所有配置
+    </button>
+    <button class="btn btn-ghost" onclick="reloadAllSettings()">↻ 从后端刷新</button>
+    <a href="/live" class="btn btn-ghost">前往 Live 页</a>
+    <span class="text-muted text-sm" id="settings-save-msg" style="margin-left:auto"></span>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
 <script>
-function setBoolSeg(name, value){
-  const normalized = value ? 'true' : 'false';
-  const target = document.querySelector(`input[name="${name}"][value="${normalized}"]`);
-  if (target) target.checked = true;
+// ── Ticker chips ─────────────────────────────────────────────
+let sTickers = [];
+
+function parseCsv(raw, mode='upper'){
+  return [...new Set(String(raw||'').split(',').map(s=>s.trim()).filter(Boolean)
+    .map(s=>mode==='upper'?s.toUpperCase():s.toLowerCase()))];
 }
 
-function getBoolSeg(name){
-  const selected = document.querySelector(`input[name="${name}"]:checked`);
-  return selected ? selected.value === 'true' : false;
-}
-
-function applyEditorSettings(payload){
-  const ed = payload?.editable || {};
-  document.getElementById('cfg-llm-model').value = ed.LLM_MODEL ?? '';
-  document.getElementById('cfg-llm-base-url').value = ed.LLM_BASE_URL ?? '';
-  document.getElementById('cfg-poll-interval').value = ed.POLL_INTERVAL_SECONDS ?? '';
-  document.getElementById('cfg-min-trade-confidence').value = ed.MIN_TRADE_CONFIDENCE ?? '';
-
-  setBoolSeg('cfg-enable-sec', !!ed.ENABLE_SEC);
-  setBoolSeg('cfg-enable-rss', !!ed.ENABLE_RSS);
-  setBoolSeg('cfg-enable-finnhub', !!ed.ENABLE_FINNHUB);
-  setBoolSeg('cfg-enable-earnings', !!ed.ENABLE_EARNINGS_RELEASE_SOURCE);
-}
-
-async function reloadEditableSettings(){
-  try{
-    const resp = await apiFetch('/api/settings/editable', { timeout: 12000 });
-    applyEditorSettings(resp);
-    toast('设置已从后端刷新', 'success');
-  }catch(e){
-    toast(`刷新失败: ${e.message}`, 'error');
+function renderTickerChips(){
+  const el = document.getElementById('s-ticker-chips');
+  if(!el) return;
+  if(!sTickers.length){
+    el.innerHTML = '<span class="text-muted text-xs">未设置标的</span>';
+    return;
   }
+  el.innerHTML = sTickers.map(t => `
+    <span class="chip">${escapeHtml(t)}
+      <button class="chip-rm" onclick="sRemoveTicker('${t}')" title="移除">×</button>
+    </span>`).join('');
 }
 
-async function saveSettings(e){
-  e.preventDefault();
+function sAddTicker(){
+  const inp = document.getElementById('s-ticker-input');
+  const raw = String(inp?.value||'').trim().toUpperCase();
+  if(!raw){ toast('请输入标的代码','warn'); return; }
+  if(!/^[A-Z.\-]{1,10}$/.test(raw)){ toast('格式不合法，仅支持字母和 . -','error'); return; }
+  if(!sTickers.includes(raw)) sTickers.push(raw);
+  if(inp) inp.value='';
+  document.getElementById('s-tickers-hidden').value = sTickers.join(',');
+  renderTickerChips();
+}
+
+function sRemoveTicker(t){
+  sTickers = sTickers.filter(x=>x!==t);
+  document.getElementById('s-tickers-hidden').value = sTickers.join(',');
+  renderTickerChips();
+}
+
+document.getElementById('s-ticker-input').addEventListener('keydown', e=>{
+  if(e.key==='Enter'){ e.preventDefault(); sAddTicker(); }
+});
+
+// ── Sliders ──────────────────────────────────────────────────
+function linkSlider(rangeId, hiddenId, valId, toHidden){
+  const range = document.getElementById(rangeId);
+  const hidden = document.getElementById(hiddenId);
+  const val = document.getElementById(valId);
+  if(!range) return;
+  range.addEventListener('input', ()=>{
+    if(val) val.textContent = toHidden(range.value) + (valId.includes('confidence') ? '' : '');
+    if(hidden) hidden.value = toHidden(range.value, true);
+  });
+}
+
+// Sync slider → hidden on change
+document.getElementById('s-min-confidence-range').addEventListener('input', function(){
+  document.getElementById('s-min-confidence').value = this.value;
+  document.getElementById('s-min-confidence-val').textContent = this.value;
+});
+document.getElementById('s-max-position-range').addEventListener('input', function(){
+  document.getElementById('s-max-position').value = (this.value / 100).toFixed(2);
+  document.getElementById('s-max-position-val').textContent = this.value + '%';
+});
+
+// ── Agent weight bars ─────────────────────────────────────────
+function onWeightChange(){
+  const n = +document.getElementById('w-news').value;
+  const te = +document.getElementById('w-tech').value;
+  const m = +document.getElementById('w-macro').value;
+  const f = +document.getElementById('w-fund').value;
+  const total = n + te + m + f;
+  document.getElementById('w-news-val').textContent = n + '%';
+  document.getElementById('w-tech-val').textContent = te + '%';
+  document.getElementById('w-macro-val').textContent = m + '%';
+  document.getElementById('w-fund-val').textContent = f + '%';
+
+  // visual bar
+  document.getElementById('wb-news').style.width = (n/total*100).toFixed(1)+'%';
+  document.getElementById('wb-tech').style.width = (te/total*100).toFixed(1)+'%';
+  document.getElementById('wb-macro').style.width = (m/total*100).toFixed(1)+'%';
+  document.getElementById('wb-fund').style.width = (f/total*100).toFixed(1)+'%';
+
+  // sum badge
+  const badge = document.getElementById('weight-sum-badge');
+  if(badge) badge.textContent = `合计 ${total}`;
+
+  // store normalised values
+  document.getElementById('s-w-news').value  = (n/total).toFixed(3);
+  document.getElementById('s-w-tech').value  = (te/total).toFixed(3);
+  document.getElementById('s-w-macro').value = (m/total).toFixed(3);
+  document.getElementById('s-w-fund').value  = (f/total).toFixed(3);
+}
+
+// ── Save ─────────────────────────────────────────────────────
+async function saveAllSettings(){
+  const btn = document.getElementById('save-btn');
+  const msg = document.getElementById('settings-save-msg');
+  btn.disabled = true;
+  btn.textContent = '保存中…';
+  msg.textContent = '';
+
   const updates = {
-    POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
-    MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
-    ENABLE_SEC: getBoolSeg('cfg-enable-sec'),
-    ENABLE_RSS: getBoolSeg('cfg-enable-rss'),
-    ENABLE_FINNHUB: getBoolSeg('cfg-enable-finnhub'),
-    ENABLE_EARNINGS_RELEASE_SOURCE: getBoolSeg('cfg-enable-earnings'),
+    // Live Trading
+    LIVE_TRADING_TICKERS: document.getElementById('s-tickers-hidden').value,
+    LIVE_MIN_CONFIDENCE: document.getElementById('s-min-confidence').value,
+    LIVE_MAX_POSITION_PCT: document.getElementById('s-max-position').value,
+    LIVE_OPEN_CYCLE_SECONDS: document.getElementById('s-open-cycle').value,
+    LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('s-closed-cycle').value,
+    LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('s-ticker-cooldown').value,
+    LIVE_EVENT_DRIVEN_MODE: document.getElementById('s-event-driven').checked,
+    LIVE_ALLOW_PREMARKET: document.getElementById('s-allow-premarket').checked,
+    FLOW_CONFIRMATION_ENABLED: document.getElementById('s-flow-enabled').checked,
+    FLOW_CONFIRMATION_SOFT_GATE: document.getElementById('s-flow-soft-gate').checked,
+    // Agent weights (normalised)
+    AGENT_WEIGHT_NEWS: document.getElementById('s-w-news').value,
+    AGENT_WEIGHT_TECHNICALS: document.getElementById('s-w-tech').value,
+    AGENT_WEIGHT_MACRO: document.getElementById('s-w-macro').value,
+    AGENT_WEIGHT_FUNDAMENTALS: document.getElementById('s-w-fund').value,
+    // LLM
     LLM_MODEL: document.getElementById('cfg-llm-model').value.trim(),
     LLM_BASE_URL: document.getElementById('cfg-llm-base-url').value.trim(),
+    // Data Sources
+    ENABLE_FINNHUB: document.getElementById('s-enable-finnhub').checked,
+    ENABLE_RSS: document.getElementById('s-enable-rss').checked,
+    ENABLE_SEC: document.getElementById('s-enable-sec').checked,
+    ENABLE_EARNINGS_RELEASE_SOURCE: document.getElementById('s-enable-earnings').checked,
+    POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
   };
-
-  const extra_updates = document.getElementById('cfg-extra-updates').value;
-  const resultEl = document.getElementById('settings-save-result');
-  resultEl.textContent = '保存中...';
-  resultEl.className = 'mt8 text-sm text-muted';
 
   try{
     const resp = await apiFetch('/api/settings/editable', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ updates, extra_updates }),
+      body: JSON.stringify({ updates }),
       timeout: 20000,
     });
-    resultEl.textContent = `${resp.message || '保存成功'} 已写入 keys: ${(resp.written_keys || []).join(', ')}`;
-    resultEl.className = 'mt8 text-sm';
-    clearViewCache('ui:');
+    msg.textContent = `已写入 ${(resp.written_keys||[]).length} 个配置项`;
+    msg.style.color = 'var(--green)';
     toast('配置已保存到 .env', 'success');
-    if(resp.settings){
-      applyEditorSettings({ editable: resp.settings });
-    }
-    if(resp.worker_restart_required){
-      toast('请重启 worker/supervisor 以完全生效', 'warn');
-    }
-  }catch(err){
-    resultEl.textContent = `保存失败: ${err.message}`;
-    resultEl.className = 'mt8 text-sm text-red';
+    if(resp.worker_restart_required) toast('重启 worker 后后台参数完全生效', 'warn');
+    clearViewCache?.('ui:');
+  } catch(err){
+    msg.textContent = `保存失败: ${err.message}`;
+    msg.style.color = 'var(--red)';
     toast(`保存失败: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '保存所有配置';
   }
 }
 
-applyEditorSettings({ editable: {
-  LLM_MODEL: document.getElementById('cfg-llm-model').value,
-  LLM_BASE_URL: document.getElementById('cfg-llm-base-url').value,
-  POLL_INTERVAL_SECONDS: document.getElementById('cfg-poll-interval').value,
-  MIN_TRADE_CONFIDENCE: document.getElementById('cfg-min-trade-confidence').value,
-  ENABLE_SEC: {{ 'true' if settings.enable_sec else 'false' }},
-  ENABLE_RSS: {{ 'true' if settings.enable_rss else 'false' }},
-  ENABLE_FINNHUB: {{ 'true' if settings.enable_finnhub else 'false' }},
-  ENABLE_EARNINGS_RELEASE_SOURCE: {{ 'true' if settings.enable_earnings_release_source else 'false' }},
-}});
+// ── Reload from backend ──────────────────────────────────────
+async function reloadAllSettings(){
+  try{
+    const resp = await apiFetch('/api/settings/editable', { timeout: 12000 });
+    applyAll(resp?.editable || {});
+    toast('设置已从后端刷新', 'success');
+  } catch(e){ toast(`刷新失败: ${e.message}`, 'error'); }
+}
 
-document.getElementById('settings-editor-form').addEventListener('submit', saveSettings);
+function applyAll(ed){
+  // Tickers
+  sTickers = parseCsv(ed.LIVE_TRADING_TICKERS||'', 'upper');
+  document.getElementById('s-tickers-hidden').value = sTickers.join(',');
+  renderTickerChips();
+
+  // Risk sliders
+  const conf = parseInt(ed.LIVE_MIN_CONFIDENCE ?? 50);
+  document.getElementById('s-min-confidence-range').value = conf;
+  document.getElementById('s-min-confidence-val').textContent = conf;
+  document.getElementById('s-min-confidence').value = conf;
+
+  const pos = Math.round((parseFloat(ed.LIVE_MAX_POSITION_PCT ?? 0.1)) * 100);
+  document.getElementById('s-max-position-range').value = pos;
+  document.getElementById('s-max-position-val').textContent = pos + '%';
+  document.getElementById('s-max-position').value = (pos/100).toFixed(2);
+
+  // Timing
+  setVal('s-open-cycle', ed.LIVE_OPEN_CYCLE_SECONDS ?? 900);
+  setVal('s-closed-cycle', ed.LIVE_CLOSED_CYCLE_SECONDS ?? 7200);
+  setVal('s-ticker-cooldown', ed.LIVE_TICKER_COOLDOWN_MINUTES ?? 60);
+
+  // Flags
+  setChk('s-event-driven', ed.LIVE_EVENT_DRIVEN_MODE !== false);
+  setChk('s-allow-premarket', !!ed.LIVE_ALLOW_PREMARKET);
+  setChk('s-flow-enabled', ed.FLOW_CONFIRMATION_ENABLED !== false);
+  setChk('s-flow-soft-gate', ed.FLOW_CONFIRMATION_SOFT_GATE !== false);
+
+  // Weights
+  setRange('w-news',  Math.round((parseFloat(ed.AGENT_WEIGHT_NEWS ?? 0.6)) * 100));
+  setRange('w-tech',  Math.round((parseFloat(ed.AGENT_WEIGHT_TECHNICALS ?? 0.2)) * 100));
+  setRange('w-macro', Math.round((parseFloat(ed.AGENT_WEIGHT_MACRO ?? 0.1)) * 100));
+  setRange('w-fund',  Math.round((parseFloat(ed.AGENT_WEIGHT_FUNDAMENTALS ?? 0.1)) * 100));
+  onWeightChange();
+
+  // LLM
+  setVal('cfg-llm-model', ed.LLM_MODEL ?? '');
+  setVal('cfg-llm-base-url', ed.LLM_BASE_URL ?? '');
+
+  // Data Sources
+  setChk('s-enable-finnhub', ed.ENABLE_FINNHUB !== false);
+  setChk('s-enable-rss', ed.ENABLE_RSS !== false);
+  setChk('s-enable-sec', ed.ENABLE_SEC !== false);
+  setChk('s-enable-earnings', !!ed.ENABLE_EARNINGS_RELEASE_SOURCE);
+  setVal('cfg-poll-interval', ed.POLL_INTERVAL_SECONDS ?? 60);
+}
+
+function setVal(id, v){ const el=document.getElementById(id); if(el) el.value=v; }
+function setChk(id, v){ const el=document.getElementById(id); if(el) el.checked=!!v; }
+function setRange(id, v){ const el=document.getElementById(id); if(el) el.value=v; }
+function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ── Boot ─────────────────────────────────────────────────────
+(function init(){
+  sTickers = parseCsv('{{ led.get("LIVE_TRADING_TICKERS", "") }}', 'upper');
+  document.getElementById('s-tickers-hidden').value = sTickers.join(',');
+  renderTickerChips();
+  onWeightChange();
+
+  // dim soft gate row when flow disabled
+  document.getElementById('s-flow-enabled').addEventListener('change', function(){
+    const row = document.getElementById('s-flow-soft-gate-row');
+    if(row) row.style.opacity = this.checked ? '1' : '.45';
+  });
+  document.getElementById('s-flow-enabled').dispatchEvent(new Event('change'));
+})();
 </script>
 {% endblock %}

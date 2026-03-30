@@ -156,6 +156,7 @@ def settings_page(request: Request, settings: Settings = Depends(get_app_setting
             "title": "Settings",
             "settings": settings,
             "settings_editor": editable_snapshot,
+            "live_editor": editable_snapshot,
         },
     )
 
