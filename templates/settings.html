@@ -302,6 +302,16 @@
     </div>
     <div class="setting-row">
       <div>
+        <div class="setting-label">Finnhub Company News（Live）</div>
+        <div class="setting-desc">Live 周期中逐 Ticker 拉取定向公司新闻（Tier 1 核心信号）</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-enable-finnhub-company-news-live" {% if led.get('ENABLE_FINNHUB_COMPANY_NEWS_LIVE', true) %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="setting-row">
+      <div>
         <div class="setting-label">资金流向确认</div>
         <div class="setting-desc">要求成交量/异常资金流向支撑信号后再执行</div>
       </div>
@@ -609,6 +619,7 @@ async function saveAllSettings(){
     LIVE_ALLOW_PREMARKET: document.getElementById('s-allow-premarket').checked,
     FLOW_CONFIRMATION_ENABLED: document.getElementById('s-flow-enabled').checked,
     FLOW_CONFIRMATION_SOFT_GATE: document.getElementById('s-flow-soft-gate').checked,
+    ENABLE_FINNHUB_COMPANY_NEWS_LIVE: document.getElementById('s-enable-finnhub-company-news-live').checked,
     // Agent weights (normalised)
     AGENT_WEIGHT_NEWS: document.getElementById('s-w-news').value,
     AGENT_WEIGHT_TECHNICALS: document.getElementById('s-w-tech').value,
@@ -683,6 +694,7 @@ function applyAll(ed){
   setChk('s-allow-premarket', !!ed.LIVE_ALLOW_PREMARKET);
   setChk('s-flow-enabled', ed.FLOW_CONFIRMATION_ENABLED !== false);
   setChk('s-flow-soft-gate', ed.FLOW_CONFIRMATION_SOFT_GATE !== false);
+  setChk('s-enable-finnhub-company-news-live', ed.ENABLE_FINNHUB_COMPANY_NEWS_LIVE !== false);
 
   // Weights
   setRange('w-news',  Math.round((parseFloat(ed.AGENT_WEIGHT_NEWS ?? 0.6)) * 100));
