@@ -247,6 +247,7 @@ tests/           pytest 测试集
 > - `/settings` 页面已支持写入 `.env`；保存后 web 端会热加载，worker/supervisor 需要重启才能完全应用后台参数变更
 > - `/api/live/set_enabled` 现在会按当前数据库连接重试写入；若 SQLite 仍被长事务占住，会返回 `503 database is busy`，而不是直接 500
 > - worker 遇到短时 SQLite 锁时会把受影响的 `RUNNING` command 重新排回 `PENDING`，避免残留假运行状态
+> - 修复 `/live` 页面模板作用域问题：`scripts` block 不再引用未定义的 `led`，避免打开 Live 页面直接 `500 Internal Server Error`
 > - worker runtime API 现在统一返回带 `+00:00` 的 UTC 时间；前端 “x ago” 不会再把 SQLite 的 naive UTC 误当成上海本地时间
 > - `live_cycle` 与高频 scheduler 现在走 `fast ingestion`：跳过 SEC 重扫描和 SEC summary LLM，避免把 live command queue 长时间堵死
 > - `Enable Live` 不再先排重型 ingestion；现在优先 `refresh_bars + live_cycle`

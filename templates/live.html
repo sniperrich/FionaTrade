@@ -464,6 +464,7 @@
 
 {% endblock %}
 {% block scripts %}
+{% set led = live_editor.editable if live_editor else {} %}
 <script>
 const LIVE_CACHE_PREFIX = 'ui:live_snapshot:v4:';
 const DEFAULT_DISABLE_MODE = '{{ led.get("LIVE_DISABLE_DEFAULT_MODE", "CANCEL_ORDERS") }}';
