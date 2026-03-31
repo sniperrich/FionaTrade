@@ -64,13 +64,20 @@ class OvernightRiskService:
         equity = OvernightRiskService._as_float(account.get("equity"))
         cash = OvernightRiskService._as_float(account.get("cash"))
         buying_power = OvernightRiskService._as_float(account.get("buying_power"))
+        last_equity_raw = account.get("last_equity")
+        last_equity = OvernightRiskService._as_float(last_equity_raw) if last_equity_raw is not None else None
         gross_exposure = sum(abs(OvernightRiskService._as_float(pos.market_value)) for pos in positions)
         net_exposure = sum(OvernightRiskService._as_float(pos.market_value) for pos in positions)
         unrealized_pnl_total = sum(OvernightRiskService._as_float(pos.unrealized_pnl) for pos in positions)
+        daily_total_pnl = (equity - last_equity) if last_equity not in {None, 0.0} else None
+        daily_total_pnl_pct = ((equity / last_equity) - 1.0) if last_equity not in {None, 0.0} else None
         return {
             "equity": equity,
             "cash": cash,
             "buying_power": buying_power,
+            "last_equity": last_equity,
+            "daily_total_pnl": daily_total_pnl,
+            "daily_total_pnl_pct": daily_total_pnl_pct,
             "gross_exposure": gross_exposure,
             "net_exposure": net_exposure,
             "gross_exposure_pct": (gross_exposure / equity) if equity > 0 else None,
@@ -551,6 +558,9 @@ class OvernightRiskService:
             "equity": snapshot.get("equity"),
             "cash": snapshot.get("cash"),
             "buying_power": snapshot.get("buying_power"),
+            "last_equity": snapshot.get("last_equity"),
+            "daily_total_pnl": snapshot.get("daily_total_pnl"),
+            "daily_total_pnl_pct": snapshot.get("daily_total_pnl_pct"),
             "gross_exposure": snapshot.get("gross_exposure"),
             "net_exposure": snapshot.get("net_exposure"),
             "gross_exposure_pct": snapshot.get("gross_exposure_pct"),

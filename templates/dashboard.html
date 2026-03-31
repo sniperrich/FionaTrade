@@ -6,7 +6,7 @@
 </div>
 
 <!-- Portfolio stats (live from Alpaca) -->
-<div class="grid g4 mb16" id="portfolio-stats">
+<div class="grid mb16" id="portfolio-stats" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px">
   <div class="card card-sm">
     <div class="card-title">Portfolio Value</div>
     <div class="card-value" id="stat-equity">—</div>
@@ -26,6 +26,11 @@
     <div class="card-title">Unrealized P&L</div>
     <div class="card-value" id="stat-pnl">—</div>
     <div class="card-sub" id="stat-pnl-sub">—</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Today Total P&amp;L</div>
+    <div class="card-value" id="stat-day-pnl">—</div>
+    <div class="card-sub" id="stat-day-pnl-sub">—</div>
   </div>
 </div>
 
@@ -196,7 +201,9 @@ async function loadPortfolio(data=null) {
   try {
     const d = data || await apiFetch('/api/live/positions');
     document.getElementById('stat-equity').textContent = fmt$(d.equity);
-    document.getElementById('stat-equity-sub').textContent = 'Buying power: '+fmt$(d.buying_power);
+    document.getElementById('stat-equity-sub').textContent = d.last_equity != null
+      ? `Last equity: ${fmt$(d.last_equity)}`
+      : 'Buying power: '+fmt$(d.buying_power);
     document.getElementById('stat-cash').textContent = fmt$(d.cash);
     document.getElementById('stat-bp-sub').textContent = 'Available cash';
     document.getElementById('stat-positions').textContent = d.positions.length;
@@ -206,8 +213,20 @@ async function loadPortfolio(data=null) {
     pnlEl.textContent = fmt$(totalPnl);
     pnlEl.style.color = totalPnl>=0?'var(--green)':'var(--red)';
     document.getElementById('stat-pnl-sub').textContent = d.risk_source_label || '已有持仓浮盈亏';
+    const dayPnlEl = document.getElementById('stat-day-pnl');
+    if(d.daily_total_pnl == null){
+      dayPnlEl.textContent = '—';
+      dayPnlEl.style.color = '';
+      document.getElementById('stat-day-pnl-sub').textContent = 'Broker did not return last_equity';
+    } else {
+      const dayPnl = Number(d.daily_total_pnl);
+      dayPnlEl.textContent = fmt$(dayPnl);
+      dayPnlEl.style.color = dayPnl>=0?'var(--green)':'var(--red)';
+      const pct = d.daily_total_pnl_pct != null ? `${dayPnl>=0?'+':''}${(Number(d.daily_total_pnl_pct) * 100).toFixed(2)}%` : '—';
+      document.getElementById('stat-day-pnl-sub').textContent = `含现金与持仓重估 · ${pct}`;
+    }
   } catch(e) {
-    ['stat-equity','stat-cash','stat-positions','stat-pnl'].forEach(id=>{
+    ['stat-equity','stat-cash','stat-positions','stat-pnl','stat-day-pnl'].forEach(id=>{
       document.getElementById(id).textContent = 'N/A';
     });
   }

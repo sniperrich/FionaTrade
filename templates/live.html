@@ -46,7 +46,7 @@
 </div>
 
 <!-- Portfolio row -->
-<div class="grid g4 mb16">
+<div class="grid mb16" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px">
   <div class="card card-sm">
     <div class="card-title">Equity</div>
     <div class="card-value" id="eq-val">—</div>
@@ -61,6 +61,11 @@
     <div class="card-title">Unrealized P&L</div>
     <div class="card-value" id="upnl-val">—</div>
     <div class="card-sub" id="upnl-sub">—</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Today Total P&amp;L</div>
+    <div class="card-value" id="day-pnl-val">—</div>
+    <div class="card-sub" id="day-pnl-sub">Equity - last equity</div>
   </div>
   <div class="card card-sm">
     <div class="card-title">Open Orders</div>
@@ -686,7 +691,7 @@ async function loadPositions(data=null){
     const d = data || await apiFetch('/api/live/positions');
     positionState = d;
     document.getElementById('eq-val').textContent=fmt$(d.equity);
-    document.getElementById('eq-sub').textContent='Equity';
+    document.getElementById('eq-sub').textContent=d.last_equity != null ? `Last equity: ${fmt$(d.last_equity)}` : 'Current total equity';
     document.getElementById('cash-val').textContent=fmt$(d.cash);
     document.getElementById('cash-sub').textContent='BP: '+fmt$(d.buying_power);
     const upnl=d.unrealized_pnl_total ?? d.positions.reduce((s,p)=>s+p.unrealized_pnl,0);
@@ -694,6 +699,18 @@ async function loadPositions(data=null){
     el.textContent=fmt$(upnl);
     el.style.color=upnl>=0?'var(--green)':'var(--red)';
     document.getElementById('upnl-sub').textContent=d.risk_source_label || '已有持仓浮盈亏';
+    const dayPnl = Number(d.daily_total_pnl ?? 0);
+    const dayPnlEl=document.getElementById('day-pnl-val');
+    if(d.daily_total_pnl == null){
+      dayPnlEl.textContent='—';
+      dayPnlEl.style.color='';
+      document.getElementById('day-pnl-sub').textContent='Broker did not return last_equity';
+    } else {
+      dayPnlEl.textContent=fmt$(dayPnl);
+      dayPnlEl.style.color=dayPnl>=0?'var(--green)':'var(--red)';
+      const dayPct = d.daily_total_pnl_pct != null ? `${dayPnl>=0?'+':''}${(Number(d.daily_total_pnl_pct) * 100).toFixed(2)}%` : '—';
+      document.getElementById('day-pnl-sub').textContent=`含现金与持仓重估 · ${dayPct}`;
+    }
     document.getElementById('orders-count').textContent=d.open_orders_count ?? '—';
     document.getElementById('orders-sub').textContent=(d.open_orders_count ?? 0) === 1 ? '1 open order' : `${d.open_orders_count ?? 0} open orders`;
     document.getElementById('gross-exposure-val').textContent=fmt$(d.gross_exposure);

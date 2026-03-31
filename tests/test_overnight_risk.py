@@ -15,12 +15,15 @@ def test_summarize_account_includes_exposure_and_guard(settings) -> None:
     ]
 
     summary = OvernightRiskService.summarize_account(
-        {"equity": "100000", "cash": "25000", "buying_power": "200000"},
+        {"equity": "100000", "last_equity": "99500", "cash": "25000", "buying_power": "200000"},
         positions,
         open_orders_count=3,
         settings=settings,
     )
 
+    assert summary["last_equity"] == 99500.0
+    assert summary["daily_total_pnl"] == 500.0
+    assert round(summary["daily_total_pnl_pct"], 6) == round((100000 / 99500) - 1.0, 6)
     assert summary["gross_exposure"] == 2030.0
     assert summary["net_exposure"] == 70.0
     assert summary["unrealized_pnl_total"] == 70.0

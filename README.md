@@ -131,7 +131,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | 路径 | 功能 |
 |------|------|
 | `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot + worker/queue 状态** |
-| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、Enable/Disable Live 停机模式、`Flatten All` 一键平仓、持仓风险摘要（gross/net exposure、position risk P&L、overnight guard）、runtime activity、worker heartbeat、command queue、worker history、local bar cache、ticker K-line、entry plan 面板、entry plan trigger log、成交历史翻页（策略参数改在 `/settings`） |
+| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、Enable/Disable Live 停机模式、`Flatten All` 一键平仓、持仓风险摘要（gross/net exposure、position risk P&L、today total P&L、overnight guard）、runtime activity、worker heartbeat、command queue、worker history、local bar cache、ticker K-line、entry plan 面板、entry plan trigger log、成交历史翻页（策略参数改在 `/settings`） |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页、**Trigger Event 证据链可视化 + 关联 Live Trade 明细** |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**用途分层（RAW/Event/Agent/Live）**、按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页 |
 | `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果列表与快速检查 |
