@@ -228,6 +228,8 @@ class Settings(BaseSettings):
     finnhub_company_news_live_lookback_days: int = 2
     # Close-window overnight guard; runs independently from live enable/disable.
     live_overnight_risk_enabled: bool = True
+    # When enabled, force full flatten before close instead of reduce/alert.
+    live_flatten_before_close: bool = False
     live_overnight_mode: str = "REDUCE"
     live_overnight_max_gross_exposure_pct: float = 0.25
     live_overnight_rebalance_minutes_before_close: int = 5

@@ -520,13 +520,14 @@ function renderPositionRiskBanner(){
   }
   const guardEnabled=!!liveStatusState.live_overnight_risk_enabled;
   const guardMode=liveStatusState.live_overnight_mode || 'REDUCE';
+  const flattenBeforeClose=!!liveStatusState.live_flatten_before_close;
   const guardCap=liveStatusState.live_overnight_max_gross_exposure_pct != null
     ? `${Math.round(Number(liveStatusState.live_overnight_max_gross_exposure_pct) * 100)}% gross`
     : '—';
   text.textContent =
     `Agent 已停止，但账户仍暴露在已有仓位/挂单风险中。当前还有 ${positionsCount} 个持仓、${openOrdersCount} 个挂单。`
     + (guardEnabled
-      ? ` 收盘前仍会执行隔夜风险控制（${guardMode} / ${guardCap}）。`
+      ? ` 收盘前仍会执行隔夜风险控制（${flattenBeforeClose ? 'FLATTEN' : guardMode} / ${guardCap}）。`
       : ' 隔夜风险控制当前关闭。');
   banner.style.display='block';
 }
@@ -708,9 +709,10 @@ async function loadPositions(data=null){
     riskPnlEl.style.color=upnl>=0?'var(--green)':'var(--red)';
     document.getElementById('position-risk-pnl-sub').textContent=d.risk_source_label || '已有持仓浮盈亏';
     const guard=d.overnight_guard || {};
-    document.getElementById('overnight-guard-val').textContent=guard.enabled ? (guard.mode || 'REDUCE') : 'OFF';
+    const flattenBeforeClose=!!guard.flatten_before_close;
+    document.getElementById('overnight-guard-val').textContent=guard.enabled ? (flattenBeforeClose ? 'FLATTEN' : (guard.mode || 'REDUCE')) : 'OFF';
     document.getElementById('overnight-guard-sub').textContent=guard.enabled
-      ? `<= ${Math.round(Number(guard.max_gross_exposure_pct || 0) * 100)}% gross · ${guard.rebalance_minutes_before_close || 5}m before close`
+      ? `${flattenBeforeClose ? '收盘前全部平仓' : `<= ${Math.round(Number(guard.max_gross_exposure_pct || 0) * 100)}% gross`} · ${guard.rebalance_minutes_before_close || 5}m before close`
       : 'Overnight guard disabled';
     document.getElementById('pos-updated').textContent='Updated '+new Date().toLocaleTimeString();
     if(!d.positions.length){
@@ -919,10 +921,10 @@ async function loadMarketStatus(data=null){
     const guardVal=document.getElementById('overnight-guard-val');
     const guardSub=document.getElementById('overnight-guard-sub');
     if(guardVal && guardSub){
-      guardVal.textContent=d.live_overnight_risk_enabled ? (d.live_overnight_mode || 'REDUCE') : 'OFF';
+      guardVal.textContent=d.live_overnight_risk_enabled ? (d.live_flatten_before_close ? 'FLATTEN' : (d.live_overnight_mode || 'REDUCE')) : 'OFF';
       const lastState=d.overnight_state || {};
       guardSub.textContent=d.live_overnight_risk_enabled
-        ? `<= ${Math.round(Number(d.live_overnight_max_gross_exposure_pct || 0) * 100)}% gross · ${d.live_overnight_rebalance_minutes_before_close || 5}m before close`
+        ? `${d.live_flatten_before_close ? '收盘前全部平仓' : `<= ${Math.round(Number(d.live_overnight_max_gross_exposure_pct || 0) * 100)}% gross`} · ${d.live_overnight_rebalance_minutes_before_close || 5}m before close`
           + (lastState.executed_et_date ? ` · last ${lastState.executed_et_date}` : '')
         : 'Overnight guard disabled';
     }

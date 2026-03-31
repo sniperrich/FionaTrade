@@ -1210,7 +1210,9 @@ def live_status(
         "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
         "live_allowed_sources": list(getattr(settings, "live_allowed_sources", []) or []),
         "live_overnight_risk_enabled": bool(getattr(settings, "live_overnight_risk_enabled", True)),
-        "live_overnight_mode": OvernightRiskService.normalize_overnight_mode(
+        "live_flatten_before_close": bool(getattr(settings, "live_flatten_before_close", False)),
+        "live_overnight_mode": OvernightRiskService.effective_overnight_mode(settings),
+        "live_overnight_mode_configured": OvernightRiskService.normalize_overnight_mode(
             getattr(settings, "live_overnight_mode", "REDUCE"),
             default="REDUCE",
         ),

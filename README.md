@@ -137,7 +137,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果列表与快速检查 |
 | `/backtests/{run_id}` | Backtest 详情页：大图模式（收益率曲线 + 回撤曲线）+ Sharpe/回撤/PF + 全量交易明细 |
 | `/attribution` | 模块归因面板：Agent 边际贡献、事件类型/source/source tier/flow bucket 分桶、过滤器价值排行、评分回填 |
-| `/settings` | 统一配置中心：LLM 网关、采集周期、数据源开关 + Live 策略参数（ticker/source 白名单、节奏、flow gate、agent 权重、执行内核），并回显当前值（已选 ticker/source 等） |
+| `/settings` | 统一配置中心：LLM 网关、采集周期、数据源开关 + Live 策略参数（ticker/source 白名单、节奏、flow gate、agent 权重、执行内核、收盘前是否平仓），并回显当前值（已选 ticker/source 等） |
 
 ---
 
@@ -243,7 +243,7 @@ tests/           pytest 测试集
 > - `Disable Live` 现在会取消尚未执行的 live 相关命令，避免关闭后旧的 `refresh_bars / live_cycle / ingestion` 继续跑
 > - `Disable Live` 现在还支持停机模式：只停新单 / 取消挂单 / 全部平仓
 > - `/api/live/positions` 返回的 `risk_source_label=已有持仓浮盈亏`，用于前端明确区分“现有仓位风险”与“agent 偷跑”
-> - worker 新增 `overnight_risk_control` 定时任务：默认在 `15:55-16:00 ET` 执行一次，使用 `LIVE_OVERNIGHT_*` 配置限制隔夜敞口
+> - worker 新增 `overnight_risk_control` 定时任务：默认在 `15:55-16:00 ET` 执行一次，使用 `LIVE_OVERNIGHT_*` 配置限制隔夜敞口；若 `LIVE_FLATTEN_BEFORE_CLOSE=true`，则收盘前直接全平
 > - `/settings` 页面已支持写入 `.env`；保存后 web 端会热加载，worker/supervisor 需要重启才能完全应用后台参数变更
 > - `/api/live/set_enabled` 现在会按当前数据库连接重试写入；若 SQLite 仍被长事务占住，会返回 `503 database is busy`，而不是直接 500
 > - worker 遇到短时 SQLite 锁时会把受影响的 `RUNNING` command 重新排回 `PENDING`，避免残留假运行状态

@@ -28,7 +28,15 @@ def test_summarize_account_includes_exposure_and_guard(settings) -> None:
     assert summary["open_orders_count"] == 3
     assert summary["risk_source_label"] == "已有持仓浮盈亏"
     assert summary["overnight_guard"]["enabled"] is True
+    assert summary["overnight_guard"]["flatten_before_close"] is False
     assert summary["overnight_guard"]["mode"] == "REDUCE"
+
+
+def test_effective_overnight_mode_prefers_flatten_toggle(settings) -> None:
+    settings.live_flatten_before_close = True
+    settings.live_overnight_mode = "REDUCE"
+
+    assert OvernightRiskService.effective_overnight_mode(settings) == "FLATTEN"
 
 
 def test_build_reduce_plan_scales_long_and_short_positions() -> None:

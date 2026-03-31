@@ -43,6 +43,15 @@ class OvernightRiskService:
         mode = str(value or default or "REDUCE").strip().upper()
         return mode if mode in _OVERNIGHT_MODES else "REDUCE"
 
+    @classmethod
+    def effective_overnight_mode(cls, settings: Settings) -> str:
+        if bool(getattr(settings, "live_flatten_before_close", False)):
+            return "FLATTEN"
+        return cls.normalize_overnight_mode(
+            getattr(settings, "live_overnight_mode", "REDUCE"),
+            default="REDUCE",
+        )
+
     @staticmethod
     def summarize_account(
         account: dict[str, Any] | None,
@@ -72,10 +81,8 @@ class OvernightRiskService:
             "risk_source_label": "已有持仓浮盈亏",
             "overnight_guard": {
                 "enabled": bool(getattr(settings, "live_overnight_risk_enabled", True)),
-                "mode": OvernightRiskService.normalize_overnight_mode(
-                    getattr(settings, "live_overnight_mode", "REDUCE"),
-                    default="REDUCE",
-                ),
+                "flatten_before_close": bool(getattr(settings, "live_flatten_before_close", False)),
+                "mode": OvernightRiskService.effective_overnight_mode(settings),
                 "max_gross_exposure_pct": float(
                     getattr(settings, "live_overnight_max_gross_exposure_pct", 0.25) or 0.25
                 ),
@@ -208,10 +215,7 @@ class OvernightRiskService:
     ) -> dict[str, Any]:
         msi = market_session_info()
         window = self.close_window_state(msi)
-        mode = self.normalize_overnight_mode(
-            getattr(self.settings, "live_overnight_mode", "REDUCE"),
-            default="REDUCE",
-        )
+        mode = self.effective_overnight_mode(self.settings)
         result: dict[str, Any] = {
             "trigger": trigger,
             "mode": mode,

@@ -310,6 +310,16 @@
         <div class="text-muted text-xs mt4">从 WebUI 点击 Disable Live 时的默认处理动作</div>
       </div>
       <div class="form-group">
+        <label>收盘前全部平仓</label>
+        <label class="toggle" style="margin-top:8px">
+          <input type="checkbox" id="s-flatten-before-close" {% if led.get('LIVE_FLATTEN_BEFORE_CLOSE', false) %}checked{% endif %} />
+          <span class="toggle-track"></span>
+        </label>
+        <div class="text-muted text-xs mt8">开启后，收盘前风控会强制 FLATTEN，优先级高于下方隔夜模式</div>
+      </div>
+    </div>
+    <div class="sg2 mt12">
+      <div class="form-group">
         <label>隔夜模式</label>
         <select id="s-overnight-mode">
           <option value="REDUCE" {% if led.get('LIVE_OVERNIGHT_MODE', 'REDUCE') == 'REDUCE' %}selected{% endif %}>REDUCE</option>
@@ -813,6 +823,7 @@ async function saveAllSettings(){
     LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS: document.getElementById('s-portfolio-llm-timeout').value,
     LIVE_PORTFOLIO_LLM_MAX_RETRIES: document.getElementById('s-portfolio-llm-retries').value,
     LIVE_OVERNIGHT_RISK_ENABLED: document.getElementById('s-overnight-enabled').checked,
+    LIVE_FLATTEN_BEFORE_CLOSE: document.getElementById('s-flatten-before-close').checked,
     LIVE_OVERNIGHT_MODE: document.getElementById('s-overnight-mode').value,
     LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT: document.getElementById('s-overnight-max-gross').value,
     LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE: document.getElementById('s-overnight-rebalance-min').value,
@@ -908,11 +919,13 @@ function applyAll(ed){
 
   // Flags
   setChk('s-overnight-enabled', ed.LIVE_OVERNIGHT_RISK_ENABLED !== false);
+  setChk('s-flatten-before-close', !!ed.LIVE_FLATTEN_BEFORE_CLOSE);
   setChk('s-overnight-run-when-disabled', ed.LIVE_OVERNIGHT_RUN_WHEN_DISABLED !== false);
   setChk('s-event-driven', ed.LIVE_EVENT_DRIVEN_MODE !== false);
   setChk('s-allow-premarket', !!ed.LIVE_ALLOW_PREMARKET);
   setChk('s-flow-enabled', ed.FLOW_CONFIRMATION_ENABLED !== false);
   setChk('s-flow-soft-gate', ed.FLOW_CONFIRMATION_SOFT_GATE !== false);
+  syncFlattenBeforeCloseUi();
   setChk('s-enable-finnhub-company-news-live', ed.ENABLE_FINNHUB_COMPANY_NEWS_LIVE !== false);
 
   // Weights
@@ -939,6 +952,15 @@ function setChk(id, v){ const el=document.getElementById(id); if(el) el.checked=
 function setRange(id, v){ const el=document.getElementById(id); if(el) el.value=v; }
 function setText(id, v){ const el=document.getElementById(id); if(el) el.textContent=String(v ?? ''); }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function syncFlattenBeforeCloseUi(){
+  const flatten=document.getElementById('s-flatten-before-close');
+  const mode=document.getElementById('s-overnight-mode');
+  const maxGross=document.getElementById('s-overnight-max-gross');
+  if(!flatten) return;
+  const locked=!!flatten.checked;
+  if(mode) mode.disabled=locked;
+  if(maxGross) maxGross.disabled=locked;
+}
 
 // ── Boot ─────────────────────────────────────────────────────
 (function init(){
@@ -956,6 +978,8 @@ function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;
     if(row) row.style.opacity = this.checked ? '1' : '.45';
   });
   document.getElementById('s-flow-enabled').dispatchEvent(new Event('change'));
+  document.getElementById('s-flatten-before-close').addEventListener('change', syncFlattenBeforeCloseUi);
+  syncFlattenBeforeCloseUi();
 })();
 </script>
 {% endblock %}

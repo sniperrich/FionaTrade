@@ -104,6 +104,7 @@ def test_env_settings_apply_updates_supports_disable_mode_and_overnight_guard(tm
         updates={
             "LIVE_DISABLE_DEFAULT_MODE": "flatten_all",
             "LIVE_OVERNIGHT_RISK_ENABLED": True,
+            "LIVE_FLATTEN_BEFORE_CLOSE": True,
             "LIVE_OVERNIGHT_MODE": "alert_only",
             "LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT": "0.25",
             "LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE": 5,
@@ -113,6 +114,7 @@ def test_env_settings_apply_updates_supports_disable_mode_and_overnight_guard(tm
     rendered = env_file.read_text(encoding="utf-8")
     assert "LIVE_DISABLE_DEFAULT_MODE=FLATTEN_ALL" in rendered
     assert "LIVE_OVERNIGHT_RISK_ENABLED=true" in rendered
+    assert "LIVE_FLATTEN_BEFORE_CLOSE=true" in rendered
     assert "LIVE_OVERNIGHT_MODE=ALERT_ONLY" in rendered
     assert "LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT=0.25" in rendered
     assert "LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE=5" in rendered
