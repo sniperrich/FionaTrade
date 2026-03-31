@@ -515,7 +515,7 @@ class LiveTradingService:
     def _effective_fallback_cycle_seconds(self, market_session: str) -> int:
         """Return event-driven fallback interval by market session."""
         legacy = max(60, int(getattr(self.settings, "live_fallback_cycle_seconds", 600) or 600))
-        if str(market_session or "").lower() == "open":
+        if str(market_session or "").lower() in {"open", "market_open"}:
             open_seconds = int(getattr(self.settings, "live_open_cycle_seconds", legacy) or legacy)
             return max(60, open_seconds)
         closed_default = max(legacy, 7200)

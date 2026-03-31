@@ -94,3 +94,26 @@ def test_env_settings_apply_updates_supports_live_sources_and_finnhub_company_ne
     assert "LIVE_ALLOWED_SOURCES=finnhub,sec,cnbc" in rendered
     assert "ENABLE_FINNHUB_COMPANY_NEWS_LIVE=true" in rendered
     assert "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS=3" in rendered
+
+
+def test_env_settings_apply_updates_supports_disable_mode_and_overnight_guard(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    svc = EnvSettingsService(env_path=env_file)
+    svc.apply_updates(
+        updates={
+            "LIVE_DISABLE_DEFAULT_MODE": "flatten_all",
+            "LIVE_OVERNIGHT_RISK_ENABLED": True,
+            "LIVE_OVERNIGHT_MODE": "alert_only",
+            "LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT": "0.25",
+            "LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE": 5,
+            "LIVE_OVERNIGHT_RUN_WHEN_DISABLED": "true",
+        }
+    )
+    rendered = env_file.read_text(encoding="utf-8")
+    assert "LIVE_DISABLE_DEFAULT_MODE=FLATTEN_ALL" in rendered
+    assert "LIVE_OVERNIGHT_RISK_ENABLED=true" in rendered
+    assert "LIVE_OVERNIGHT_MODE=ALERT_ONLY" in rendered
+    assert "LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT=0.25" in rendered
+    assert "LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE=5" in rendered
+    assert "LIVE_OVERNIGHT_RUN_WHEN_DISABLED=true" in rendered

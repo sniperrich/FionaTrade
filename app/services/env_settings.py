@@ -22,6 +22,8 @@ class EnvSettingsService:
         "LIVE_TRADING_ENABLED",
         "LIVE_ALLOW_PREMARKET",
         "LIVE_EVENT_DRIVEN_MODE",
+        "LIVE_OVERNIGHT_RISK_ENABLED",
+        "LIVE_OVERNIGHT_RUN_WHEN_DISABLED",
         "FLOW_CONFIRMATION_ENABLED",
         "FLOW_CONFIRMATION_SOFT_GATE",
     }
@@ -38,11 +40,13 @@ class EnvSettingsService:
         "MIN_TRADE_CONFIDENCE",
         "LIVE_PORTFOLIO_LLM_MAX_RETRIES",
         "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS",
+        "LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE",
     }
     FLOAT_KEYS = {
         "LIVE_MAX_POSITION_PCT",
         "LIVE_DATA_MAX_AGE_MINUTES",
         "LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS",
+        "LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT",
         "AGENT_WEIGHT_NEWS",
         "AGENT_WEIGHT_TECHNICALS",
         "AGENT_WEIGHT_MACRO",
@@ -55,6 +59,10 @@ class EnvSettingsService:
     CSV_LOWER_KEYS = {
         "LIVE_ALLOWED_SOURCES",
     }
+    UPPER_VALUE_KEYS = {
+        "LIVE_DISABLE_DEFAULT_MODE",
+        "LIVE_OVERNIGHT_MODE",
+    }
     KEY_ORDER = [
         "LIVE_TRADING_TICKERS",
         "AGENT_TICKERS_OVERRIDE",
@@ -66,6 +74,7 @@ class EnvSettingsService:
         "LIVE_MIN_CONFIDENCE",
         "MIN_TRADE_CONFIDENCE",
         "LIVE_MAX_POSITION_PCT",
+        "LIVE_DISABLE_DEFAULT_MODE",
         "LIVE_DATA_MAX_AGE_MINUTES",
         "LIVE_EVENT_DRIVEN_MODE",
         "LIVE_FALLBACK_CYCLE_SECONDS",
@@ -74,6 +83,11 @@ class EnvSettingsService:
         "LIVE_FAST_PATH_FUND_TTL_MIN",
         "LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS",
         "LIVE_PORTFOLIO_LLM_MAX_RETRIES",
+        "LIVE_OVERNIGHT_RISK_ENABLED",
+        "LIVE_OVERNIGHT_MODE",
+        "LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT",
+        "LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE",
+        "LIVE_OVERNIGHT_RUN_WHEN_DISABLED",
         "ENABLE_FINNHUB_COMPANY_NEWS_LIVE",
         "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS",
         "FLOW_CONFIRMATION_ENABLED",
@@ -109,6 +123,7 @@ class EnvSettingsService:
                 "LIVE_MIN_CONFIDENCE": settings.live_min_confidence,
                 "MIN_TRADE_CONFIDENCE": settings.min_trade_confidence,
                 "LIVE_MAX_POSITION_PCT": settings.live_max_position_pct,
+                "LIVE_DISABLE_DEFAULT_MODE": settings.live_disable_default_mode,
                 "LIVE_DATA_MAX_AGE_MINUTES": settings.live_data_max_age_minutes,
                 "LIVE_EVENT_DRIVEN_MODE": settings.live_event_driven_mode,
                 "LIVE_FALLBACK_CYCLE_SECONDS": settings.live_fallback_cycle_seconds,
@@ -117,6 +132,11 @@ class EnvSettingsService:
                 "LIVE_FAST_PATH_FUND_TTL_MIN": settings.live_fast_path_fund_ttl_min,
                 "LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS": settings.live_portfolio_llm_timeout_seconds,
                 "LIVE_PORTFOLIO_LLM_MAX_RETRIES": settings.live_portfolio_llm_max_retries,
+                "LIVE_OVERNIGHT_RISK_ENABLED": settings.live_overnight_risk_enabled,
+                "LIVE_OVERNIGHT_MODE": settings.live_overnight_mode,
+                "LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT": settings.live_overnight_max_gross_exposure_pct,
+                "LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE": settings.live_overnight_rebalance_minutes_before_close,
+                "LIVE_OVERNIGHT_RUN_WHEN_DISABLED": settings.live_overnight_run_when_disabled,
                 "ENABLE_FINNHUB_COMPANY_NEWS_LIVE": settings.enable_finnhub_company_news_live,
                 "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS": settings.finnhub_company_news_live_lookback_days,
                 "FLOW_CONFIRMATION_ENABLED": settings.flow_confirmation_enabled,
@@ -196,6 +216,8 @@ class EnvSettingsService:
             return self._normalize_csv_upper(value)
         if key in self.CSV_LOWER_KEYS:
             return self._normalize_csv_lower(value)
+        if key in self.UPPER_VALUE_KEYS:
+            return str(value or "").strip().upper()
         if key in self.BOOL_KEYS:
             if isinstance(value, str):
                 normalized = value.strip().lower()

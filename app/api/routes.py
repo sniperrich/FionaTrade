@@ -20,7 +20,8 @@ from app.monitoring.health import HealthAuditService
 from app.services.env_settings import EnvSettingsService
 from app.services.market_data import MarketDataService
 from app.services.module_attribution import ModuleAttributionService
-from app.services.runtime_control import RuntimeControlService
+from app.services.overnight_risk import OvernightRiskService
+from app.services.runtime_control import CONTROL_OVERNIGHT_RISK_STATE, RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
     COMMAND_RUN_BACKTEST,
@@ -105,6 +106,13 @@ def _normalize_source_list(value: Any) -> list[str]:
     else:
         items = [str(value).strip().lower()]
     return [item for item in items if item]
+
+
+def _resolve_live_disable_mode(body: dict[str, Any], settings: Settings) -> str:
+    return OvernightRiskService.normalize_disable_mode(
+        body.get("disable_mode"),
+        default=getattr(settings, "live_disable_default_mode", "CANCEL_ORDERS"),
+    )
 
 
 def _normalize_int_list(value: Any) -> list[int]:
@@ -1163,6 +1171,8 @@ def live_status(
     control = RuntimeControlService()
     runtime = WorkerRuntimeService()
     enabled = control.get_live_enabled(session, settings)
+    live_control_row = control.get(session, "live_trading_enabled") or {}
+    overnight_state = control.get(session, CONTROL_OVERNIGHT_RISK_STATE) or {}
     worker_bundle = runtime.worker_status_snapshot(session)
     latest_run = WorkerRuntimeService().latest_run(session, "live_cycle")
     last_cycle: dict | None = None
@@ -1188,8 +1198,32 @@ def live_status(
         "ticker_cooldown_minutes": settings.live_ticker_cooldown_minutes,
         "max_position_pct": settings.live_max_position_pct,
         "live_min_confidence": int(getattr(settings, "live_min_confidence", settings.min_trade_confidence)),
+        "live_disable_default_mode": OvernightRiskService.normalize_disable_mode(
+            getattr(settings, "live_disable_default_mode", "CANCEL_ORDERS"),
+            default="CANCEL_ORDERS",
+        ),
+        "last_disable_mode": live_control_row.get("last_disable_mode")
+        or OvernightRiskService.normalize_disable_mode(
+            getattr(settings, "live_disable_default_mode", "CANCEL_ORDERS"),
+            default="CANCEL_ORDERS",
+        ),
         "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
         "live_allowed_sources": list(getattr(settings, "live_allowed_sources", []) or []),
+        "live_overnight_risk_enabled": bool(getattr(settings, "live_overnight_risk_enabled", True)),
+        "live_overnight_mode": OvernightRiskService.normalize_overnight_mode(
+            getattr(settings, "live_overnight_mode", "REDUCE"),
+            default="REDUCE",
+        ),
+        "live_overnight_max_gross_exposure_pct": float(
+            getattr(settings, "live_overnight_max_gross_exposure_pct", 0.25) or 0.25
+        ),
+        "live_overnight_rebalance_minutes_before_close": int(
+            getattr(settings, "live_overnight_rebalance_minutes_before_close", 5) or 5
+        ),
+        "live_overnight_run_when_disabled": bool(
+            getattr(settings, "live_overnight_run_when_disabled", True)
+        ),
+        "overnight_state": overnight_state,
         "enable_finnhub_company_news_live": bool(getattr(settings, "enable_finnhub_company_news_live", True)),
         "finnhub_company_news_live_lookback_days": int(
             getattr(settings, "finnhub_company_news_live_lookback_days", 2) or 2
@@ -1443,23 +1477,28 @@ def live_positions(
     try:
         account = broker.get_account()
         positions = broker.get_all_positions()
+        open_orders = broker.get_open_orders()
+        summary = OvernightRiskService.summarize_account(
+            account,
+            positions,
+            open_orders_count=len(open_orders),
+            settings=settings,
+        )
         return _cache_set(
             "live:positions",
             {
-            "equity": float(account.get("equity", 0)),
-            "cash": float(account.get("cash", 0)),
-            "buying_power": float(account.get("buying_power", 0)),
-            "positions": [
-                {
-                    "ticker": p.ticker,
-                    "quantity": p.quantity,
-                    "avg_cost": p.avg_cost,
-                    "market_value": p.market_value,
-                    "unrealized_pnl": p.unrealized_pnl,
-                    "side": "long" if p.quantity > 0 else "short",
-                }
-                for p in positions
-            ],
+                **summary,
+                "positions": [
+                    {
+                        "ticker": p.ticker,
+                        "quantity": p.quantity,
+                        "avg_cost": p.avg_cost,
+                        "market_value": p.market_value,
+                        "unrealized_pnl": p.unrealized_pnl,
+                        "side": "long" if p.quantity > 0 else "short",
+                    }
+                    for p in positions
+                ],
             },
         )
     except Exception as exc:
@@ -1552,6 +1591,7 @@ def cancel_order(
     try:
         success = broker.cancel_order(order_id)
         _cache_invalidate("live:open_orders")
+        _cache_invalidate("live:positions")
         _cache_invalidate("ui:")
         return {"success": success, "order_id": order_id}
     except Exception as exc:
@@ -1569,6 +1609,7 @@ def cancel_all_orders(
     try:
         cancelled = broker.cancel_all_orders(ticker=ticker)
         _cache_invalidate("live:open_orders")
+        _cache_invalidate("live:positions")
         _cache_invalidate("ui:")
         return {"success": True, "cancelled": cancelled}
     except Exception as exc:
@@ -1591,6 +1632,30 @@ def close_position_endpoint(
         _cache_invalidate("ui:")
         return {"success": True, "ticker": ticker.upper(), "result": result}
     except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
+
+
+@router.post("/live/close_all_positions")
+def close_all_positions_endpoint(
+    session: Session = Depends(get_db),
+    settings: Settings = Depends(get_app_settings),
+) -> dict[str, Any]:
+    """Cancel open orders and flatten all positions immediately."""
+    try:
+        result = OvernightRiskService(settings).flatten_all_positions(
+            session,
+            reason="manual flatten from control plane; cancel all open orders and flatten all positions",
+            cycle_id=f"manual_flatten:{utc_now().strftime('%Y%m%dT%H%M%SZ')}",
+            event_stage="manual_flatten",
+            requested_by="manual_flatten",
+            cancel_orders=True,
+        )
+        session.commit()
+        _cache_invalidate("live:")
+        _cache_invalidate("ui:")
+        return {"success": True, **result}
+    except Exception as exc:
+        session.rollback()
         raise HTTPException(status_code=502, detail=f"Broker error: {exc}")
 
 
@@ -1872,6 +1937,7 @@ def set_live_enabled(
     """Toggle live trading through shared DB runtime control."""
     control = RuntimeControlService()
     enabled = bool(body.get("enabled", True))
+    disable_mode = _resolve_live_disable_mode(body, settings) if not enabled else None
     has_tickers = bool(settings.live_trading_tickers or list(settings.agent_tickers_override or []))
     worker_status = control.get_worker_status(session)
     supervisor_status = control.get_supervisor_status(session)
@@ -1900,7 +1966,13 @@ def set_live_enabled(
         write_control = RuntimeControlService()
         write_runtime = WorkerRuntimeService()
         local_was_enabled = write_control.get_live_enabled(write_session, settings)
-        write_control.set_live_enabled(write_session, settings, enabled, source="api")
+        write_control.set_live_enabled(
+            write_session,
+            settings,
+            enabled,
+            source="api",
+            disable_mode=disable_mode,
+        )
         cancelled_commands = 0
         if enabled and not local_was_enabled:
             today = utc_now().strftime("%Y-%m-%d")
@@ -1949,8 +2021,48 @@ def set_live_enabled(
     _cache_invalidate("live:")
     _cache_invalidate("ui:")
 
+    broker_action: dict[str, Any] | None = None
+    if not enabled:
+        try:
+            if disable_mode == "CANCEL_ORDERS":
+                from app.broker.alpaca import AlpacaBroker
+
+                cancelled = AlpacaBroker(settings).cancel_all_orders()
+                broker_action = {
+                    "disable_mode": disable_mode,
+                    "cancelled_orders": cancelled,
+                    "flattened_positions": 0,
+                }
+            elif disable_mode == "FLATTEN_ALL":
+                broker_action = OvernightRiskService(settings).flatten_all_positions(
+                    session,
+                    reason="disable live with flatten-all mode; cancel open orders and flatten all positions",
+                    cycle_id=f"disable_flatten:{utc_now().strftime('%Y%m%dT%H%M%SZ')}",
+                    event_stage="disable_flatten",
+                    requested_by="disable_flatten",
+                    cancel_orders=True,
+                )
+                session.commit()
+            else:
+                broker_action = {
+                    "disable_mode": disable_mode,
+                    "cancelled_orders": 0,
+                    "flattened_positions": 0,
+                }
+        except Exception as exc:
+            session.rollback()
+            broker_action = {
+                "disable_mode": disable_mode,
+                "error": str(exc),
+            }
+
+    _cache_invalidate("live:")
+    _cache_invalidate("ui:")
+
     return {
         "enabled": enabled,
+        "disable_mode": disable_mode,
+        "broker_action": broker_action,
         "message": (
             f"Live trading {'enabled' if enabled else 'disabled'} in shared runtime control. "
             + (
@@ -1964,6 +2076,14 @@ def set_live_enabled(
             + (
                 f"Cancelled {write_result.get('cancelled_commands', 0)} pending live commands. "
                 if not enabled and write_result.get("cancelled_commands", 0) else ""
+            )
+            + (
+                f"Disable mode={disable_mode}. "
+                if not enabled and disable_mode else ""
+            )
+            + (
+                f"Broker action error: {broker_action.get('error')}. "
+                if isinstance(broker_action, dict) and broker_action.get("error") else ""
             )
             + "Worker and supervisor are online. Closing the browser does not stop auto trading."
         ),

@@ -297,9 +297,71 @@
     </div>
   </div>
 
+  <div class="settings-section">
+    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted2);margin-bottom:10px">停机与隔夜风险</div>
+    <div class="sg2">
+      <div class="form-group">
+        <label>Disable Live 默认模式</label>
+        <select id="s-disable-default-mode">
+          <option value="PAUSE_ONLY" {% if led.get('LIVE_DISABLE_DEFAULT_MODE', 'CANCEL_ORDERS') == 'PAUSE_ONLY' %}selected{% endif %}>PAUSE_ONLY</option>
+          <option value="CANCEL_ORDERS" {% if led.get('LIVE_DISABLE_DEFAULT_MODE', 'CANCEL_ORDERS') == 'CANCEL_ORDERS' %}selected{% endif %}>CANCEL_ORDERS</option>
+          <option value="FLATTEN_ALL" {% if led.get('LIVE_DISABLE_DEFAULT_MODE', 'CANCEL_ORDERS') == 'FLATTEN_ALL' %}selected{% endif %}>FLATTEN_ALL</option>
+        </select>
+        <div class="text-muted text-xs mt4">从 WebUI 点击 Disable Live 时的默认处理动作</div>
+      </div>
+      <div class="form-group">
+        <label>隔夜模式</label>
+        <select id="s-overnight-mode">
+          <option value="REDUCE" {% if led.get('LIVE_OVERNIGHT_MODE', 'REDUCE') == 'REDUCE' %}selected{% endif %}>REDUCE</option>
+          <option value="FLATTEN" {% if led.get('LIVE_OVERNIGHT_MODE', 'REDUCE') == 'FLATTEN' %}selected{% endif %}>FLATTEN</option>
+          <option value="ALERT_ONLY" {% if led.get('LIVE_OVERNIGHT_MODE', 'REDUCE') == 'ALERT_ONLY' %}selected{% endif %}>ALERT_ONLY</option>
+        </select>
+        <div class="text-muted text-xs mt4">收盘前风控动作</div>
+      </div>
+    </div>
+    <div class="sg3 mt12">
+      <div class="form-group">
+        <label>隔夜敞口上限</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-overnight-max-gross" min="0" max="1" step="0.01"
+            value="{{ led.get('LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT', 0.25) }}" />
+          <span class="input-unit">比例</span>
+        </div>
+        <div class="text-muted text-xs mt4">gross exposure / equity</div>
+      </div>
+      <div class="form-group">
+        <label>收盘前检查窗口</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-overnight-rebalance-min" min="1" step="1"
+            value="{{ led.get('LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE', 5) }}" />
+          <span class="input-unit">分钟</span>
+        </div>
+        <div class="text-muted text-xs mt4">例如 5 表示 15:55 ET 开始执行</div>
+      </div>
+      <div class="form-group">
+        <label>关闭 live 后仍执行</label>
+        <label class="toggle" style="margin-top:8px">
+          <input type="checkbox" id="s-overnight-run-when-disabled" {% if led.get('LIVE_OVERNIGHT_RUN_WHEN_DISABLED', true) %}checked{% endif %} />
+          <span class="toggle-track"></span>
+        </label>
+        <div class="text-muted text-xs mt8">防止你关掉 agent 后仓位继续裸奔</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Strategy flags -->
   <div class="settings-section">
     <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted2);margin-bottom:4px">策略开关</div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">开启隔夜风险控制</div>
+        <div class="setting-desc">收盘前统一检查总敞口并执行 REDUCE / FLATTEN / ALERT_ONLY</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="s-overnight-enabled" {% if led.get('LIVE_OVERNIGHT_RISK_ENABLED', true) %}checked{% endif %} />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
     <div class="setting-row">
       <div>
         <div class="setting-label">事件驱动模式</div>
@@ -743,12 +805,18 @@ async function saveAllSettings(){
     LIVE_OPEN_CYCLE_SECONDS: document.getElementById('s-open-cycle').value,
     LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('s-closed-cycle').value,
     LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('s-ticker-cooldown').value,
+    LIVE_DISABLE_DEFAULT_MODE: document.getElementById('s-disable-default-mode').value,
     LIVE_DATA_MAX_AGE_MINUTES: document.getElementById('s-data-max-age').value,
     LIVE_FAST_PATH_MACRO_TTL_MIN: document.getElementById('s-fast-macro-ttl').value,
     LIVE_FAST_PATH_FUND_TTL_MIN: document.getElementById('s-fast-fund-ttl').value,
     FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS: document.getElementById('s-finnhub-lookback-days').value,
     LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS: document.getElementById('s-portfolio-llm-timeout').value,
     LIVE_PORTFOLIO_LLM_MAX_RETRIES: document.getElementById('s-portfolio-llm-retries').value,
+    LIVE_OVERNIGHT_RISK_ENABLED: document.getElementById('s-overnight-enabled').checked,
+    LIVE_OVERNIGHT_MODE: document.getElementById('s-overnight-mode').value,
+    LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT: document.getElementById('s-overnight-max-gross').value,
+    LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE: document.getElementById('s-overnight-rebalance-min').value,
+    LIVE_OVERNIGHT_RUN_WHEN_DISABLED: document.getElementById('s-overnight-run-when-disabled').checked,
     LIVE_EVENT_DRIVEN_MODE: document.getElementById('s-event-driven').checked,
     LIVE_ALLOW_PREMARKET: document.getElementById('s-allow-premarket').checked,
     FLOW_CONFIRMATION_ENABLED: document.getElementById('s-flow-enabled').checked,
@@ -825,16 +893,22 @@ function applyAll(ed){
   setVal('s-open-cycle', ed.LIVE_OPEN_CYCLE_SECONDS ?? 900);
   setVal('s-closed-cycle', ed.LIVE_CLOSED_CYCLE_SECONDS ?? 7200);
   setVal('s-ticker-cooldown', ed.LIVE_TICKER_COOLDOWN_MINUTES ?? 60);
+  setVal('s-disable-default-mode', ed.LIVE_DISABLE_DEFAULT_MODE ?? 'CANCEL_ORDERS');
   setVal('s-data-max-age', ed.LIVE_DATA_MAX_AGE_MINUTES ?? 20);
   setVal('s-fast-macro-ttl', ed.LIVE_FAST_PATH_MACRO_TTL_MIN ?? 60);
   setVal('s-fast-fund-ttl', ed.LIVE_FAST_PATH_FUND_TTL_MIN ?? 120);
   setVal('s-finnhub-lookback-days', ed.FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS ?? 2);
   setVal('s-portfolio-llm-timeout', ed.LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS ?? 20);
   setVal('s-portfolio-llm-retries', ed.LIVE_PORTFOLIO_LLM_MAX_RETRIES ?? 2);
+  setVal('s-overnight-mode', ed.LIVE_OVERNIGHT_MODE ?? 'REDUCE');
+  setVal('s-overnight-max-gross', ed.LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT ?? 0.25);
+  setVal('s-overnight-rebalance-min', ed.LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE ?? 5);
   setText('s-open-cycle-badge', ed.LIVE_OPEN_CYCLE_SECONDS ?? 900);
   setText('s-closed-cycle-badge', ed.LIVE_CLOSED_CYCLE_SECONDS ?? 7200);
 
   // Flags
+  setChk('s-overnight-enabled', ed.LIVE_OVERNIGHT_RISK_ENABLED !== false);
+  setChk('s-overnight-run-when-disabled', ed.LIVE_OVERNIGHT_RUN_WHEN_DISABLED !== false);
   setChk('s-event-driven', ed.LIVE_EVENT_DRIVEN_MODE !== false);
   setChk('s-allow-premarket', !!ed.LIVE_ALLOW_PREMARKET);
   setChk('s-flow-enabled', ed.FLOW_CONFIRMATION_ENABLED !== false);

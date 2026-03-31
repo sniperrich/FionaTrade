@@ -201,11 +201,11 @@ async function loadPortfolio(data=null) {
     document.getElementById('stat-bp-sub').textContent = 'Available cash';
     document.getElementById('stat-positions').textContent = d.positions.length;
     document.getElementById('stat-pos-sub').textContent = d.positions.length===1?'1 open position':(d.positions.length+' open positions');
-    const totalPnl = d.positions.reduce((s,p)=>s+p.unrealized_pnl,0);
+    const totalPnl = d.unrealized_pnl_total ?? d.positions.reduce((s,p)=>s+p.unrealized_pnl,0);
     const pnlEl = document.getElementById('stat-pnl');
     pnlEl.textContent = fmt$(totalPnl);
     pnlEl.style.color = totalPnl>=0?'var(--green)':'var(--red)';
-    document.getElementById('stat-pnl-sub').textContent = 'Unrealized P&L';
+    document.getElementById('stat-pnl-sub').textContent = d.risk_source_label || '已有持仓浮盈亏';
   } catch(e) {
     ['stat-equity','stat-cash','stat-positions','stat-pnl'].forEach(id=>{
       document.getElementById(id).textContent = 'N/A';

@@ -11,6 +11,7 @@ from app.core.utils import ensure_utc, utc_now
 from app.db.models import RuntimeControl
 
 CONTROL_LIVE_ENABLED = "live_trading_enabled"
+CONTROL_OVERNIGHT_RISK_STATE = "overnight_risk_state"
 CONTROL_WORKER_HEARTBEAT = "worker_heartbeat"
 CONTROL_WORKER_SUPERVISOR = "worker_supervisor"
 DEFAULT_WORKER_STALE_SECONDS = 20
@@ -47,7 +48,9 @@ class RuntimeControlService:
         settings: Settings,
         enabled: bool,
         source: str = "api",
+        disable_mode: str | None = None,
     ) -> bool:
+        current = self.get(session, CONTROL_LIVE_ENABLED) or {}
         self.set(
             session,
             CONTROL_LIVE_ENABLED,
@@ -55,6 +58,10 @@ class RuntimeControlService:
                 "enabled": bool(enabled),
                 "source": source,
                 "env_default": bool(settings.live_trading_enabled),
+                "last_disable_mode": (
+                    str(disable_mode or current.get("last_disable_mode") or settings.live_disable_default_mode).upper()
+                    if not enabled else current.get("last_disable_mode")
+                ),
             },
         )
         return bool(enabled)

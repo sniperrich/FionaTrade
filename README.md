@@ -109,7 +109,9 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 - 事件驱动优先：有新增可交易事件才跑完整决策
 - 无新增事件时仅 10 分钟兜底触发一次 fast-path
 - fast-path 复用 Macro/Fund TTL 缓存（默认 60/120 分钟）
-- live 执行前有置信度闸门：`LIVE_MIN_CONFIDENCE`（默认 70），低于阈值的 BUY/SHORT/SELL 会被降级为 HOLD（不下单）
+- live 执行前有置信度闸门：`LIVE_MIN_CONFIDENCE`（默认 50），低于阈值的 BUY/SHORT/SELL 会被降级为 HOLD（不下单）
+- `Disable Live` 支持三种模式：`PAUSE_ONLY / CANCEL_ORDERS / FLATTEN_ALL`
+- 新增独立 `overnight_risk_control`：默认收盘前 5 分钟检查一次总敞口，按 `REDUCE / FLATTEN / ALERT_ONLY` 执行；即使 `live=false` 也可继续保护已有仓位
 
 **资金确认层（软门槛）：**
 - 输出 `flow_score(0-100)` + `flow_bucket(HIGH/MEDIUM/LOW/WEAK)` + `position_multiplier`
@@ -129,7 +131,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | 路径 | 功能 |
 |------|------|
 | `/` | 仪表盘：组合状态、系统状态、最新 Agent 决策、新闻、**portfolio curve + market snapshot + worker/queue 状态** |
-| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、Enable/Disable Live 按钮、runtime activity、worker heartbeat、command queue、worker history、local bar cache、ticker K-line、entry plan 面板、entry plan trigger log、成交历史翻页（策略参数改在 `/settings`） |
+| `/live` | 实盘：持仓、手动下单（market/limit/bracket）、Enable/Disable Live 停机模式、`Flatten All` 一键平仓、持仓风险摘要（gross/net exposure、position risk P&L、overnight guard）、runtime activity、worker heartbeat、command queue、worker history、local bar cache、ticker K-line、entry plan 面板、entry plan trigger log、成交历史翻页（策略参数改在 `/settings`） |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页、**Trigger Event 证据链可视化 + 关联 Live Trade 明细** |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**用途分层（RAW/Event/Agent/Live）**、按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页 |
 | `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果列表与快速检查 |
@@ -153,7 +155,7 @@ app/
   agents/        6 个 Agent 类（继承 BaseAgent）
   agent_graph/   graph.py（AgentGraph）+ state.py（TypedDict 状态）
   broker/        alpaca.py（完整 Alpaca REST v2，777 行）+ paper.py
-  services/      live_trading.py + market_data.py + worker_runtime.py + runtime_control.py
+  services/      live_trading.py + overnight_risk.py + market_data.py + worker_runtime.py + runtime_control.py
   backtest_engine/ 离线研究/回测模块（现已通过 worker-backed `/backtests` 控制面暴露）
   market/        1m K 线回填（Finnhub → Alpaca → yfinance → stooq）
   monitoring/    HealthAuditService（数据源延迟 + 状态快照）
@@ -173,7 +175,7 @@ tests/           pytest 测试集
 | 方法 | 路径 | 返回格式 |
 |------|------|---------|
 | GET | `/api/health` | `{status, llm_configured, llm_model, sources_online, ...}` |
-| GET | `/api/live/status` | **平铺字段**：`{enabled, market_tradeable, market_session(字符串), market_time, tickers, live_min_confidence, live_allowed_sources, enable_finnhub_company_news_live, worker, supervisor, command_queue, ...}` |
+| GET | `/api/live/status` | **平铺字段**：`{enabled, market_tradeable, market_session(字符串), market_time, tickers, live_min_confidence, live_allowed_sources, live_disable_default_mode, live_overnight_* , overnight_state, worker, supervisor, command_queue, ...}` |
 | GET | `/api/worker/status` | worker + supervisor heartbeat + command queue 快照 |
 | GET | `/api/worker/history` | recent worker runs + commands + runtime events |
 | GET | `/api/agent/runs` | **包装对象**：`{"runs": [...]}` — 每项用 `*_result` 字段名 |
@@ -187,7 +189,8 @@ tests/           pytest 测试集
 | GET | `/api/attribution/overview` | 模块归因总览（回测分桶 + Agent 贡献 + 过滤器价值） |
 | GET | `/api/attribution/runs/{run_id}` | 单 run 归因详情（分桶 + filter hits） |
 | POST | `/api/attribution/agent-scores/backfill` | 回填 AgentScore（历史评分批处理） |
-| POST | `/api/live/set_enabled` | 写入共享 runtime control，并给 worker 排队 live backfill/cycle |
+| POST | `/api/live/set_enabled` | 写入共享 runtime control，并支持 `disable_mode=PAUSE_ONLY/CANCEL_ORDERS/FLATTEN_ALL` |
+| POST | `/api/live/close_all_positions` | 取消全部挂单并一键平仓 |
 | GET | `/api/settings/editable` | 返回可编辑的 `.env` 配置快照 |
 | POST | `/api/settings/editable` | 保存配置到 `.env`（支持额外 `KEY=VALUE` 覆盖） |
 | POST | `/api/live/cycle` | 给 worker 排队一次 live cycle |
@@ -196,7 +199,7 @@ tests/           pytest 测试集
 | GET | `/api/live/plans` | delayed entry plans |
 | GET | `/api/live/plans/events` | entry plan lifecycle/trigger events |
 | POST | `/api/live/plans/{plan_id}/cancel` | cancel active entry plan |
-| GET | `/api/live/positions` | Alpaca 当前持仓 |
+| GET | `/api/live/positions` | Alpaca 当前持仓 + `gross_exposure / net_exposure / unrealized_pnl_total / open_orders_count / overnight_guard` |
 | GET | `/api/live/open_orders` | Alpaca 挂单 |
 | GET | `/api/live/portfolio_history` | Alpaca 权益曲线 |
 | GET | `/api/live/bars` | K 线图接口（`source=auto/cache/broker`，默认 auto） |
@@ -238,6 +241,9 @@ tests/           pytest 测试集
 > - `Enable Live` 现在是 DB 共享开关，worker 不运行时只会看到 queued command，不会真的执行
 > - `Enable Live` 现在会先检查 worker + supervisor heartbeat；若后台不在线，会直接返回 `409`，阻止出现“按钮打开了但实际上没有执行进程”的假成功
 > - `Disable Live` 现在会取消尚未执行的 live 相关命令，避免关闭后旧的 `refresh_bars / live_cycle / ingestion` 继续跑
+> - `Disable Live` 现在还支持停机模式：只停新单 / 取消挂单 / 全部平仓
+> - `/api/live/positions` 返回的 `risk_source_label=已有持仓浮盈亏`，用于前端明确区分“现有仓位风险”与“agent 偷跑”
+> - worker 新增 `overnight_risk_control` 定时任务：默认在 `15:55-16:00 ET` 执行一次，使用 `LIVE_OVERNIGHT_*` 配置限制隔夜敞口
 > - `/settings` 页面已支持写入 `.env`；保存后 web 端会热加载，worker/supervisor 需要重启才能完全应用后台参数变更
 > - `/api/live/set_enabled` 现在会按当前数据库连接重试写入；若 SQLite 仍被长事务占住，会返回 `503 database is busy`，而不是直接 500
 > - worker 遇到短时 SQLite 锁时会把受影响的 `RUNNING` command 重新排回 `PENDING`，避免残留假运行状态

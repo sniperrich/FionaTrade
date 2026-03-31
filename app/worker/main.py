@@ -21,6 +21,7 @@ from app.monitoring.health import HealthAuditService
 from app.services.earnings_calendar import EarningsCalendarService
 from app.services.live_trading import LiveTradingService
 from app.services.market_data import MarketDataService
+from app.services.overnight_risk import OvernightRiskService
 from app.services.runtime_control import RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
@@ -171,10 +172,33 @@ def _scheduled_live_trading() -> None:
         logger.exception("[live] 模拟盘轮询失败: %s", exc)
 
 
+def _scheduled_overnight_risk_control() -> None:
+    try:
+        with db_session() as session:
+            result = OvernightRiskService(settings).execute_overnight_guard(session, trigger="scheduler")
+            if result.get("executed"):
+                logger.info(
+                    "[overnight] mode=%s reason=%s gross %.2f -> %.2f target=%s cancelled=%s submitted=%s",
+                    result.get("mode"),
+                    result.get("reason"),
+                    float((result.get("before") or {}).get("gross_exposure") or 0.0),
+                    float((result.get("after") or {}).get("gross_exposure") or 0.0),
+                    result.get("target_gross_exposure"),
+                    result.get("cancelled_orders", 0),
+                    result.get("submitted_orders", 0),
+                )
+            elif result.get("reason") in {"already_executed_today", "outside_close_window"}:
+                logger.debug("[overnight] skipped: %s", result.get("reason"))
+            else:
+                logger.info("[overnight] skipped: %s", result.get("reason"))
+    except Exception as exc:
+        logger.exception("[overnight] 风控任务失败: %s", exc)
+
+
 def _target_live_interval_seconds() -> tuple[int, str]:
     msi = market_session_info()
     label = str(msi.get("label") or "closed")
-    if label == "open":
+    if label in {"open", "market_open"}:
         return max(60, int(getattr(settings, "live_open_cycle_seconds", 900) or 900)), label
     return max(60, int(getattr(settings, "live_closed_cycle_seconds", 7200) or 7200)), label
 
@@ -537,6 +561,14 @@ def _start_scheduler() -> BackgroundScheduler:
             seconds=max(60, settings.live_cycle_interval_seconds),
             max_instances=1,
             id="live_cycle",
+            replace_existing=True,
+        )
+        sched.add_job(
+            _scheduled_overnight_risk_control,
+            "interval",
+            seconds=60,
+            max_instances=1,
+            id="overnight_risk_control",
             replace_existing=True,
         )
         sched.add_job(

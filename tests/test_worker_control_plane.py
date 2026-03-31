@@ -4,7 +4,8 @@ from datetime import timedelta
 import pytest
 from fastapi import HTTPException
 
-from app.api.routes import list_live_entry_plan_events, set_live_enabled
+from app.api.routes import close_all_positions_endpoint, list_live_entry_plan_events, live_positions, set_live_enabled
+from app.broker.base import PositionInfo
 from app.core.utils import utc_now
 from app.db.models import BacktestRun, WorkerCommand, WorkerRun
 from app.ingestion.service import IngestionService
@@ -289,6 +290,75 @@ def test_set_live_enabled_disables_and_cancels_pending_live_commands(session, se
     queue = runtime.command_queue_snapshot(session)
     assert queue["pending"] == 1
     assert queue["cancelled"] == 3
+
+
+def test_set_live_enabled_disable_cancel_orders_calls_broker(session, settings, monkeypatch) -> None:
+    control = RuntimeControlService()
+    runtime = WorkerRuntimeService()
+    now = utc_now() - timedelta(minutes=1)
+    control.touch_worker_heartbeat(session, pid=3101, started_at=now, extra={"configured_tickers": ["AAPL"]})
+    control.touch_supervisor_heartbeat(session, pid=3102, started_at=now, extra={"child_pid": 3101})
+    control.set_live_enabled(session, settings, True, source="pytest")
+    runtime.queue_command(session, COMMAND_RUN_LIVE_CYCLE, payload={"trigger": "enable_live"}, requested_by="pytest")
+
+    monkeypatch.setattr("app.broker.alpaca.AlpacaBroker.cancel_all_orders", lambda self: 2)
+
+    result = set_live_enabled(
+        body={"enabled": False, "disable_mode": "cancel_orders"},
+        session=session,
+        settings=settings,
+    )
+
+    assert result["enabled"] is False
+    assert result["disable_mode"] == "CANCEL_ORDERS"
+    assert result["broker_action"]["cancelled_orders"] == 2
+
+
+def test_close_all_positions_endpoint_records_flatten(session, settings, monkeypatch) -> None:
+    def _fake_flatten(self, session, **kwargs):
+        return {
+            "cycle_id": kwargs["cycle_id"],
+            "requested_by": kwargs["requested_by"],
+            "cancelled_orders": 3,
+            "submitted_orders": 2,
+            "errors": [],
+            "before": {"gross_exposure": 12000.0},
+            "after": {"gross_exposure": 0.0},
+        }
+
+    monkeypatch.setattr("app.api.routes.OvernightRiskService.flatten_all_positions", _fake_flatten)
+
+    result = close_all_positions_endpoint(session=session, settings=settings)
+
+    assert result["success"] is True
+    assert result["requested_by"] == "manual_flatten"
+    assert result["submitted_orders"] == 2
+
+
+def test_live_positions_returns_exposure_summary(settings, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.broker.alpaca.AlpacaBroker.get_account",
+        lambda self: {"equity": "100000", "cash": "25000", "buying_power": "180000"},
+    )
+    monkeypatch.setattr(
+        "app.broker.alpaca.AlpacaBroker.get_all_positions",
+        lambda self: [
+            PositionInfo(ticker="AAPL", quantity=10, avg_cost=100.0, market_value=1050.0, unrealized_pnl=50.0),
+            PositionInfo(ticker="MSFT", quantity=-5, avg_cost=200.0, market_value=-980.0, unrealized_pnl=20.0),
+        ],
+    )
+    monkeypatch.setattr(
+        "app.broker.alpaca.AlpacaBroker.get_open_orders",
+        lambda self: [{"id": "ord1"}, {"id": "ord2"}],
+    )
+
+    result = live_positions(settings=settings)
+
+    assert result["gross_exposure"] == 2030.0
+    assert result["net_exposure"] == 70.0
+    assert result["unrealized_pnl_total"] == 70.0
+    assert result["open_orders_count"] == 2
+    assert result["risk_source_label"] == "已有持仓浮盈亏"
 
 
 def test_fast_ingestion_profile_skips_sec(session, settings) -> None:

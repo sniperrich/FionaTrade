@@ -207,6 +207,8 @@ class Settings(BaseSettings):
     live_min_confidence: int = 50
     # Allow order placement during pre-market session (default: False)
     live_allow_premarket: bool = False
+    # Default action when disabling live trading from control plane.
+    live_disable_default_mode: str = "CANCEL_ORDERS"
     # Refuse new live orders when local Bar1m cache is older than this threshold.
     live_data_max_age_minutes: float = 20.0
     # Event-driven live mode: run full graph when new tradeable news arrives.
@@ -224,6 +226,12 @@ class Settings(BaseSettings):
     # Pull Finnhub per-ticker company-news during live cycles (more relevant than general feed).
     enable_finnhub_company_news_live: bool = True
     finnhub_company_news_live_lookback_days: int = 2
+    # Close-window overnight guard; runs independently from live enable/disable.
+    live_overnight_risk_enabled: bool = True
+    live_overnight_mode: str = "REDUCE"
+    live_overnight_max_gross_exposure_pct: float = 0.25
+    live_overnight_rebalance_minutes_before_close: int = 5
+    live_overnight_run_when_disabled: bool = True
     # Capital confirmation layer (volume/follow-through/relative-strength).
     flow_confirmation_enabled: bool = True
     flow_confirmation_soft_gate: bool = True

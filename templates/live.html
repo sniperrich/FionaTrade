@@ -24,6 +24,7 @@
         title="{% if live_enabled %}Disable live trading{% else %}Enable live trading (Alpaca paper mode){% endif %}">
         {% if live_enabled %}⏹ Disable Live{% else %}▶ Enable Live{% endif %}
       </button>
+      <button class="btn btn-ghost btn-sm" onclick="flattenAllPositions()">🧹 Flatten All</button>
       <button class="btn btn-ghost btn-sm" onclick="triggerCycle(event)">⚡ Run Cycle</button>
     </div>
   </div>
@@ -66,6 +67,34 @@
     <div class="card-value" id="orders-count">—</div>
     <div class="card-sub" id="orders-sub">pending</div>
   </div>
+</div>
+
+<div class="grid g4 mb16">
+  <div class="card card-sm">
+    <div class="card-title">Gross Exposure</div>
+    <div class="card-value" id="gross-exposure-val">—</div>
+    <div class="card-sub" id="gross-exposure-sub">—</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Net Exposure</div>
+    <div class="card-value" id="net-exposure-val">—</div>
+    <div class="card-sub" id="net-exposure-sub">—</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Position Risk P&amp;L</div>
+    <div class="card-value" id="position-risk-pnl-val">—</div>
+    <div class="card-sub" id="position-risk-pnl-sub">已有持仓浮盈亏</div>
+  </div>
+  <div class="card card-sm">
+    <div class="card-title">Overnight Guard</div>
+    <div class="card-value" id="overnight-guard-val">—</div>
+    <div class="card-sub" id="overnight-guard-sub">—</div>
+  </div>
+</div>
+
+<div id="position-risk-banner" class="card mb16" style="display:none;padding:12px 14px;background:rgba(196,153,36,0.10);border-color:rgba(196,153,36,0.24)">
+  <div class="bold">持仓风险提示</div>
+  <div class="text-muted text-sm mt4" id="position-risk-banner-text">—</div>
 </div>
 
 <div class="grid g2 mb16" style="grid-template-columns:1.35fr 1fr">
@@ -391,13 +420,53 @@
   </div>
 </div>
 
+<div id="disable-live-modal" style="display:none;position:fixed;inset:0;z-index:60;background:rgba(15,23,42,0.62);padding:24px;align-items:center;justify-content:center">
+  <div class="card" style="max-width:560px;width:100%">
+    <div class="section-header mb8">
+      <div class="section-title">Disable Live 模式</div>
+      <button class="btn btn-ghost btn-sm" onclick="hideDisableLiveModal()">✕</button>
+    </div>
+    <div class="text-muted text-sm mb12">关闭 live 只会停止新分析/新下单。你可以在这里指定是否同步处理已有挂单和持仓。</div>
+    <div style="display:grid;gap:10px">
+      <label style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+        <input type="radio" name="disable-live-mode" value="PAUSE_ONLY" />
+        <span>
+          <span class="bold">仅停新单</span><br />
+          <span class="text-muted text-sm">只写入 <span class="mono">enabled=false</span>，保留已有挂单和持仓。</span>
+        </span>
+      </label>
+      <label style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+        <input type="radio" name="disable-live-mode" value="CANCEL_ORDERS" />
+        <span>
+          <span class="bold">取消挂单</span><br />
+          <span class="text-muted text-sm">停止新单，并取消全部 open orders；保留已有持仓。</span>
+        </span>
+      </label>
+      <label style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface2)">
+        <input type="radio" name="disable-live-mode" value="FLATTEN_ALL" />
+        <span>
+          <span class="bold">全部平仓</span><br />
+          <span class="text-muted text-sm">停止新单，取消全部挂单，并平掉当前所有持仓。</span>
+        </span>
+      </label>
+    </div>
+    <div class="flex-center gap8 mt16" style="justify-content:flex-end">
+      <button class="btn btn-ghost btn-sm" onclick="hideDisableLiveModal()">取消</button>
+      <button class="btn btn-primary btn-sm" id="disable-live-confirm-btn" onclick="confirmDisableLiveTrading()">确认 Disable</button>
+    </div>
+  </div>
+</div>
+
 {% endblock %}
 {% block scripts %}
 <script>
 const LIVE_CACHE_PREFIX = 'ui:live_snapshot:v4:';
+const DEFAULT_DISABLE_MODE = '{{ led.get("LIVE_DISABLE_DEFAULT_MODE", "CANCEL_ORDERS") }}';
 let liveTradesPage = 1;
 const LIVE_TRADES_PER_PAGE = 20;
 let liveConfigTickers = [];
+let liveStatusState = null;
+let positionState = null;
 
 function fmt$(n){return n==null?'—':'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function sideBadge(s){return s==='long'?'<span class="badge badge-green">LONG</span>':'<span class="badge badge-red">SHORT</span>';}
@@ -418,6 +487,48 @@ function parseCsvTokens(raw, mode='upper'){
     return item.toUpperCase();
   });
   return [...new Set(normalized)];
+}
+
+function disableModeInput(){
+  return document.querySelector('input[name="disable-live-mode"]:checked');
+}
+
+function showDisableLiveModal(){
+  const modal=document.getElementById('disable-live-modal');
+  const targetMode=(liveStatusState?.last_disable_mode || DEFAULT_DISABLE_MODE || 'CANCEL_ORDERS').toUpperCase();
+  document.querySelectorAll('input[name="disable-live-mode"]').forEach(input => {
+    input.checked = input.value === targetMode;
+  });
+  if(modal) modal.style.display='flex';
+}
+
+function hideDisableLiveModal(){
+  const modal=document.getElementById('disable-live-modal');
+  if(modal) modal.style.display='none';
+}
+
+function renderPositionRiskBanner(){
+  const banner=document.getElementById('position-risk-banner');
+  const text=document.getElementById('position-risk-banner-text');
+  if(!banner || !text) return;
+  const positionsCount=Number(positionState?.open_positions_count ?? positionState?.positions?.length ?? 0);
+  const openOrdersCount=Number(positionState?.open_orders_count ?? 0);
+  const hasResidualRisk=positionsCount > 0 || openOrdersCount > 0;
+  if(!liveStatusState || liveStatusState.enabled || !hasResidualRisk){
+    banner.style.display='none';
+    return;
+  }
+  const guardEnabled=!!liveStatusState.live_overnight_risk_enabled;
+  const guardMode=liveStatusState.live_overnight_mode || 'REDUCE';
+  const guardCap=liveStatusState.live_overnight_max_gross_exposure_pct != null
+    ? `${Math.round(Number(liveStatusState.live_overnight_max_gross_exposure_pct) * 100)}% gross`
+    : '—';
+  text.textContent =
+    `Agent 已停止，但账户仍暴露在已有仓位/挂单风险中。当前还有 ${positionsCount} 个持仓、${openOrdersCount} 个挂单。`
+    + (guardEnabled
+      ? ` 收盘前仍会执行隔夜风险控制（${guardMode} / ${guardCap}）。`
+      : ' 隔夜风险控制当前关闭。');
+  banner.style.display='block';
 }
 
 function refreshLiveTickerSelectors(){
@@ -572,14 +683,35 @@ function renderCandles(svgId, bars){
 async function loadPositions(data=null){
   try{
     const d = data || await apiFetch('/api/live/positions');
+    positionState = d;
     document.getElementById('eq-val').textContent=fmt$(d.equity);
     document.getElementById('eq-sub').textContent='Equity';
     document.getElementById('cash-val').textContent=fmt$(d.cash);
     document.getElementById('cash-sub').textContent='BP: '+fmt$(d.buying_power);
-    const upnl=d.positions.reduce((s,p)=>s+p.unrealized_pnl,0);
+    const upnl=d.unrealized_pnl_total ?? d.positions.reduce((s,p)=>s+p.unrealized_pnl,0);
     const el=document.getElementById('upnl-val');
     el.textContent=fmt$(upnl);
     el.style.color=upnl>=0?'var(--green)':'var(--red)';
+    document.getElementById('upnl-sub').textContent=d.risk_source_label || '已有持仓浮盈亏';
+    document.getElementById('orders-count').textContent=d.open_orders_count ?? '—';
+    document.getElementById('orders-sub').textContent=(d.open_orders_count ?? 0) === 1 ? '1 open order' : `${d.open_orders_count ?? 0} open orders`;
+    document.getElementById('gross-exposure-val').textContent=fmt$(d.gross_exposure);
+    document.getElementById('gross-exposure-sub').textContent=d.gross_exposure_pct != null
+      ? `${(Number(d.gross_exposure_pct) * 100).toFixed(1)}% of equity`
+      : '—';
+    document.getElementById('net-exposure-val').textContent=fmt$(d.net_exposure);
+    document.getElementById('net-exposure-sub').textContent=d.net_exposure_pct != null
+      ? `${(Number(d.net_exposure_pct) * 100).toFixed(1)}% of equity`
+      : '—';
+    const riskPnlEl=document.getElementById('position-risk-pnl-val');
+    riskPnlEl.textContent=fmt$(upnl);
+    riskPnlEl.style.color=upnl>=0?'var(--green)':'var(--red)';
+    document.getElementById('position-risk-pnl-sub').textContent=d.risk_source_label || '已有持仓浮盈亏';
+    const guard=d.overnight_guard || {};
+    document.getElementById('overnight-guard-val').textContent=guard.enabled ? (guard.mode || 'REDUCE') : 'OFF';
+    document.getElementById('overnight-guard-sub').textContent=guard.enabled
+      ? `<= ${Math.round(Number(guard.max_gross_exposure_pct || 0) * 100)}% gross · ${guard.rebalance_minutes_before_close || 5}m before close`
+      : 'Overnight guard disabled';
     document.getElementById('pos-updated').textContent='Updated '+new Date().toLocaleTimeString();
     if(!d.positions.length){
       document.getElementById('positions-body').innerHTML='<tr><td colspan="7" class="empty-state text-muted">No open positions</td></tr>';
@@ -597,6 +729,7 @@ async function loadPositions(data=null){
         </tr>`;
       }).join('');
     }
+    renderPositionRiskBanner();
   } catch(e){
     document.getElementById('positions-body').innerHTML=`<tr><td colspan="7" class="empty-state text-red">Broker unavailable: ${e.message}</td></tr>`;
   }
@@ -605,6 +738,8 @@ async function loadPositions(data=null){
 async function loadOpenOrders(data=null){
   try{
     const orders=data || await apiFetch('/api/live/open_orders');
+    positionState = positionState || {};
+    positionState.open_orders_count = orders.length;
     document.getElementById('orders-count').textContent=orders.length;
     document.getElementById('orders-sub').textContent=orders.length===1?'1 open order':(orders.length+' open orders');
     if(!orders.length){
@@ -627,6 +762,7 @@ async function loadOpenOrders(data=null){
         <td><button class="btn btn-ghost btn-xs" onclick="cancelOrder('${o.id}','${o.symbol}')">✕</button></td>
       </tr>`;
     }).join('');
+    renderPositionRiskBanner();
   } catch(e){
     document.getElementById('open-orders-body').innerHTML=`<tr><td colspan="10" class="empty-state text-red">Error: ${e.message}</td></tr>`;
   }
@@ -766,6 +902,7 @@ function resetLiveTradesPage(){
 async function loadMarketStatus(data=null){
   try{
     const d=data || await apiFetch('/api/live/status');
+    liveStatusState = d;
     const open=d.market_tradeable;
     document.getElementById('market-status-badge').innerHTML=open?'<span class="badge badge-green">Market Open</span>':'<span class="badge badge-grey">'+(d.market_session||'closed')+'</span>';
     document.getElementById('live-et-time').textContent=d.market_time||'';
@@ -779,6 +916,17 @@ async function loadMarketStatus(data=null){
     document.getElementById('live-enable-badge').innerHTML=d.enabled?
       '<span class="badge badge-accent">Live Enabled</span>':
       '<span class="badge badge-grey">Live Disabled</span>';
+    const guardVal=document.getElementById('overnight-guard-val');
+    const guardSub=document.getElementById('overnight-guard-sub');
+    if(guardVal && guardSub){
+      guardVal.textContent=d.live_overnight_risk_enabled ? (d.live_overnight_mode || 'REDUCE') : 'OFF';
+      const lastState=d.overnight_state || {};
+      guardSub.textContent=d.live_overnight_risk_enabled
+        ? `<= ${Math.round(Number(d.live_overnight_max_gross_exposure_pct || 0) * 100)}% gross · ${d.live_overnight_rebalance_minutes_before_close || 5}m before close`
+          + (lastState.executed_et_date ? ` · last ${lastState.executed_et_date}` : '')
+        : 'Overnight guard disabled';
+    }
+    renderPositionRiskBanner();
   } catch(e){}
 }
 
@@ -916,6 +1064,10 @@ async function toggleLiveTrading(){
   const btn=document.getElementById('toggle-live-btn');
   const currentlyEnabled=btn.dataset.enabled==='true';
   const enable=!currentlyEnabled;
+  if(!enable){
+    showDisableLiveModal();
+    return;
+  }
   btn.disabled=true; btn.textContent='…';
   try{
     const d=await apiFetch('/api/live/set_enabled',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enable}), timeout:10000});
@@ -928,6 +1080,33 @@ async function toggleLiveTrading(){
   finally{ btn.disabled=false; }
 }
 
+async function confirmDisableLiveTrading(){
+  const btn=document.getElementById('disable-live-confirm-btn');
+  const selected=disableModeInput();
+  const disableMode=(selected?.value || DEFAULT_DISABLE_MODE || 'CANCEL_ORDERS').toUpperCase();
+  btn.disabled=true;
+  btn.textContent='Disabling…';
+  try{
+    const d=await apiFetch('/api/live/set_enabled',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled:false, disable_mode:disableMode}),
+      timeout:20000
+    });
+    clearViewCache(LIVE_CACHE_PREFIX);
+    hideDisableLiveModal();
+    toast(d.message || `Live disabled (${disableMode})`,'success');
+    setTimeout(loadMarketStatus,500);
+    setTimeout(refreshAll,1200);
+    setTimeout(refreshAll,4000);
+  } catch(e){
+    toast('Error: '+e.message,'error');
+  } finally{
+    btn.disabled=false;
+    btn.textContent='确认 Disable';
+  }
+}
+
 async function closePosition(ticker){
   if(!confirm('Close entire '+ticker+' position?')) return;
   try{
@@ -936,6 +1115,19 @@ async function closePosition(ticker){
     toast('Position closed: '+ticker,'success');
     setTimeout(refreshAll,2000);
   } catch(e){ toast('Error: '+e.message,'error'); }
+}
+
+async function flattenAllPositions(){
+  if(!confirm('Cancel ALL open orders and flatten ALL positions now?')) return;
+  try{
+    const d=await apiFetch('/api/live/close_all_positions', {method:'POST', timeout:20000});
+    clearViewCache(LIVE_CACHE_PREFIX);
+    toast(`Flatten submitted: ${d.submitted_orders || 0} orders`, 'success');
+    setTimeout(refreshAll,1200);
+    setTimeout(refreshAll,4000);
+  } catch(e){
+    toast('Error: '+e.message,'error');
+  }
 }
 
 async function cancelOrder(orderId,symbol){
@@ -1096,6 +1288,10 @@ function hydrateLiveSnapshot(snapshot){
   if(snapshot.bar_cache) loadBarCacheStatus(snapshot.bar_cache);
   if(snapshot.worker_history) loadWorkerHistory(snapshot.worker_history);
 }
+
+document.querySelectorAll('input[name="disable-live-mode"]').forEach(input => {
+  input.checked = input.value === String(DEFAULT_DISABLE_MODE || 'CANCEL_ORDERS').toUpperCase();
+});
 
 async function refreshAll(){
   const tradeTicker=(document.getElementById('hist-ticker-filter').value||'').trim().toUpperCase();
