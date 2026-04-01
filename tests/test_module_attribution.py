@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.services.module_attribution import ModuleAttributionService
-from app.db.models import AgentRun, AgentScore, BacktestRun, Event, EventEvidence, RawItem
+from app.db.models import AgentRun, AgentScore, BacktestRun, Bar1m, Event, EventEvidence, LiveTrade, RawItem
 
 
 def _raw_item(source: str, url: str, title: str, item_hash: str, published_at: datetime) -> RawItem:
@@ -67,7 +67,7 @@ def _trade(event_id: int, ticker: str, *, pnl: float, flow_bucket: str, event_ty
 
 
 def test_module_attribution_overview_and_run_detail(session):
-    base = datetime(2026, 1, 3, 15, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
 
     raw_a = _raw_item("sec", "https://example.com/sec-aapl", "AAPL filing", "hash-sec-aapl", base)
     raw_b = _raw_item("yahoo_finance", "https://example.com/yf-nvda", "NVDA headline", "hash-yf-nvda", base + timedelta(minutes=10))
@@ -150,18 +150,21 @@ def test_module_attribution_overview_and_run_detail(session):
                 ticker="AAPL",
                 status="COMPLETED",
                 final_action="BUY",
+                trigger_event_id=event_a.id,
+                news_output={"signal": "BUY", "confidence": 82},
                 portfolio_output={"metadata": {"conviction": "HIGH"}},
                 risk_output={"metadata": {"approved": True}},
                 created_at=base + timedelta(hours=2),
             ),
-            AgentRun(
-                ticker="NVDA",
-                status="COMPLETED",
-                final_action="HOLD",
-                portfolio_output={"metadata": {"conviction": "LOW"}},
-                risk_output={"metadata": {"approved": False}},
-                created_at=base + timedelta(hours=3),
-            ),
+                AgentRun(
+                    ticker="NVDA",
+                    status="COMPLETED",
+                    final_action="HOLD",
+                    news_output={"signal": "BUY", "confidence": 75},
+                    portfolio_output={"metadata": {"conviction": "LOW"}},
+                    risk_output={"metadata": {"approved": False}},
+                    created_at=base + timedelta(hours=3),
+                ),
         ]
     )
     session.add_all(
@@ -191,6 +194,54 @@ def test_module_attribution_overview_and_run_detail(session):
                 eval_horizon_days=3,
                 score=-30.0,
                 score_reasoning="bad",
+            ),
+        ]
+    )
+    session.flush()
+
+    aapl_entry = base + timedelta(hours=2)
+    nvda_entry = base + timedelta(hours=2, minutes=30)
+    next_open = datetime(2026, 1, 6, 14, 30, tzinfo=timezone.utc)
+
+    session.add_all(
+        [
+            Bar1m(ticker="AAPL", ts=aapl_entry, open=100.0, high=100.0, low=100.0, close=100.0, volume=1000.0, source="test"),
+            Bar1m(ticker="AAPL", ts=aapl_entry + timedelta(minutes=60), open=102.0, high=102.0, low=102.0, close=102.0, volume=1000.0, source="test"),
+            Bar1m(ticker="AAPL", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=103.0, high=103.0, low=103.0, close=103.0, volume=1000.0, source="test"),
+            Bar1m(ticker="AAPL", ts=next_open, open=101.0, high=101.0, low=101.0, close=101.0, volume=1000.0, source="test"),
+            Bar1m(ticker="NVDA", ts=nvda_entry, open=200.0, high=200.0, low=200.0, close=200.0, volume=1000.0, source="test"),
+            Bar1m(ticker="NVDA", ts=nvda_entry + timedelta(minutes=60), open=197.0, high=197.0, low=197.0, close=197.0, volume=1000.0, source="test"),
+            Bar1m(ticker="NVDA", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=196.0, high=196.0, low=196.0, close=196.0, volume=1000.0, source="test"),
+            Bar1m(ticker="NVDA", ts=next_open, open=202.0, high=202.0, low=202.0, close=202.0, volume=1000.0, source="test"),
+        ]
+    )
+    session.flush()
+
+    aapl_run = session.query(AgentRun).filter(AgentRun.ticker == "AAPL").one()
+    nvda_run = session.query(AgentRun).filter(AgentRun.ticker == "NVDA").one()
+    session.add_all(
+        [
+            LiveTrade(
+                ticker="AAPL",
+                agent_run_id=aapl_run.id,
+                action="BUY",
+                quantity=10,
+                target_pct=0.10,
+                status="submitted",
+                market_session="market_open",
+                reasoning="test long",
+                created_at=aapl_entry,
+            ),
+            LiveTrade(
+                ticker="NVDA",
+                agent_run_id=nvda_run.id,
+                action="SHORT",
+                quantity=5,
+                target_pct=0.05,
+                status="submitted",
+                market_session="market_open",
+                reasoning="test short",
+                created_at=nvda_entry,
             ),
         ]
     )
@@ -229,6 +280,16 @@ def test_module_attribution_overview_and_run_detail(session):
     assert payload["agent_contribution"]["agents"] >= 2
     conviction_rows = {row["bucket"]: row for row in payload["conviction_distribution"]}
     assert conviction_rows["HIGH"]["count"] == 1
+
+    news_report = payload["news_impact_report"]
+    assert news_report["summary"]["submitted_entries"] == 2
+    assert news_report["summary"]["event_linked_entries"] == 1
+    alignment_rows = {row["bucket"]: row for row in news_report["alignment_buckets"]}
+    assert alignment_rows["agree"]["same_close_pnl_sum"] == 30.0
+    assert alignment_rows["conflict"]["same_close_pnl_sum"] == 20.0
+    source_rows = {row["bucket"]: row for row in news_report["source_buckets"]}
+    assert source_rows["sec"]["trades"] == 1
+    assert source_rows["unlinked_event"]["trades"] == 1
 
     detail = service.run_detail(session, run_id=run_enabled.id)
     assert detail is not None

@@ -198,7 +198,7 @@ tests/           pytest 测试集
 | GET | `/api/backtests` | 最近回测 runs 列表 |
 | GET | `/api/backtests/{run_id}` | 单个回测详情：params / metrics / equity_curve / trade_log |
 | POST | `/api/backtests/run` | 给 worker 排队一条 backtest 任务 |
-| GET | `/api/attribution/overview` | 模块归因总览（回测分桶 + Agent 贡献 + 过滤器价值） |
+| GET | `/api/attribution/overview` | 模块归因总览（回测分桶 + Agent 贡献 + 过滤器价值 + `news_impact_report`） |
 | GET | `/api/attribution/runs/{run_id}` | 单 run 归因详情（分桶 + filter hits） |
 | POST | `/api/attribution/agent-scores/backfill` | 回填 AgentScore（历史评分批处理） |
 | POST | `/api/live/set_enabled` | 写入共享 runtime control，并支持 `disable_mode=PAUSE_ONLY/CANCEL_ORDERS/FLATTEN_ALL` |
@@ -244,6 +244,7 @@ tests/           pytest 测试集
 > - `/api/attribution/overview` 支持 `start_date/end_date` 或 `lookback_days`、`mode`、`run_ids`、`tickers`、`min_sample`
 > - `Module Attribution` 面板默认用 30 天窗口；`Backfill Agent Scores` 会触发 `/api/attribution/agent-scores/backfill`
 > - `/api/attribution/overview` 与 `/api/attribution/runs/{run_id}` 现在都会返回 `source_buckets`（按具体消息源统计 trades/win_rate/pnl/drawdown）
+> - `news_impact_report` 会额外统计 live `submitted/filled` 的 agent-originated `BUY/SHORT` 入场单，在 `+60m / same_close / next_open` 三个窗口输出价格冲击、news-final 一致性、live source impact
 > - `batch_score_runs` 已支持 `as_of` + ready cutoff，不再因参数不匹配导致 `agent_scores` 长期为 0
 > - `batch_score_runs(limit=...)` 现在先在 SQL 层排除已评分 run，再应用 limit，避免“请求 10 条但实际处理更少”的偏差
 > - Live 页 K 线图默认 `source=auto`：本地 `bars_1m` 足够新时优先显示 cache，否则回退 broker
@@ -333,7 +334,10 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,JNJ,PG,HD,A
 - `LIVE_FAST_PATH_FUND_TTL_MIN=120`
 - `LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS=20`
 - `LIVE_PORTFOLIO_LLM_MAX_RETRIES=2`
-- `LIVE_ALLOWED_SOURCES=benzinga,reuters,cnbc,earnings_release,sec`（留空也会回退到这组高质量默认值）
+- `LIVE_ALLOWED_SOURCES=benzinga,reuters,cnbc,earnings_release,sec`
+  - 推荐把这行显式写进 `.env`
+  - 即使 `.env` 不写，代码默认也会从 `app/core/config.py::DEFAULT_LIVE_ALLOWED_SOURCES` 回退到这组高质量源
+  - live 执行层 `app/services/live_trading.py` 对空配置再做一次 fallback，避免留空时退回到“全源”
 - `ENABLE_FINNHUB_COMPANY_NEWS_LIVE=true`
 - `FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS=2`
 - `FLOW_CONFIRMATION_ENABLED=true`
@@ -346,6 +350,7 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,JNJ,PG,HD,A
 归因与来源过滤修正：
 - `Module Attribution` 的同 tier source 选择改为稳定顺序：`event_id -> source_tier -> captured_at -> id`，不再用字母序 tie-break。
 - `Module Attribution` 页面已修正宽表溢出：卡片与表格在窄屏会自适应，长 bucket/source 文本会自动换行并保留 title 提示。
+- `Module Attribution` 已新增 `news_impact_report`，用于验证“新闻有没有真实价格冲击”，并把 live 样本拆成 `+60m / same_close / next_open` 三层影响。
 - source 归一化补齐 `Yahoo Finance` / `yahoo-finance`，并统一空格与连字符，保证白名单匹配一致。
 
 > Enable Live 现在不会再让 Web 进程直接起后台线程。

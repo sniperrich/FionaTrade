@@ -14,16 +14,19 @@
   }
   .att-page .tbl-wrap table { min-width: 640px; }
   .att-page .att-distributions .tbl-wrap table { min-width: 360px; }
+  .att-page .att-news-kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   @media (max-width: 1200px) {
     .att-page .att-top-grid { grid-template-columns: 1fr; }
     .att-page .att-triple-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 760px) {
     .att-page .att-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .att-page .att-news-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .att-page .att-triple-grid { grid-template-columns: 1fr; }
   }
   @media (max-width: 520px) {
     .att-page .att-kpi-grid { grid-template-columns: 1fr; }
+    .att-page .att-news-kpi-grid { grid-template-columns: 1fr; }
   }
 </style>
 <div class="att-page">
@@ -230,6 +233,87 @@
   </div>
 </div>
 
+<div class="card mb16">
+  <div class="section-header mb8">
+    <div class="section-title">F. News Impact Report</div>
+    <span class="text-muted text-sm" id="att-news-impact-updated">Waiting…</span>
+  </div>
+  <div class="page-sub mb12">基于 live submitted entries + AgentRun + 1m bars，衡量新闻驱动在 +60m / 当日收盘 / 次日开盘三个窗口的真实价格冲击。</div>
+  <div class="grid g4 mb16 att-news-kpi-grid" id="att-news-impact-kpis">
+    <div class="card card-sm"><div class="card-title">Loading</div><div class="card-value">…</div><div class="card-sub">Fetching live impact</div></div>
+  </div>
+  <div class="grid g2 mb16">
+    <div class="card">
+      <div class="section-header mb8">
+        <div class="section-title">Horizon Impact</div>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Horizon</th>
+              <th class="num">Sample</th>
+              <th class="num">Win Rate</th>
+              <th class="num">PnL Sum</th>
+              <th class="num">Avg PnL</th>
+              <th class="num">Avg Return</th>
+            </tr>
+          </thead>
+          <tbody id="att-news-horizon-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-header mb8">
+        <div class="section-title">News Signal Alignment</div>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Bucket</th>
+              <th class="num">Trades</th>
+              <th class="num">+60m</th>
+              <th class="num">Close</th>
+              <th class="num">Next Open</th>
+              <th class="num">Close Win</th>
+            </tr>
+          </thead>
+          <tbody id="att-news-alignment-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="grid g2">
+    <div class="card">
+      <div class="section-header mb8">
+        <div class="section-title">Live Source Impact</div>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th class="num">Trades</th>
+              <th class="num">Close PnL</th>
+              <th class="num">Next Open</th>
+              <th class="num">Close Win</th>
+              <th class="num">Next Open Win</th>
+            </tr>
+          </thead>
+          <tbody id="att-news-source-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-header mb8">
+        <div class="section-title">News Impact Quality</div>
+      </div>
+      <div id="att-news-quality" class="text-sm text-muted">Loading…</div>
+    </div>
+  </div>
+</div>
+
 <div class="card">
   <div class="section-header mb8">
     <div class="section-title">Data Quality</div>
@@ -380,6 +464,90 @@ function renderFilterRank(rows){
   `).join('');
 }
 
+function renderNewsImpactKpis(report){
+  const summary = (report && report.summary) || {};
+  const cards = [
+    { title: 'Live Entries', value: String(summary.submitted_entries ?? 0), sub: 'Submitted BUY/SHORT entries' },
+    { title: 'Event Linked', value: fmtPct(summary.event_link_coverage_pct || 0), sub: `${summary.event_linked_entries ?? 0} linked trades` },
+    { title: 'Same Close Coverage', value: String(summary.coverage_same_close ?? 0), sub: 'Entries with close bar coverage' },
+    { title: 'Next Open Coverage', value: String(summary.coverage_next_open ?? 0), sub: 'Entries with next-open bar coverage' },
+  ];
+  document.getElementById('att-news-impact-kpis').innerHTML = cards.map(card => `
+    <div class="card card-sm">
+      <div class="card-title">${card.title}</div>
+      <div class="card-value">${card.value}</div>
+      <div class="card-sub">${card.sub}</div>
+    </div>
+  `).join('');
+}
+
+function renderNewsHorizon(rows){
+  const body = document.getElementById('att-news-horizon-body');
+  if(!rows || !rows.length){
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">No live entry impact data in current window.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(row => `
+    <tr>
+      <td>${escapeHtml(row.horizon || 'unknown')}</td>
+      <td class="num">${row[`${row.horizon}_sample`] ?? 0}</td>
+      <td class="num">${fmtPct(row[`${row.horizon}_win_rate`] || 0)}</td>
+      <td class="num">${fmtUsd(row[`${row.horizon}_pnl_sum`] || 0)}</td>
+      <td class="num">${fmtUsd(row[`${row.horizon}_avg_pnl`] || 0)}</td>
+      <td class="num">${fmtPct((row[`${row.horizon}_avg_return_pct`] || 0) / 100, 2)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderNewsAlignment(rows){
+  const body = document.getElementById('att-news-alignment-body');
+  if(!rows || !rows.length){
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">No alignment buckets in current window.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(row => `
+    <tr>
+      <td><div class="att-bucket" title="${escapeHtml(row.bucket || 'unknown')}">${escapeHtml(row.bucket || 'unknown')}</div></td>
+      <td class="num">${row.trades ?? 0}</td>
+      <td class="num">${fmtUsd(row.plus_60m_pnl_sum || 0)}</td>
+      <td class="num">${fmtUsd(row.same_close_pnl_sum || 0)}</td>
+      <td class="num">${fmtUsd(row.next_open_pnl_sum || 0)}</td>
+      <td class="num">${fmtPct(row.same_close_win_rate || 0)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderNewsSourceBuckets(rows){
+  const body = document.getElementById('att-news-source-body');
+  if(!rows || !rows.length){
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">No live source impact rows.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(row => `
+    <tr>
+      <td><div class="att-bucket" title="${escapeHtml(row.bucket || 'unknown')}">${escapeHtml(row.bucket || 'unknown')}</div></td>
+      <td class="num">${row.trades ?? 0}</td>
+      <td class="num">${fmtUsd(row.same_close_pnl_sum || 0)}</td>
+      <td class="num">${fmtUsd(row.next_open_pnl_sum || 0)}</td>
+      <td class="num">${fmtPct(row.same_close_win_rate || 0)}</td>
+      <td class="num">${fmtPct(row.next_open_win_rate || 0)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderNewsImpactQuality(report){
+  const summary = (report && report.summary) || {};
+  const warnings = ((report && report.data_quality) ? report.data_quality.warnings : []) || [];
+  const warningHtml = warnings.length
+    ? warnings.map(w => `<span class="badge badge-red">${escapeHtml(w)}</span>`).join(' ')
+    : '<span class="badge badge-green">ok</span>';
+  document.getElementById('att-news-quality').innerHTML = `
+    <div>Submitted entries: ${summary.submitted_entries ?? 0} · Linked events: ${summary.event_linked_entries ?? 0} · Link coverage: ${fmtPct(summary.event_link_coverage_pct || 0)}</div>
+    <div class="mt4">Bar coverage: +60m ${summary.coverage_plus_60m ?? 0} · Close ${summary.coverage_same_close ?? 0} · Next Open ${summary.coverage_next_open ?? 0}</div>
+    <div class="mt8">Warnings: ${warningHtml}</div>
+  `;
+}
+
 function renderQuality(dataQuality){
   const warnings = (dataQuality && dataQuality.warnings) || [];
   const warningHtml = warnings.length
@@ -405,9 +573,15 @@ async function refreshAttribution(){
     renderBucketTable('att-source-body', payload.source_buckets || []);
     renderBucketTable('att-flow-bucket-body', payload.flow_bucket_buckets || []);
     renderFilterRank(payload.filter_value_rank || []);
+    renderNewsImpactKpis(payload.news_impact_report || {});
+    renderNewsHorizon((payload.news_impact_report || {}).horizon_impact || []);
+    renderNewsAlignment((payload.news_impact_report || {}).alignment_buckets || []);
+    renderNewsSourceBuckets((payload.news_impact_report || {}).source_buckets || []);
+    renderNewsImpactQuality(payload.news_impact_report || {});
     renderQuality(payload.data_quality || {});
     const ts = 'Updated ' + new Date().toLocaleTimeString();
     document.getElementById('att-agent-updated').textContent = ts;
+    document.getElementById('att-news-impact-updated').textContent = ts;
     document.getElementById('att-quality-updated').textContent = ts;
   } catch (e) {
     toast(`Attribution load failed: ${e.message}`, 'error');

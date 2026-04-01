@@ -7,11 +7,11 @@ from app.api.routes import (
     attribution_overview,
     attribution_run_detail,
 )
-from app.db.models import AgentRun, BacktestRun, Bar1m, Event, EventEvidence, RawItem
+from app.db.models import AgentRun, BacktestRun, Bar1m, Event, EventEvidence, LiveTrade, RawItem
 
 
 def test_attribution_overview_and_run_detail_api(session):
-    base = datetime(2026, 1, 4, 14, 30, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
     raw = RawItem(
         source="sec",
         source_tier=0,
@@ -82,6 +82,76 @@ def test_attribution_overview_and_run_detail_api(session):
     session.add(run)
     session.flush()
 
+    agent_run = AgentRun(
+        ticker="AAPL",
+        status="COMPLETED",
+        trigger_event_id=event.id,
+        news_output={"signal": "BUY", "confidence": 90},
+        final_action="BUY",
+        created_at=base + timedelta(minutes=1),
+    )
+    session.add(agent_run)
+    session.flush()
+
+    session.add_all(
+        [
+            Bar1m(
+                ticker="AAPL",
+                ts=base + timedelta(minutes=1),
+                open=100.0,
+                high=100.0,
+                low=100.0,
+                close=100.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=base + timedelta(minutes=61),
+                open=101.0,
+                high=101.0,
+                low=101.0,
+                close=101.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc),
+                open=102.0,
+                high=102.0,
+                low=102.0,
+                close=102.0,
+                volume=1000.0,
+                source="test",
+            ),
+            Bar1m(
+                ticker="AAPL",
+                ts=datetime(2026, 1, 6, 14, 30, tzinfo=timezone.utc),
+                open=99.0,
+                high=99.0,
+                low=99.0,
+                close=99.0,
+                volume=1000.0,
+                source="test",
+            ),
+        ]
+    )
+    session.add(
+        LiveTrade(
+            ticker="AAPL",
+            agent_run_id=agent_run.id,
+            action="BUY",
+            quantity=10,
+            target_pct=0.1,
+            status="submitted",
+            market_session="market_open",
+            reasoning="api test",
+            created_at=base + timedelta(minutes=1),
+        )
+    )
+    session.flush()
+
     overview = attribution_overview(
         session=session,
         start_date="2026-01-01",
@@ -97,6 +167,8 @@ def test_attribution_overview_and_run_detail_api(session):
     assert "source_tier_buckets" in overview
     assert "source_buckets" in overview
     assert "filter_value_rank" in overview
+    assert "news_impact_report" in overview
+    assert overview["news_impact_report"]["summary"]["submitted_entries"] == 1
 
     detail = attribution_run_detail(run_id=run.id, session=session)
     assert detail["run"]["id"] == run.id

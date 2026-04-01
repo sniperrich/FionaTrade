@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from itertools import combinations
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
+from app.core.market_hours import is_holiday
 from app.core.utils import ensure_utc
-from app.db.models import AgentRun, AgentScore, BacktestRun, EventEvidence
+from app.db.models import AgentRun, AgentScore, BacktestRun, Bar1m, Event, EventEvidence, LiveTrade
 
 
 _FILTER_KEYS = (
@@ -30,6 +32,11 @@ class AttributionFilters:
     run_ids: list[int]
     tickers: list[str]
     min_sample: int
+
+
+_NY = ZoneInfo("America/New_York")
+_MARKET_OPEN = time(9, 30)
+_MARKET_CLOSE = time(16, 0)
 
 
 class ModuleAttributionService:
@@ -91,6 +98,7 @@ class ModuleAttributionService:
         agent_runs = self._load_agent_runs(session, filters)
         agent_distributions = self._agent_distribution(agent_runs)
         agent_contribution = self._agent_contribution(session, filters, min_sample=filters.min_sample)
+        news_impact_report = self._news_impact_report(session, filters)
 
         coverage_scored = agent_contribution.get("scored_predictions", 0)
         coverage_runs = max(1, int(agent_contribution.get("total_completed_agent_runs", 0)))
@@ -113,6 +121,7 @@ class ModuleAttributionService:
                 scored_predictions=coverage_scored,
                 comparable_pairs=comparable_pairs,
                 min_sample=filters.min_sample,
+                news_link_coverage_pct=float((news_impact_report.get("summary") or {}).get("event_link_coverage_pct") or 0.0),
             ),
         }
 
@@ -144,6 +153,7 @@ class ModuleAttributionService:
             "risk_approved_distribution": agent_distributions["risk_approved_distribution"],
             "final_action_distribution": agent_distributions["final_action_distribution"],
             "filter_value_rank": filter_value_rank,
+            "news_impact_report": news_impact_report,
             "data_quality": data_quality,
         }
 
@@ -503,6 +513,309 @@ class ModuleAttributionService:
         )
         return rank_rows
 
+    def _news_impact_report(self, session: Session, filters: AttributionFilters) -> dict[str, Any]:
+        if filters.mode == "rules":
+            return {
+                "summary": {
+                    "submitted_entries": 0,
+                    "event_linked_entries": 0,
+                    "event_link_coverage_pct": 0.0,
+                    "coverage_plus_60m": 0,
+                    "coverage_same_close": 0,
+                    "coverage_next_open": 0,
+                },
+                "horizon_impact": [],
+                "alignment_buckets": [],
+                "source_buckets": [],
+                "source_tier_buckets": [],
+                "event_type_buckets": [],
+                "data_quality": {"warnings": ["live_news_impact_unavailable_in_rules_mode"]},
+            }
+        rows = self._load_live_trade_rows(session, filters)
+        source_tier_map, source_map = self._event_source_maps(
+            session,
+            event_ids={int(row["event_id"]) for row in rows if row.get("event_id") is not None},
+        )
+        event_type_map = self._event_type_map(
+            session,
+            event_ids={int(row["event_id"]) for row in rows if row.get("event_id") is not None},
+        )
+
+        observations: list[dict[str, Any]] = []
+        coverage = {"plus_60m": 0, "same_close": 0, "next_open": 0}
+
+        for row in rows:
+            entry_ts = ensure_utc(row["entry_ts"])
+            entry_price = self._price_at_or_after(session, row["ticker"], entry_ts)
+            if entry_price is None or entry_price <= 0:
+                continue
+
+            plus_60m_px = self._price_at_or_after(session, row["ticker"], entry_ts + timedelta(minutes=60))
+            same_close_px = self._regular_close_price(session, row["ticker"], entry_ts)
+            next_open_px = self._next_regular_open_price(session, row["ticker"], entry_ts)
+
+            obs = {
+                "ticker": row["ticker"],
+                "entry_ts": entry_ts,
+                "action": row["action"],
+                "quantity": float(row["quantity"] or 0.0),
+                "entry_price": entry_price,
+                "event_id": row.get("event_id"),
+                "event_type": event_type_map.get(row.get("event_id")) or "unlinked_event",
+                "source": self._source_label(source_map.get(row.get("event_id")), fallback="unlinked_event"),
+                "source_tier": self._source_tier_label(source_tier_map.get(row.get("event_id"))),
+                "news_signal": row.get("news_signal") or "NO_SIGNAL",
+                "alignment_bucket": self._alignment_bucket(row.get("news_signal"), row["action"]),
+                "linked_event": row.get("event_id") is not None,
+            }
+
+            obs["plus_60m_pnl"] = self._impact_pnl(entry_price, plus_60m_px, obs["quantity"], obs["action"])
+            obs["same_close_pnl"] = self._impact_pnl(entry_price, same_close_px, obs["quantity"], obs["action"])
+            obs["next_open_pnl"] = self._impact_pnl(entry_price, next_open_px, obs["quantity"], obs["action"])
+
+            obs["plus_60m_return_pct"] = self._impact_return_pct(entry_price, plus_60m_px, obs["action"])
+            obs["same_close_return_pct"] = self._impact_return_pct(entry_price, same_close_px, obs["action"])
+            obs["next_open_return_pct"] = self._impact_return_pct(entry_price, next_open_px, obs["action"])
+
+            if obs["plus_60m_pnl"] is not None:
+                coverage["plus_60m"] += 1
+            if obs["same_close_pnl"] is not None:
+                coverage["same_close"] += 1
+            if obs["next_open_pnl"] is not None:
+                coverage["next_open"] += 1
+            observations.append(obs)
+
+        total = len(observations)
+        linked = sum(1 for row in observations if row.get("linked_event"))
+        link_coverage_pct = (linked / total) if total else 0.0
+
+        report = {
+            "summary": {
+                "submitted_entries": total,
+                "event_linked_entries": linked,
+                "event_link_coverage_pct": round(link_coverage_pct, 4),
+                "coverage_plus_60m": coverage["plus_60m"],
+                "coverage_same_close": coverage["same_close"],
+                "coverage_next_open": coverage["next_open"],
+            },
+            "horizon_impact": self._horizon_impact_rows(observations),
+            "alignment_buckets": self._impact_bucketize(observations, key_getter=lambda row: row.get("alignment_bucket") or "unknown"),
+            "source_buckets": self._impact_bucketize(observations, key_getter=lambda row: row.get("source") or "unknown_source"),
+            "source_tier_buckets": self._impact_bucketize(observations, key_getter=lambda row: row.get("source_tier") or "tier_unknown"),
+            "event_type_buckets": self._impact_bucketize(observations, key_getter=lambda row: row.get("event_type") or "unknown"),
+            "data_quality": {
+                "warnings": self._news_impact_warnings(
+                    total_entries=total,
+                    link_coverage_pct=link_coverage_pct,
+                    coverage=coverage,
+                    min_sample=filters.min_sample,
+                ),
+            },
+        }
+        return report
+
+    def _load_live_trade_rows(self, session: Session, filters: AttributionFilters) -> list[dict[str, Any]]:
+        stmt = (
+            select(LiveTrade, AgentRun)
+            .join(AgentRun, AgentRun.id == LiveTrade.agent_run_id)
+            .where(
+                LiveTrade.agent_run_id.is_not(None),
+                LiveTrade.action.in_(("BUY", "SHORT")),
+                LiveTrade.status.in_(("submitted", "filled")),
+            )
+            .order_by(LiveTrade.created_at.asc(), LiveTrade.id.asc())
+        )
+        if filters.start_date:
+            stmt = stmt.where(LiveTrade.created_at >= filters.start_date)
+        if filters.end_date:
+            stmt = stmt.where(LiveTrade.created_at <= filters.end_date)
+        if filters.tickers:
+            stmt = stmt.where(LiveTrade.ticker.in_(filters.tickers))
+
+        out: list[dict[str, Any]] = []
+        for live_trade, agent_run in session.execute(stmt).all():
+            news_signal = str(((agent_run.news_output or {}).get("signal") or "NO_SIGNAL")).upper()
+            final_action = str(agent_run.final_action or live_trade.action or "HOLD").upper()
+            out.append(
+                {
+                    "live_trade_id": live_trade.id,
+                    "agent_run_id": agent_run.id,
+                    "ticker": str(live_trade.ticker or "").upper(),
+                    "entry_ts": ensure_utc(live_trade.created_at),
+                    "action": str(live_trade.action or "").upper(),
+                    "quantity": float(live_trade.fill_qty or live_trade.quantity or 0.0),
+                    "news_signal": news_signal,
+                    "final_action": final_action,
+                    "event_id": int(agent_run.trigger_event_id) if agent_run.trigger_event_id is not None else None,
+                }
+            )
+        return out
+
+    def _event_type_map(self, session: Session, event_ids: set[int]) -> dict[int, str]:
+        if not event_ids:
+            return {}
+        rows = session.execute(
+            select(Event.id, Event.event_type).where(Event.id.in_(sorted(event_ids)))
+        ).all()
+        return {int(event_id): self._label(event_type, "unknown") for event_id, event_type in rows}
+
+    def _impact_bucketize(self, rows: list[dict[str, Any]], key_getter) -> list[dict[str, Any]]:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[str(key_getter(row))].append(row)
+
+        out: list[dict[str, Any]] = []
+        for key, items in grouped.items():
+            out.append(
+                {
+                    "bucket": key,
+                    "trades": len(items),
+                    **self._impact_stats(items, "plus_60m"),
+                    **self._impact_stats(items, "same_close"),
+                    **self._impact_stats(items, "next_open"),
+                }
+            )
+        out.sort(
+            key=lambda row: (
+                int(row.get("trades") or 0),
+                float(row.get("same_close_pnl_sum") or 0.0),
+            ),
+            reverse=True,
+        )
+        return out
+
+    def _horizon_impact_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {"horizon": "plus_60m", **self._impact_stats(rows, "plus_60m")},
+            {"horizon": "same_close", **self._impact_stats(rows, "same_close")},
+            {"horizon": "next_open", **self._impact_stats(rows, "next_open")},
+        ]
+
+    def _impact_stats(self, rows: list[dict[str, Any]], prefix: str) -> dict[str, Any]:
+        pnl_key = f"{prefix}_pnl"
+        ret_key = f"{prefix}_return_pct"
+        observed = [row for row in rows if row.get(pnl_key) is not None and row.get(ret_key) is not None]
+        sample = len(observed)
+        wins = sum(1 for row in observed if float(row.get(pnl_key) or 0.0) > 0)
+        pnl_sum = sum(float(row.get(pnl_key) or 0.0) for row in observed)
+        ret_sum = sum(float(row.get(ret_key) or 0.0) for row in observed)
+        return {
+            f"{prefix}_sample": sample,
+            f"{prefix}_win_rate": (wins / sample) if sample else 0.0,
+            f"{prefix}_pnl_sum": pnl_sum,
+            f"{prefix}_avg_pnl": (pnl_sum / sample) if sample else 0.0,
+            f"{prefix}_avg_return_pct": (ret_sum / sample) if sample else 0.0,
+        }
+
+    def _price_at_or_after(self, session: Session, ticker: str, ts: datetime) -> float | None:
+        row = session.execute(
+            select(Bar1m.close)
+            .where(Bar1m.ticker == ticker, Bar1m.ts >= ensure_utc(ts))
+            .order_by(Bar1m.ts.asc())
+            .limit(1)
+        ).first()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def _regular_close_price(self, session: Session, ticker: str, ts: datetime) -> float | None:
+        trade_day = self._effective_trade_day(ensure_utc(ts))
+        open_utc, close_utc = self._session_bounds_utc(trade_day)
+        row = session.execute(
+            select(Bar1m.close)
+            .where(
+                Bar1m.ticker == ticker,
+                Bar1m.ts >= open_utc,
+                Bar1m.ts <= close_utc,
+            )
+            .order_by(Bar1m.ts.desc())
+            .limit(1)
+        ).first()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def _next_regular_open_price(self, session: Session, ticker: str, ts: datetime) -> float | None:
+        trade_day = self._effective_trade_day(ensure_utc(ts))
+        next_day = self._next_trading_day(trade_day)
+        open_utc, close_utc = self._session_bounds_utc(next_day)
+        row = session.execute(
+            select(Bar1m.open)
+            .where(
+                Bar1m.ticker == ticker,
+                Bar1m.ts >= open_utc,
+                Bar1m.ts <= close_utc,
+            )
+            .order_by(Bar1m.ts.asc())
+            .limit(1)
+        ).first()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def _effective_trade_day(self, ts: datetime) -> date:
+        et = ensure_utc(ts).astimezone(_NY)
+        trade_day = et.date()
+        if et.time() >= _MARKET_CLOSE:
+            trade_day = self._next_trading_day(trade_day)
+        elif et.weekday() >= 5 or is_holiday(et):
+            trade_day = self._next_trading_day(trade_day)
+        return trade_day
+
+    def _next_trading_day(self, current: date) -> date:
+        candidate = current + timedelta(days=1)
+        while True:
+            candidate_et = datetime.combine(candidate, _MARKET_OPEN, tzinfo=_NY)
+            if candidate.weekday() < 5 and not is_holiday(candidate_et):
+                return candidate
+            candidate += timedelta(days=1)
+
+    def _session_bounds_utc(self, trading_day: date) -> tuple[datetime, datetime]:
+        open_dt = datetime.combine(trading_day, _MARKET_OPEN, tzinfo=_NY)
+        close_dt = datetime.combine(trading_day, _MARKET_CLOSE, tzinfo=_NY)
+        return ensure_utc(open_dt), ensure_utc(close_dt)
+
+    @staticmethod
+    def _impact_pnl(entry_price: float, target_price: float | None, qty: float, action: str) -> float | None:
+        if target_price is None:
+            return None
+        qty_f = float(qty or 0.0)
+        if qty_f <= 0 or entry_price <= 0:
+            return None
+        if str(action or "").upper() == "SHORT":
+            return round((entry_price - target_price) * qty_f, 4)
+        return round((target_price - entry_price) * qty_f, 4)
+
+    @staticmethod
+    def _impact_return_pct(entry_price: float, target_price: float | None, action: str) -> float | None:
+        if target_price is None or entry_price <= 0:
+            return None
+        raw = ((target_price - entry_price) / entry_price) * 100.0
+        if str(action or "").upper() == "SHORT":
+            raw *= -1.0
+        return round(raw, 4)
+
+    @staticmethod
+    def _alignment_bucket(news_signal: Any, final_action: str) -> str:
+        signal = str(news_signal or "NO_SIGNAL").upper()
+        action = str(final_action or "HOLD").upper()
+        if signal not in {"BUY", "SHORT"}:
+            return "no_signal"
+        return "agree" if signal == action else "conflict"
+
+    @staticmethod
+    def _news_impact_warnings(
+        *,
+        total_entries: int,
+        link_coverage_pct: float,
+        coverage: dict[str, int],
+        min_sample: int,
+    ) -> list[str]:
+        warnings: list[str] = []
+        if total_entries < min_sample:
+            warnings.append("live_news_impact_low_sample")
+        if total_entries and link_coverage_pct < 0.5:
+            warnings.append("live_news_event_links_low")
+        if total_entries and coverage.get("same_close", 0) < total_entries:
+            warnings.append("same_close_bar_coverage_incomplete")
+        if total_entries and coverage.get("next_open", 0) < max(1, total_entries // 2):
+            warnings.append("next_open_bar_coverage_low")
+        return warnings
+
     def _filter_pair_signature(self, run_payload: dict[str, Any]) -> tuple[Any, ...]:
         params = dict(run_payload.get("params") or {})
         sources = tuple(sorted(str(item).strip().lower() for item in (params.get("sources") or [])))
@@ -547,6 +860,7 @@ class ModuleAttributionService:
         scored_predictions: int,
         comparable_pairs: int,
         min_sample: int,
+        news_link_coverage_pct: float,
     ) -> list[str]:
         warnings: list[str] = []
         if run_count < min_sample:
@@ -557,6 +871,8 @@ class ModuleAttributionService:
             warnings.append("agent_scores_low_sample")
         if comparable_pairs < min_sample:
             warnings.append("filter_pairs_low_sample")
+        if 0 < news_link_coverage_pct < 0.5:
+            warnings.append("live_news_event_links_low")
         return warnings
 
     @staticmethod
