@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -51,18 +51,33 @@ class RuntimeControlService:
         disable_mode: str | None = None,
     ) -> bool:
         current = self.get(session, CONTROL_LIVE_ENABLED) or {}
+        now = utc_now()
+        payload = {
+            "enabled": bool(enabled),
+            "source": source,
+            "env_default": bool(settings.live_trading_enabled),
+            "last_disable_mode": (
+                str(disable_mode or current.get("last_disable_mode") or settings.live_disable_default_mode).upper()
+                if not enabled else current.get("last_disable_mode")
+            ),
+        }
+        if enabled:
+            if not bool(current.get("enabled", False)):
+                warmup_minutes = max(0, int(getattr(settings, "live_enable_warmup_minutes", 15) or 0))
+                payload["enabled_at"] = now.isoformat()
+                payload["warmup_until"] = (now + timedelta(minutes=warmup_minutes)).isoformat()
+            else:
+                payload["enabled_at"] = current.get("enabled_at")
+                payload["warmup_until"] = current.get("warmup_until")
+            payload["disabled_at"] = current.get("disabled_at")
+        else:
+            payload["enabled_at"] = current.get("enabled_at")
+            payload["warmup_until"] = current.get("warmup_until")
+            payload["disabled_at"] = now.isoformat()
         self.set(
             session,
             CONTROL_LIVE_ENABLED,
-            {
-                "enabled": bool(enabled),
-                "source": source,
-                "env_default": bool(settings.live_trading_enabled),
-                "last_disable_mode": (
-                    str(disable_mode or current.get("last_disable_mode") or settings.live_disable_default_mode).upper()
-                    if not enabled else current.get("last_disable_mode")
-                ),
-            },
+            payload,
         )
         return bool(enabled)
 

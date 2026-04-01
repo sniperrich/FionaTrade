@@ -40,7 +40,7 @@ def test_event_driven_cycle_skips_without_new_tradeable_event(session, settings,
     monkeypatch.setattr(service, "_refresh_bars", lambda _session, _tickers: None)
     monkeypatch.setattr("app.services.live_trading.IngestionService.run", lambda *_args, **_kwargs: {"ok": True})
     monkeypatch.setattr("app.services.live_trading.count_new_raw_items", lambda _session, _since: 0)
-    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers: 0)
+    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers, allowed_sources=None: 0)
     monkeypatch.setattr(
         service,
         "_get_last_agent_run_time",
@@ -76,8 +76,8 @@ def test_event_driven_cycle_skips_in_closed_session_too(session, settings, monke
     monkeypatch.setattr("app.services.live_trading.market_session_info", _market_closed)
     monkeypatch.setattr("app.services.live_trading.IngestionService.run", lambda *_args, **_kwargs: {"ok": True})
     monkeypatch.setattr("app.services.live_trading.count_new_raw_items", lambda _session, _since: 0)
-    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers: 0)
-    monkeypatch.setattr(service, "_count_new_tradeable_by_ticker", lambda _session, since, tickers: {"AAPL": 0})
+    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers, allowed_sources=None: 0)
+    monkeypatch.setattr(service, "_count_new_tradeable_by_ticker", lambda _session, since, tickers, allowed_sources=None: {"AAPL": 0})
     monkeypatch.setattr(
         service,
         "_get_last_agent_run_time",
@@ -121,6 +121,7 @@ def test_event_driven_cycle_uses_fast_path_on_fallback_tick(session, settings, m
         dry_run=False,
         run=None,
         fast_path=False,
+        allowed_sources=None,
     ):
         captured_fast_path.append(bool(fast_path))
         return {
@@ -134,7 +135,7 @@ def test_event_driven_cycle_uses_fast_path_on_fallback_tick(session, settings, m
     monkeypatch.setattr("app.services.live_trading.IngestionService.run", lambda *_args, **_kwargs: {"ok": True})
     monkeypatch.setattr("app.services.live_trading.count_new_raw_items", lambda _session, _since: 0)
     monkeypatch.setattr(service, "_refresh_bars", lambda _session, _tickers: None)
-    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers: 0)
+    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers, allowed_sources=None: 0)
     monkeypatch.setattr(
         service,
         "_get_last_agent_run_time",
@@ -177,6 +178,7 @@ def test_ticker_cooldown_skips_unchanged_ticker(session, settings, monkeypatch) 
         dry_run=False,
         run=None,
         fast_path=False,
+        allowed_sources=None,
     ):
         processed.append(ticker)
         return {"ticker": ticker, "action": "HOLD", "order_placed": False}
@@ -192,11 +194,11 @@ def test_ticker_cooldown_skips_unchanged_ticker(session, settings, monkeypatch) 
     monkeypatch.setattr("app.services.live_trading.IngestionService.run", lambda *_args, **_kwargs: {"ok": True})
     monkeypatch.setattr("app.services.live_trading.count_new_raw_items", lambda _session, _since: 1)
     monkeypatch.setattr(service, "_refresh_bars", lambda _session, _tickers: None)
-    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers: 1)
+    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers, allowed_sources=None: 1)
     monkeypatch.setattr(
         service,
         "_count_new_tradeable_by_ticker",
-        lambda _session, since, tickers: {"AAPL": 1, "NVDA": 0},
+        lambda _session, since, tickers, allowed_sources=None: {"AAPL": 1, "NVDA": 0},
     )
     monkeypatch.setattr(service, "_get_last_agent_run_time", _last_run)
     monkeypatch.setattr(service, "_process_ticker", _fake_process)
@@ -207,6 +209,43 @@ def test_ticker_cooldown_skips_unchanged_ticker(session, settings, monkeypatch) 
     skipped = [row for row in result["results"] if row.get("reason") == "ticker_cooldown_no_new_event"]
     assert len(skipped) == 1
     assert skipped[0]["ticker"] == "NVDA"
+
+
+def test_live_enable_warmup_skips_trading(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_trading_tickers": ["AAPL"],
+            "live_enable_warmup_minutes": 15,
+            "live_entry_planning_enabled": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+
+    class DummyBroker:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def get_portfolio_value(self) -> float:
+            return 100_000.0
+
+    monkeypatch.setattr("app.services.live_trading.market_session_info", _market_open)
+    monkeypatch.setattr("app.services.live_trading.AlpacaBroker", DummyBroker)
+    monkeypatch.setattr(service, "_refresh_bars", lambda _session, _tickers: None)
+    monkeypatch.setattr("app.services.live_trading.IngestionService.run", lambda *_args, **_kwargs: {"ok": True})
+    monkeypatch.setattr("app.services.live_trading.count_new_raw_items", lambda _session, _since: 3)
+    monkeypatch.setattr(service, "_count_new_tradeable_articles", lambda _session, since, tickers, allowed_sources=None: 2)
+    monkeypatch.setattr(service, "_count_new_tradeable_by_ticker", lambda _session, since, tickers, allowed_sources=None: {"AAPL": 2})
+    monkeypatch.setattr(service, "_process_ticker", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not process tickers during warm-up")))
+
+    from app.services.runtime_control import RuntimeControlService
+
+    RuntimeControlService().set_live_enabled(session, live_settings, True, source="pytest")
+
+    result = service.run_cycle(session, trigger="pytest")
+    assert result["skipped"] is True
+    assert result["reason"] == "live_warmup"
+    assert result["warmup_active"] is True
+    assert result["warmup_remaining_seconds"] > 0
 
 
 def test_cached_agent_output_respects_ttl(session, settings) -> None:

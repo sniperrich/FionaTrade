@@ -22,19 +22,21 @@ from datetime import datetime, timedelta, timezone
 import threading
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.analysis.taxonomy import is_follow_up_commentary, normalize_source_name
+from app.analysis.taxonomy import EXCLUDED_FROM_TRADING, is_follow_up_commentary, normalize_source_name
 from app.agent_graph.graph import AgentGraph
 from app.broker.alpaca import AlpacaBroker
-from app.core.config import Settings
+from app.core.config import DEFAULT_LIVE_ALLOWED_SOURCES, Settings
 from app.core.logging import get_app_logger, log_live_cycle
 from app.core.market_hours import market_session_info
-from app.db.models import AgentRun, Bar1m, EntryPlan, LiveTrade, RawItem, WorkerRun
+from app.db.models import AgentRun, Bar1m, EntryPlan, Event, EventEvidence, LiveTrade, RawItem, WorkerRun
 from app.ingestion.service import IngestionService
 from app.services.capital_confirmation import CapitalConfirmationService
 from app.services.market_data import MarketDataService
+from app.services.runtime_control import CONTROL_LIVE_ENABLED, RuntimeControlService
 from app.services.worker_runtime import WorkerRuntimeService
 from app.tools.news import count_new_raw_items
 
@@ -45,6 +47,7 @@ _STOP_LOSS_PCT = 0.05
 _TAKE_PROFIT_RATIO = 2.0
 _LIVE_CYCLE_MUTEX = threading.Lock()
 _WAIT_MODES = {"WAIT_PULLBACK", "WAIT_BREAKOUT_CONFIRMATION", "WAIT_UNTIL_OPEN"}
+_DIRECTIONAL_ACTIONS = {"BUY", "SHORT", "SELL", "COVER"}
 
 
 class LiveTradingService:
@@ -175,6 +178,50 @@ class LiveTradingService:
             except Exception as exc:
                 self._emit_event(session, run, f"Cycle {cycle_id} ingestion failed: {exc}", level="warn", stage="ingestion")
                 logger.warning("[live] Ingestion failed (continuing): %s", exc)
+
+            warmup_state = self._warmup_state(session)
+            if not dry_run and warmup_state["active"]:
+                enabled_at = warmup_state["enabled_at"]
+                warmup_until = warmup_state["warmup_until"]
+                summary = {
+                    "cycle_id": cycle_id,
+                    "skipped": True,
+                    "reason": "live_warmup",
+                    "new_articles": int(new_article_count),
+                    "new_tradeable_articles": int(new_tradeable_count),
+                    "new_tradeable_articles_by_ticker": new_tradeable_by_ticker,
+                    "market_time": msi["et_time_str"],
+                    "market_session": msi["label"],
+                    "run_key": run.run_key,
+                    "event_driven_mode": event_driven_mode,
+                    "warmup_active": True,
+                    "warmup_remaining_seconds": int(warmup_state["remaining_seconds"]),
+                    "live_enabled_at": enabled_at.isoformat() if enabled_at else None,
+                    "warmup_until": warmup_until.isoformat() if warmup_until else None,
+                    "live_allowed_sources": sorted(allowed_sources),
+                }
+                self.runtime.finish_run(
+                    session,
+                    run,
+                    status="COMPLETED",
+                    stage="warmup",
+                    current_ticker=None,
+                    current_agent=None,
+                    summary=summary,
+                )
+                self._emit_event(
+                    session,
+                    run,
+                    f"Cycle {cycle_id} warm-up active: skipping trades for {warmup_state['remaining_seconds']}s",
+                    stage="warmup",
+                    payload=summary,
+                )
+                logger.info(
+                    "[live] Cycle %s warm-up active; skipping trading until %s",
+                    cycle_id,
+                    warmup_until.isoformat() if warmup_until else "unknown",
+                )
+                return summary
 
             if event_driven_mode:
                 last_global_run = self._get_last_agent_run_time(session, ticker=None)
@@ -494,11 +541,242 @@ class LiveTradingService:
 
     def _allowed_source_set(self) -> set[str]:
         configured = getattr(self.settings, "live_allowed_sources", []) or []
-        return {
+        normalized = {
             normalize_source_name(str(source).strip().lower())
             for source in configured
             if str(source).strip()
         }
+        if normalized:
+            return normalized
+        return {
+            normalize_source_name(source)
+            for source in DEFAULT_LIVE_ALLOWED_SOURCES
+        }
+
+    @staticmethod
+    def _parse_utc_dt(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        if not value or not isinstance(value, str):
+            return None
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+    def _live_control_state(self, session: Session) -> dict[str, Any]:
+        return RuntimeControlService().get(session, CONTROL_LIVE_ENABLED) or {}
+
+    def _effective_news_since(
+        self,
+        *,
+        last_run_at: datetime | None,
+        live_enabled_at: datetime | None,
+    ) -> datetime | None:
+        candidates = [dt for dt in (last_run_at, live_enabled_at) if dt is not None]
+        if not candidates:
+            return None
+        return max(candidates)
+
+    def _warmup_state(self, session: Session) -> dict[str, Any]:
+        control = self._live_control_state(session)
+        enabled_at = self._parse_utc_dt(control.get("enabled_at"))
+        warmup_until = self._parse_utc_dt(control.get("warmup_until"))
+        now = datetime.now(timezone.utc)
+        active = bool(
+            control.get("enabled", False)
+            and warmup_until is not None
+            and warmup_until > now
+        )
+        remaining = max(0, int((warmup_until - now).total_seconds())) if active and warmup_until else 0
+        return {
+            "enabled_at": enabled_at,
+            "warmup_until": warmup_until,
+            "active": active,
+            "remaining_seconds": remaining,
+        }
+
+    def _find_trigger_event(
+        self,
+        session: Session,
+        *,
+        ticker: str,
+        since: datetime | None,
+        allowed_sources: set[str],
+    ) -> dict[str, Any] | None:
+        stmt = (
+            select(Event)
+            .where(
+                Event.validation_status == "VALID",
+                Event.confidence >= max(0, self._effective_live_min_confidence()),
+                Event.event_type.notin_(tuple(EXCLUDED_FROM_TRADING)),
+                Event.tickers.cast(sa.Text).ilike(f'%"{ticker.upper()}"%'),
+            )
+            .order_by(desc(Event.event_time), desc(Event.created_at), desc(Event.id))
+            .limit(20)
+        )
+        if since is not None:
+            stmt = stmt.where(sa.or_(Event.event_time >= since, Event.created_at >= since))
+
+        events = session.execute(stmt).scalars().all()
+        for event in events:
+            evidences = session.execute(
+                select(EventEvidence)
+                .where(EventEvidence.event_id == event.id)
+                .order_by(EventEvidence.source_tier.asc(), EventEvidence.captured_at.asc(), EventEvidence.id.asc())
+            ).scalars().all()
+            payload = self._event_payload(event, evidences, allowed_sources=allowed_sources)
+            if payload is not None:
+                return payload
+        return None
+
+    def _event_payload(
+        self,
+        event: Event,
+        evidences: list[EventEvidence],
+        *,
+        allowed_sources: set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        if not evidences:
+            return None
+        normalized_sources = {
+            normalize_source_name(ev.source)
+            for ev in evidences
+            if getattr(ev, "source", None)
+        }
+        if allowed_sources and not normalized_sources.intersection(allowed_sources):
+            return None
+        high_quality_sources = {
+            normalize_source_name(ev.source)
+            for ev in evidences
+            if getattr(ev, "source_tier", 9) <= 1 and getattr(ev, "source", None)
+        }
+        return {
+            "id": int(event.id),
+            "event_type": str(event.event_type or "unknown"),
+            "confidence": int(event.confidence or 0),
+            "summary": str(event.summary or ""),
+            "high_quality_source_count": len(high_quality_sources),
+            "source_count": len(normalized_sources),
+            "sources": sorted(normalized_sources),
+        }
+
+    def _trigger_event_for_agent_run(
+        self,
+        session: Session,
+        *,
+        agent_run_id: int | None,
+    ) -> dict[str, Any] | None:
+        if not agent_run_id:
+            return None
+        row = session.get(AgentRun, int(agent_run_id))
+        if row is None or row.trigger_event_id is None:
+            return None
+        event = session.get(Event, int(row.trigger_event_id))
+        if event is None:
+            return None
+        evidences = session.execute(
+            select(EventEvidence)
+            .where(EventEvidence.event_id == event.id)
+            .order_by(EventEvidence.source_tier.asc(), EventEvidence.captured_at.asc(), EventEvidence.id.asc())
+        ).scalars().all()
+        return self._event_payload(event, evidences, allowed_sources=None)
+
+    def _count_startup_new_positions(
+        self,
+        session: Session,
+        *,
+        enabled_at: datetime | None,
+    ) -> int:
+        if enabled_at is None:
+            return 0
+        return int(
+            session.execute(
+                select(sa.func.count())
+                .select_from(LiveTrade)
+                .where(
+                    LiveTrade.created_at >= enabled_at,
+                    LiveTrade.status.in_(["submitted", "filled", "pending_new"]),
+                    LiveTrade.action.in_(["BUY", "SHORT"]),
+                    LiveTrade.quantity > 0,
+                )
+            ).scalar_one()
+            or 0
+        )
+
+    def _portfolio_exposure_state(self, broker: AlpacaBroker) -> dict[str, Any]:
+        snapshot = broker.get_account()
+        positions = broker.get_all_positions()
+        equity = float(snapshot.get("equity") or 0.0)
+        long_exposure = sum(max(float(pos.market_value or 0.0), 0.0) for pos in positions)
+        short_exposure = sum(abs(min(float(pos.market_value or 0.0), 0.0)) for pos in positions)
+        return {
+            "equity": equity,
+            "positions": positions,
+            "long_exposure_pct": (long_exposure / equity) if equity > 0 else 0.0,
+            "short_exposure_pct": (short_exposure / equity) if equity > 0 else 0.0,
+            "long_positions_count": sum(1 for pos in positions if float(pos.quantity or 0.0) > 0),
+            "short_positions_count": sum(1 for pos in positions if float(pos.quantity or 0.0) < 0),
+        }
+
+    def _same_theme_direction_count(
+        self,
+        session: Session,
+        *,
+        positions: list[Any],
+        desired_action: str,
+        event_type: str | None,
+    ) -> int:
+        if not event_type:
+            return 0
+        tickers = [str(pos.ticker).upper() for pos in positions]
+        if not tickers:
+            return 0
+        desired_side = "LONG" if desired_action == "BUY" else "SHORT"
+        latest_rows = session.execute(
+            select(LiveTrade.ticker, LiveTrade.agent_run_id)
+            .where(
+                LiveTrade.ticker.in_(tickers),
+                LiveTrade.status.in_(["submitted", "filled", "pending_new"]),
+                LiveTrade.agent_run_id.is_not(None),
+            )
+            .order_by(desc(LiveTrade.id))
+        ).all()
+        latest_by_ticker: dict[str, int] = {}
+        for live_ticker, agent_run_id in latest_rows:
+            ticker_key = str(live_ticker).upper()
+            if ticker_key not in latest_by_ticker and agent_run_id is not None:
+                latest_by_ticker[ticker_key] = int(agent_run_id)
+        if not latest_by_ticker:
+            return 0
+
+        runs = session.execute(
+            select(AgentRun.id, AgentRun.trigger_event_id).where(AgentRun.id.in_(list(latest_by_ticker.values())))
+        ).all()
+        trigger_map = {int(run_id): trigger_event_id for run_id, trigger_event_id in runs if trigger_event_id is not None}
+        if not trigger_map:
+            return 0
+
+        events = session.execute(
+            select(Event.id, Event.event_type).where(Event.id.in_(list(trigger_map.values())))
+        ).all()
+        event_map = {int(event_id): str(ev_type or "unknown") for event_id, ev_type in events}
+
+        count = 0
+        for pos in positions:
+            pos_side = "LONG" if float(pos.quantity or 0.0) > 0 else "SHORT"
+            if pos_side != desired_side:
+                continue
+            agent_run_id = latest_by_ticker.get(str(pos.ticker).upper())
+            if agent_run_id is None:
+                continue
+            trigger_event_id = trigger_map.get(agent_run_id)
+            if trigger_event_id is None:
+                continue
+            if event_map.get(int(trigger_event_id)) == event_type:
+                count += 1
+        return count
 
     @staticmethod
     def _source_allowed(source: str | None, allowed_sources: set[str]) -> bool:
@@ -1029,7 +1307,24 @@ class LiveTradingService:
             session.commit()
 
         last_run_at = self._get_last_agent_run_time(session, ticker=ticker)
+        warmup_state = self._warmup_state(session)
+        news_since = self._effective_news_since(
+            last_run_at=last_run_at,
+            live_enabled_at=warmup_state.get("enabled_at"),
+        )
+        trigger_event = self._find_trigger_event(
+            session,
+            ticker=ticker,
+            since=news_since,
+            allowed_sources=allowed_sources or set(),
+        )
         graph_context: dict[str, Any] = {"last_agent_run_at": last_run_at} if last_run_at else {}
+        if news_since is not None:
+            graph_context["news_since"] = news_since
+        if trigger_event:
+            graph_context["trigger"] = "event"
+            graph_context["trigger_event_id"] = int(trigger_event["id"])
+            graph_context["trigger_event"] = trigger_event
         if allowed_sources:
             graph_context["allowed_sources"] = sorted(allowed_sources)
         if fast_path:
@@ -1062,6 +1357,8 @@ class LiveTradingService:
         final_confidence = self._extract_final_confidence(state)
         live_min_confidence = self._effective_live_min_confidence()
         blocked_by_confidence = False
+        blocked_by_missing_event = False
+        blocked_by_news_conflict = False
         used_cached_macro = bool(state.get("used_cached_macro", graph_context.get("used_cached_macro", False)))
         used_cached_fund = bool(state.get("used_cached_fundamentals", graph_context.get("used_cached_fundamentals", False)))
         if run is not None:
@@ -1096,6 +1393,64 @@ class LiveTradingService:
                         "blocked_action": prior_action,
                         "final_confidence": final_confidence,
                         "live_min_confidence": live_min_confidence,
+                    },
+                )
+                session.commit()
+
+        news_signal = str((state.get("news_sentiment_result") or {}).get("signal", "") or "").upper().strip()
+        if desired_action in {"BUY", "SHORT", "SELL"} and not trigger_event:
+            blocked_by_missing_event = True
+            prior_action = desired_action
+            desired_action = "HOLD"
+            target_pct = 0.0
+            execution_plan = {}
+            reasoning = (
+                f"{reasoning} | event_gate=no_trigger_event, downgraded {prior_action}->HOLD"
+            )[:1000]
+            if run is not None:
+                self.runtime.add_event(
+                    session,
+                    "live_cycle",
+                    f"{ticker}: event gate blocked {prior_action} (missing trigger_event_id)",
+                    run=run,
+                    level="info",
+                    stage="event_gate_blocked",
+                    ticker=ticker,
+                    agent="portfolio_manager",
+                    payload={"blocked_action": prior_action, "reason": "missing_trigger_event"},
+                )
+                session.commit()
+
+        if (
+            desired_action in {"SHORT", "SELL"}
+            and news_signal == "BUY"
+            and trigger_event is not None
+            and int(trigger_event.get("high_quality_source_count", 0) or 0) < 2
+        ):
+            blocked_by_news_conflict = True
+            prior_action = desired_action
+            desired_action = "HOLD"
+            target_pct = 0.0
+            execution_plan = {}
+            reasoning = (
+                f"{reasoning} | news_conflict_gate=BUY_vs_{prior_action}, "
+                f"high_quality_sources={trigger_event.get('high_quality_source_count', 0)}<2"
+            )[:1000]
+            if run is not None:
+                self.runtime.add_event(
+                    session,
+                    "live_cycle",
+                    f"{ticker}: news conflict blocked {prior_action} (tier0/1 corroboration insufficient)",
+                    run=run,
+                    level="info",
+                    stage="news_conflict_blocked",
+                    ticker=ticker,
+                    agent="portfolio_manager",
+                    payload={
+                        "blocked_action": prior_action,
+                        "news_signal": news_signal,
+                        "trigger_event_id": trigger_event.get("id"),
+                        "high_quality_source_count": int(trigger_event.get("high_quality_source_count", 0) or 0),
                     },
                 )
                 session.commit()
@@ -1182,6 +1537,9 @@ class LiveTradingService:
                     "final_confidence": final_confidence,
                     "live_min_confidence": live_min_confidence,
                     "blocked_by_confidence": blocked_by_confidence,
+                    "blocked_by_missing_event": blocked_by_missing_event,
+                    "blocked_by_news_conflict": blocked_by_news_conflict,
+                    "trigger_event_id": trigger_event.get("id") if trigger_event else None,
                 },
             )
             return {
@@ -1195,6 +1553,9 @@ class LiveTradingService:
                 "final_confidence": final_confidence,
                 "live_min_confidence": live_min_confidence,
                 "blocked_by_confidence": blocked_by_confidence,
+                "blocked_by_missing_event": blocked_by_missing_event,
+                "blocked_by_news_conflict": blocked_by_news_conflict,
+                "trigger_event_id": trigger_event.get("id") if trigger_event else None,
                 **flow_info,
             }
 
@@ -1257,6 +1618,9 @@ class LiveTradingService:
                         "final_confidence": final_confidence,
                         "live_min_confidence": live_min_confidence,
                         "blocked_by_confidence": blocked_by_confidence,
+                        "blocked_by_missing_event": blocked_by_missing_event,
+                        "blocked_by_news_conflict": blocked_by_news_conflict,
+                        "trigger_event_id": trigger_event.get("id") if trigger_event else None,
                     },
                 )
                 return {
@@ -1272,6 +1636,9 @@ class LiveTradingService:
                     "final_confidence": final_confidence,
                     "live_min_confidence": live_min_confidence,
                     "blocked_by_confidence": blocked_by_confidence,
+                    "blocked_by_missing_event": blocked_by_missing_event,
+                    "blocked_by_news_conflict": blocked_by_news_conflict,
+                    "trigger_event_id": trigger_event.get("id") if trigger_event else None,
                     **flow_info,
                 }
 
@@ -1301,6 +1668,9 @@ class LiveTradingService:
                     "final_confidence": final_confidence,
                     "live_min_confidence": live_min_confidence,
                     "blocked_by_confidence": blocked_by_confidence,
+                    "blocked_by_missing_event": blocked_by_missing_event,
+                    "blocked_by_news_conflict": blocked_by_news_conflict,
+                    "trigger_event_id": trigger_event.get("id") if trigger_event else None,
                 },
             )
             return {
@@ -1312,6 +1682,9 @@ class LiveTradingService:
                 "final_confidence": final_confidence,
                 "live_min_confidence": live_min_confidence,
                 "blocked_by_confidence": blocked_by_confidence,
+                "blocked_by_missing_event": blocked_by_missing_event,
+                "blocked_by_news_conflict": blocked_by_news_conflict,
+                "trigger_event_id": trigger_event.get("id") if trigger_event else None,
                 **flow_info,
             }
 
@@ -1342,14 +1715,15 @@ class LiveTradingService:
             broker=broker,
             ticker=ticker,
             desired_action=desired_action,
-            target_pct=target_pct,
-            portfolio_value=portfolio_value,
-            cycle_id=cycle_id,
-            msi=msi,
-            agent_run_id=agent_run_id,
-            reasoning=reasoning,
-            run=run,
-        )
+                target_pct=target_pct,
+                portfolio_value=portfolio_value,
+                cycle_id=cycle_id,
+                msi=msi,
+                agent_run_id=agent_run_id,
+                reasoning=reasoning,
+                run=run,
+                trigger_event=trigger_event,
+            )
         order_result.update(
             {
                 "used_cached_macro": used_cached_macro,
@@ -1359,6 +1733,9 @@ class LiveTradingService:
                 "final_confidence": final_confidence,
                 "live_min_confidence": live_min_confidence,
                 "blocked_by_confidence": blocked_by_confidence,
+                "blocked_by_missing_event": blocked_by_missing_event,
+                "blocked_by_news_conflict": blocked_by_news_conflict,
+                "trigger_event_id": trigger_event.get("id") if trigger_event else None,
             }
         )
         self._annotate_agent_run(
@@ -1373,6 +1750,9 @@ class LiveTradingService:
                 "final_confidence": final_confidence,
                 "live_min_confidence": live_min_confidence,
                 "blocked_by_confidence": blocked_by_confidence,
+                "blocked_by_missing_event": blocked_by_missing_event,
+                "blocked_by_news_conflict": blocked_by_news_conflict,
+                "trigger_event_id": trigger_event.get("id") if trigger_event else None,
             },
         )
         return order_result
@@ -1488,6 +1868,7 @@ class LiveTradingService:
                 agent_run_id=plan.agent_run_id,
                 reasoning=f"Triggered entry plan #{plan.id}: {trigger_reason}",
                 run=run,
+                trigger_event=self._trigger_event_for_agent_run(session, agent_run_id=plan.agent_run_id),
             )
             if exec_result.get("order_placed"):
                 plan.status = "TRIGGERED"
@@ -1557,6 +1938,7 @@ class LiveTradingService:
         agent_run_id: int | None,
         reasoning: str,
         run: WorkerRun | None,
+        trigger_event: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if run is not None:
             self.runtime.update_run(session, run, stage="pricing", current_ticker=ticker, current_agent=None)
@@ -1655,6 +2037,203 @@ class LiveTradingService:
                 reasoning="Position already at target",
             )
             return {"ticker": ticker, "action": desired_action, "order_placed": False, "reason": "position unchanged"}
+
+        is_new_directional_position = current_qty == 0 and order_action in {"BUY", "SHORT"}
+        live_control = self._live_control_state(session)
+        enabled_at = self._parse_utc_dt(live_control.get("enabled_at"))
+        ramp_minutes = max(0, int(getattr(self.settings, "live_startup_ramp_minutes", 30) or 0))
+        within_startup_ramp = bool(
+            enabled_at is not None
+            and ramp_minutes > 0
+            and datetime.now(timezone.utc) < enabled_at + timedelta(minutes=ramp_minutes)
+        )
+
+        if is_new_directional_position and within_startup_ramp:
+            startup_limit = max(0, int(getattr(self.settings, "live_startup_max_new_positions", 2) or 0))
+            startup_opened = self._count_startup_new_positions(session, enabled_at=enabled_at)
+            if startup_limit > 0 and startup_opened >= startup_limit:
+                self._record_live_trade(
+                    session,
+                    cycle_id=cycle_id,
+                    ticker=ticker,
+                    agent_run_id=agent_run_id,
+                    action=desired_action,
+                    quantity=0,
+                    target_pct=target_pct,
+                    order_id=None,
+                    status="skipped",
+                    et_time=msi["et_time_str"],
+                    market_session=msi["label"],
+                    reasoning=(
+                        f"Startup ramp guard: already opened {startup_opened} new positions "
+                        f"within {ramp_minutes}m of enable"
+                    ),
+                )
+                return {
+                    "ticker": ticker,
+                    "action": desired_action,
+                    "order_placed": False,
+                    "reason": "startup_ramp_position_cap",
+                    "startup_new_positions": startup_opened,
+                    "startup_limit": startup_limit,
+                }
+
+        if is_new_directional_position:
+            exposure = self._portfolio_exposure_state(broker)
+            equity = float(exposure.get("equity") or 0.0)
+            proposed_notional = float(order_qty) * float(current_price)
+            if order_action == "BUY":
+                projected_long_exposure_pct = exposure["long_exposure_pct"] + (
+                    (proposed_notional / equity) if equity > 0 else 0.0
+                )
+                max_long = float(getattr(self.settings, "live_max_net_long_exposure_pct", 0.35) or 0.35)
+                if projected_long_exposure_pct > max_long:
+                    self._record_live_trade(
+                        session,
+                        cycle_id=cycle_id,
+                        ticker=ticker,
+                        agent_run_id=agent_run_id,
+                        action=desired_action,
+                        quantity=0,
+                        target_pct=target_pct,
+                        order_id=None,
+                        status="skipped",
+                        et_time=msi["et_time_str"],
+                        market_session=msi["label"],
+                        reasoning=(
+                            f"Net long exposure cap: projected {projected_long_exposure_pct:.1%} "
+                            f"> max {max_long:.1%}"
+                        ),
+                    )
+                    return {
+                        "ticker": ticker,
+                        "action": desired_action,
+                        "order_placed": False,
+                        "reason": "net_long_exposure_cap",
+                        "projected_long_exposure_pct": projected_long_exposure_pct,
+                        "max_long_exposure_pct": max_long,
+                    }
+                max_same_direction = max(0, int(getattr(self.settings, "live_max_same_direction_positions", 4) or 0))
+                if max_same_direction > 0 and int(exposure["long_positions_count"]) >= max_same_direction:
+                    self._record_live_trade(
+                        session,
+                        cycle_id=cycle_id,
+                        ticker=ticker,
+                        agent_run_id=agent_run_id,
+                        action=desired_action,
+                        quantity=0,
+                        target_pct=target_pct,
+                        order_id=None,
+                        status="skipped",
+                        et_time=msi["et_time_str"],
+                        market_session=msi["label"],
+                        reasoning=(
+                            f"Direction concentration cap: already {int(exposure['long_positions_count'])} LONG positions "
+                            f"(max {max_same_direction})"
+                        ),
+                    )
+                    return {
+                        "ticker": ticker,
+                        "action": desired_action,
+                        "order_placed": False,
+                        "reason": "same_direction_position_cap",
+                        "current_direction_positions": int(exposure["long_positions_count"]),
+                        "max_same_direction_positions": max_same_direction,
+                    }
+            elif order_action == "SHORT":
+                projected_short_exposure_pct = exposure["short_exposure_pct"] + (
+                    (proposed_notional / equity) if equity > 0 else 0.0
+                )
+                max_short = float(getattr(self.settings, "live_max_net_short_exposure_pct", 0.35) or 0.35)
+                if projected_short_exposure_pct > max_short:
+                    self._record_live_trade(
+                        session,
+                        cycle_id=cycle_id,
+                        ticker=ticker,
+                        agent_run_id=agent_run_id,
+                        action=desired_action,
+                        quantity=0,
+                        target_pct=target_pct,
+                        order_id=None,
+                        status="skipped",
+                        et_time=msi["et_time_str"],
+                        market_session=msi["label"],
+                        reasoning=(
+                            f"Net short exposure cap: projected {projected_short_exposure_pct:.1%} "
+                            f"> max {max_short:.1%}"
+                        ),
+                    )
+                    return {
+                        "ticker": ticker,
+                        "action": desired_action,
+                        "order_placed": False,
+                        "reason": "net_short_exposure_cap",
+                        "projected_short_exposure_pct": projected_short_exposure_pct,
+                        "max_short_exposure_pct": max_short,
+                    }
+                max_same_direction = max(0, int(getattr(self.settings, "live_max_same_direction_positions", 4) or 0))
+                if max_same_direction > 0 and int(exposure["short_positions_count"]) >= max_same_direction:
+                    self._record_live_trade(
+                        session,
+                        cycle_id=cycle_id,
+                        ticker=ticker,
+                        agent_run_id=agent_run_id,
+                        action=desired_action,
+                        quantity=0,
+                        target_pct=target_pct,
+                        order_id=None,
+                        status="skipped",
+                        et_time=msi["et_time_str"],
+                        market_session=msi["label"],
+                        reasoning=(
+                            f"Direction concentration cap: already {int(exposure['short_positions_count'])} SHORT positions "
+                            f"(max {max_same_direction})"
+                        ),
+                    )
+                    return {
+                        "ticker": ticker,
+                        "action": desired_action,
+                        "order_placed": False,
+                        "reason": "same_direction_position_cap",
+                        "current_direction_positions": int(exposure["short_positions_count"]),
+                        "max_same_direction_positions": max_same_direction,
+                    }
+
+            theme_cap = max(0, int(getattr(self.settings, "live_max_same_theme_direction_positions", 2) or 0))
+            if theme_cap > 0 and trigger_event:
+                same_theme_count = self._same_theme_direction_count(
+                    session,
+                    positions=exposure["positions"],
+                    desired_action=order_action,
+                    event_type=str(trigger_event.get("event_type") or "unknown"),
+                )
+                if same_theme_count >= theme_cap:
+                    self._record_live_trade(
+                        session,
+                        cycle_id=cycle_id,
+                        ticker=ticker,
+                        agent_run_id=agent_run_id,
+                        action=desired_action,
+                        quantity=0,
+                        target_pct=target_pct,
+                        order_id=None,
+                        status="skipped",
+                        et_time=msi["et_time_str"],
+                        market_session=msi["label"],
+                        reasoning=(
+                            f"Theme concentration cap: already {same_theme_count} "
+                            f"{order_action} positions for event_type={trigger_event.get('event_type')}"
+                        ),
+                    )
+                    return {
+                        "ticker": ticker,
+                        "action": desired_action,
+                        "order_placed": False,
+                        "reason": "same_theme_direction_cap",
+                        "current_same_theme_positions": same_theme_count,
+                        "max_same_theme_positions": theme_cap,
+                        "event_type": trigger_event.get("event_type"),
+                    }
 
         if self._has_open_order(broker, ticker):
             logger.info("[live] %s already has an open order — skipping", ticker)

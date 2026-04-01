@@ -86,6 +86,12 @@ def test_execute_active_wait_until_open_plan_triggers_order(session, settings, m
         def get_position(self, _ticker):
             return None
 
+        def get_account(self):
+            return {"equity": "100000"}
+
+        def get_all_positions(self):
+            return []
+
         def get_open_orders(self, _ticker):
             return []
 
@@ -142,6 +148,12 @@ def test_execute_active_plan_emits_trigger_log_event(session, settings, monkeypa
         def get_position(self, _ticker):
             return None
 
+        def get_account(self):
+            return {"equity": "100000"}
+
+        def get_all_positions(self):
+            return []
+
         def get_open_orders(self, _ticker):
             return []
 
@@ -179,11 +191,25 @@ def test_flow_soft_gate_downgrades_to_wait_breakout(session, settings, monkeypat
                 "final_action": "BUY",
                 "final_position_pct": 0.10,
                 "final_reasoning": "news catalyst strong",
+                "portfolio_manager_result": {
+                    "confidence": 80,
+                    "metadata": {"action": "BUY", "position_pct": 0.10},
+                },
                 "execution_plan": {"execution_mode": "IMMEDIATE"},
             }
 
     monkeypatch.setattr(service, "_get_agent_graph", lambda: DummyGraph())
     monkeypatch.setattr(service, "_latest_cached_close", lambda _session, _ticker: 100.0)
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 99,
+            "event_type": "guidance_cut",
+            "confidence": 85,
+            "high_quality_source_count": 2,
+        },
+    )
     monkeypatch.setattr(
         service.capital_confirmation,
         "evaluate",

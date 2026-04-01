@@ -119,6 +119,7 @@ def get_recent_events(
     limit: int = 30,
     min_confidence: int = 0,
     as_of: datetime | None = None,
+    since: datetime | None = None,
     allowed_sources: list[str] | None = None,
 ) -> list[dict]:
     """Return recent events, optionally filtered by ticker.
@@ -152,6 +153,9 @@ def get_recent_events(
     if ticker:
         stmt = stmt.where(Event.tickers.cast(sa.Text).ilike(f'%"{ticker.upper()}"%'))
 
+    if since:
+        stmt = stmt.where(sa.or_(Event.event_time >= since, Event.created_at >= since))
+
     stmt = stmt.order_by(Event.event_time.desc()).limit(limit)
     rows = session.execute(stmt).scalars().all()
 
@@ -179,6 +183,7 @@ def get_recent_events(
             "severity": row.severity,
             "confidence": row.confidence,
             "event_time": row.event_time.isoformat(),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
             "validation_status": row.validation_status,
             "summary": row.summary,
             "evidence_count": len(evidence_count),
@@ -222,6 +227,7 @@ def get_event_detail(session: Session, event_id: int) -> dict | None:
 def get_ticker_news_summary(
     session: Session, ticker: str, lookback_hours: int = 72, limit: int = 25,
     as_of: datetime | None = None,
+    since: datetime | None = None,
     allowed_sources: list[str] | None = None,
 ) -> list[dict]:
     """Return recent RawItems mentioning a ticker directly.
@@ -285,12 +291,22 @@ def get_ticker_news_summary(
         source_name = normalize_source_name(row.source)
         if allowed_source_set and source_name not in allowed_source_set:
             continue
+        ingested_at = row.ingested_at.isoformat() if row.ingested_at else None
+        published_at = row.published_at.isoformat()
+        if since:
+            ingested_dt = _parse_dt(ingested_at)
+            published_dt = _parse_dt(published_at)
+            if (
+                (ingested_dt is not None and ingested_dt < since)
+                and (published_dt is not None and published_dt < since)
+            ):
+                continue
         results.append({
             "id": row.id,
             "title": row.title,
             "source": source_name,
-            "published_at": row.published_at.isoformat(),
-            "ingested_at": row.ingested_at.isoformat() if row.ingested_at else None,
+            "published_at": published_at,
+            "ingested_at": ingested_at,
             "body_snippet": (row.body or "")[:400],
             "body_full": row.body or "",
             "source_tier": row.source_tier,
@@ -458,6 +474,7 @@ def build_news_context_text(
     ticker: str,
     lookback_hours: int = 336,
     as_of: datetime | None = None,
+    since: datetime | None = None,
     expanded_articles: dict[int, dict] | None = None,
     allowed_sources: list[str] | None = None,
 ) -> str:
@@ -482,6 +499,7 @@ def build_news_context_text(
         lookback_hours=lookback_hours,
         limit=25,
         as_of=as_of,
+        since=since,
         allowed_sources=allowed_sources,
     )
     news = get_ticker_news_summary(
@@ -490,6 +508,7 @@ def build_news_context_text(
         lookback_hours=lookback_hours,
         limit=20,
         as_of=as_of,
+        since=since,
         allowed_sources=allowed_sources,
     )
 

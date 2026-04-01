@@ -287,7 +287,8 @@ class AgentGraph:
                     final_confidence = None
             run = AgentRun(
                 ticker=ticker.upper(),
-                trigger="scheduled",
+                trigger=str((state.get("context") or {}).get("trigger") or "scheduled"),
+                trigger_event_id=(state.get("context") or {}).get("trigger_event_id"),
                 macro_output=state.get("macro_analyst_result") or {},
                 news_output=state.get("news_sentiment_result") or {},
                 fundamentals_output=state.get("fundamentals_result") or {},

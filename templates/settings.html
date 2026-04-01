@@ -224,7 +224,7 @@
   <div class="settings-section">
     <div style="margin-bottom:8px">
       <div class="setting-label">News Source Whitelist</div>
-      <div class="setting-desc">仅对这些来源做 live 决策；留空表示不过滤（ALL）</div>
+      <div class="setting-desc">Live 默认只允许高质量来源：benzinga / reuters / cnbc / earnings_release / sec；留空也会回退到这组默认值</div>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
       <input type="text" id="s-source-input" placeholder="e.g. finnhub" style="max-width:180px" />
@@ -259,6 +259,73 @@
           <span class="slider-val" id="s-max-position-val">{{ (led.get('LIVE_MAX_POSITION_PCT', 0.1) * 100) | int }}%</span>
         </div>
         <input type="hidden" id="s-max-position" value="{{ led.get('LIVE_MAX_POSITION_PCT', 0.1) }}" />
+      </div>
+      <div>
+        <div class="setting-label mb4">Live warm-up</div>
+        <div class="setting-desc mb8">Enable live 后先只采集不下单，避免启动积压新闻直接触发交易</div>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-live-warmup" min="0" step="1"
+            value="{{ led.get('LIVE_ENABLE_WARMUP_MINUTES', 15) }}" />
+          <span class="input-unit">分钟</span>
+        </div>
+      </div>
+    </div>
+    <div class="sg3 mt12">
+      <div class="form-group">
+        <label>首轮新仓上限</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-startup-max-new" min="0" step="1"
+            value="{{ led.get('LIVE_STARTUP_MAX_NEW_POSITIONS', 2) }}" />
+          <span class="input-unit">笔</span>
+        </div>
+        <div class="text-muted text-xs mt4">启用后的前置冷启动阶段最多允许几笔新仓</div>
+      </div>
+      <div class="form-group">
+        <label>首轮限速窗口</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-startup-ramp-min" min="0" step="1"
+            value="{{ led.get('LIVE_STARTUP_RAMP_MINUTES', 30) }}" />
+          <span class="input-unit">分钟</span>
+        </div>
+        <div class="text-muted text-xs mt4">启用 live 后的前 N 分钟按新仓上限限速</div>
+      </div>
+      <div class="form-group">
+        <label>同向持仓上限</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-max-same-direction" min="0" step="1"
+            value="{{ led.get('LIVE_MAX_SAME_DIRECTION_POSITIONS', 4) }}" />
+          <span class="input-unit">只</span>
+        </div>
+        <div class="text-muted text-xs mt4">限制组合同时持有的多头或空头数量</div>
+      </div>
+    </div>
+    <div class="sg3 mt12">
+      <div class="form-group">
+        <label>净多头敞口上限</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-max-net-long" min="0" max="1" step="0.01"
+            value="{{ led.get('LIVE_MAX_NET_LONG_EXPOSURE_PCT', 0.35) }}" />
+          <span class="input-unit">比例</span>
+        </div>
+        <div class="text-muted text-xs mt4">新多头成交后的总 long exposure / equity 上限</div>
+      </div>
+      <div class="form-group">
+        <label>净空头敞口上限</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-max-net-short" min="0" max="1" step="0.01"
+            value="{{ led.get('LIVE_MAX_NET_SHORT_EXPOSURE_PCT', 0.35) }}" />
+          <span class="input-unit">比例</span>
+        </div>
+        <div class="text-muted text-xs mt4">新空头成交后的总 short exposure / equity 上限</div>
+      </div>
+      <div class="form-group">
+        <label>同主题同方向上限</label>
+        <div class="input-unit-wrap">
+          <input type="number" id="s-max-same-theme-direction" min="0" step="1"
+            value="{{ led.get('LIVE_MAX_SAME_THEME_DIRECTION_POSITIONS', 2) }}" />
+          <span class="input-unit">只</span>
+        </div>
+        <div class="text-muted text-xs mt4">同一事件类型同方向仓位集中度上限</div>
       </div>
     </div>
   </div>
@@ -812,6 +879,13 @@ async function saveAllSettings(){
     LIVE_ALLOWED_SOURCES: document.getElementById('s-sources-hidden').value,
     LIVE_MIN_CONFIDENCE: document.getElementById('s-min-confidence').value,
     LIVE_MAX_POSITION_PCT: document.getElementById('s-max-position').value,
+    LIVE_ENABLE_WARMUP_MINUTES: document.getElementById('s-live-warmup').value,
+    LIVE_STARTUP_MAX_NEW_POSITIONS: document.getElementById('s-startup-max-new').value,
+    LIVE_STARTUP_RAMP_MINUTES: document.getElementById('s-startup-ramp-min').value,
+    LIVE_MAX_NET_LONG_EXPOSURE_PCT: document.getElementById('s-max-net-long').value,
+    LIVE_MAX_NET_SHORT_EXPOSURE_PCT: document.getElementById('s-max-net-short').value,
+    LIVE_MAX_SAME_DIRECTION_POSITIONS: document.getElementById('s-max-same-direction').value,
+    LIVE_MAX_SAME_THEME_DIRECTION_POSITIONS: document.getElementById('s-max-same-theme-direction').value,
     LIVE_OPEN_CYCLE_SECONDS: document.getElementById('s-open-cycle').value,
     LIVE_CLOSED_CYCLE_SECONDS: document.getElementById('s-closed-cycle').value,
     LIVE_TICKER_COOLDOWN_MINUTES: document.getElementById('s-ticker-cooldown').value,
@@ -899,6 +973,13 @@ function applyAll(ed){
   document.getElementById('s-max-position-range').value = pos;
   document.getElementById('s-max-position-val').textContent = pos + '%';
   document.getElementById('s-max-position').value = (pos/100).toFixed(2);
+  setVal('s-live-warmup', ed.LIVE_ENABLE_WARMUP_MINUTES ?? 15);
+  setVal('s-startup-max-new', ed.LIVE_STARTUP_MAX_NEW_POSITIONS ?? 2);
+  setVal('s-startup-ramp-min', ed.LIVE_STARTUP_RAMP_MINUTES ?? 30);
+  setVal('s-max-net-long', ed.LIVE_MAX_NET_LONG_EXPOSURE_PCT ?? 0.35);
+  setVal('s-max-net-short', ed.LIVE_MAX_NET_SHORT_EXPOSURE_PCT ?? 0.35);
+  setVal('s-max-same-direction', ed.LIVE_MAX_SAME_DIRECTION_POSITIONS ?? 4);
+  setVal('s-max-same-theme-direction', ed.LIVE_MAX_SAME_THEME_DIRECTION_POSITIONS ?? 2);
 
   // Timing
   setVal('s-open-cycle', ed.LIVE_OPEN_CYCLE_SECONDS ?? 900);

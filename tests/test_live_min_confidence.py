@@ -45,6 +45,16 @@ def test_live_min_confidence_blocks_directional_orders(session, settings, monkey
     )
     service = LiveTradingService(live_settings)
     service._agent_graph = _DummyGraph(_base_state(action="BUY", confidence=62))
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 1,
+            "event_type": "earnings_miss",
+            "confidence": 88,
+            "high_quality_source_count": 2,
+        },
+    )
 
     monkeypatch.setattr(
         service,
@@ -81,6 +91,16 @@ def test_live_min_confidence_allows_order_when_confidence_passes(session, settin
     )
     service = LiveTradingService(live_settings)
     service._agent_graph = _DummyGraph(_base_state(action="BUY", confidence=88))
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 2,
+            "event_type": "major_litigation",
+            "confidence": 90,
+            "high_quality_source_count": 2,
+        },
+    )
 
     captured: dict[str, object] = {}
 
@@ -107,3 +127,85 @@ def test_live_min_confidence_allows_order_when_confidence_passes(session, settin
     assert result["blocked_by_confidence"] is False
     assert result["final_confidence"] == 88
     assert result["live_min_confidence"] == 70
+
+
+def test_live_requires_trigger_event_to_trade(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_min_confidence": 50,
+            "live_entry_planning_enabled": False,
+            "flow_confirmation_enabled": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    service._agent_graph = _DummyGraph(_base_state(action="BUY", confidence=88))
+    monkeypatch.setattr(service, "_find_trigger_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service,
+        "_submit_order_for_action",
+        lambda **_kwargs: pytest.fail("_submit_order_for_action should not be called when trigger event is missing"),
+    )
+
+    result = service._process_ticker(
+        session=session,
+        broker=object(),
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="pytest-missing-event",
+        msi=_open_session(),
+        dry_run=False,
+        run=None,
+        fast_path=False,
+    )
+
+    assert result["action"] == "HOLD"
+    assert result["blocked_by_missing_event"] is True
+    assert result["trigger_event_id"] is None
+
+
+def test_live_blocks_short_when_news_is_buy_without_dual_hq_confirmation(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_min_confidence": 50,
+            "live_entry_planning_enabled": False,
+            "flow_confirmation_enabled": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    service._agent_graph = _DummyGraph(
+        {
+            **_base_state(action="SHORT", confidence=91),
+            "news_sentiment_result": {"signal": "BUY", "confidence": 72},
+        }
+    )
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 3,
+            "event_type": "guidance_cut",
+            "confidence": 88,
+            "high_quality_source_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_submit_order_for_action",
+        lambda **_kwargs: pytest.fail("_submit_order_for_action should not be called when news conflict gate blocks trade"),
+    )
+
+    result = service._process_ticker(
+        session=session,
+        broker=object(),
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="pytest-news-conflict",
+        msi=_open_session(),
+        dry_run=False,
+        run=None,
+        fast_path=False,
+    )
+
+    assert result["action"] == "HOLD"
+    assert result["blocked_by_news_conflict"] is True
+    assert result["trigger_event_id"] == 3

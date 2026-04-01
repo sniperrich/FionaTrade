@@ -15,6 +15,14 @@ DEFAULT_LIVE_TICKERS = [
     "JNJ", "PG", "HD", "AVGO", "BAC",
 ]
 
+DEFAULT_LIVE_ALLOWED_SOURCES = [
+    "benzinga",
+    "reuters",
+    "cnbc",
+    "earnings_release",
+    "sec",
+]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -193,7 +201,9 @@ class Settings(BaseSettings):
     )
     # Optional source whitelist for live news analysis/triggering.
     # Empty list means "all sources".
-    live_allowed_sources: Annotated[list[str], NoDecode] = []
+    live_allowed_sources: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: DEFAULT_LIVE_ALLOWED_SOURCES.copy()
+    )
     # How often (seconds) the live cycle runs during market hours (default 5 min)
     live_cycle_interval_seconds: int = 300
     # Effective scheduled interval by market session.
@@ -213,10 +223,20 @@ class Settings(BaseSettings):
     live_data_max_age_minutes: float = 20.0
     # Event-driven live mode: run full graph when new tradeable news arrives.
     live_event_driven_mode: bool = True
+    # When live is enabled, warm up ingestion/cache first before placing orders.
+    live_enable_warmup_minutes: int = 15
     # Legacy fallback interval (kept for backward compatibility).
     live_fallback_cycle_seconds: int = 600
     # Per-ticker debounce when there is no new tradeable event for that ticker.
     live_ticker_cooldown_minutes: int = 60
+    # Startup/ramp guardrails right after enabling live.
+    live_startup_max_new_positions: int = 2
+    live_startup_ramp_minutes: int = 30
+    # Portfolio concentration caps during live execution.
+    live_max_net_long_exposure_pct: float = 0.35
+    live_max_net_short_exposure_pct: float = 0.35
+    live_max_same_direction_positions: int = 4
+    live_max_same_theme_direction_positions: int = 2
     # Fast-path cache TTL for macro/fundamentals agent outputs.
     live_fast_path_macro_ttl_min: int = 60
     live_fast_path_fund_ttl_min: int = 120

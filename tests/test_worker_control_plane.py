@@ -259,6 +259,8 @@ def test_set_live_enabled_queues_commands_when_worker_and_supervisor_online(sess
     result = set_live_enabled(body={"enabled": True}, session=session, settings=settings)
 
     assert result["enabled"] is True
+    assert result["live_enabled_at"] is not None
+    assert result["live_warmup_until"] is not None
     commands = session.query(WorkerCommand).order_by(WorkerCommand.id.asc()).all()
     assert [command.command_type for command in commands] == [
         "refresh_bars",
@@ -409,6 +411,16 @@ def test_stale_market_data_suppresses_order_before_price_fetch(session, settings
             raise AssertionError("price fetch should not happen when cache is stale")
 
     monkeypatch.setattr(service, "_get_agent_graph", lambda: DummyGraph())
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 101,
+            "event_type": "guidance_cut",
+            "confidence": 85,
+            "high_quality_source_count": 2,
+        },
+    )
     monkeypatch.setattr(
         service.market_data,
         "is_ticker_cache_fresh",

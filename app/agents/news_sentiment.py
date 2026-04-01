@@ -112,6 +112,7 @@ class NewsSentimentAgent(BaseAgent):
         try:
             as_of = (context or {}).get("as_of")
             last_run_at = (context or {}).get("last_agent_run_at")  # set by LiveTradingService
+            news_since = (context or {}).get("news_since")
             allowed_sources = (context or {}).get("allowed_sources")
 
             # ── Build geo / sentiment blocks (shared across both passes) ──
@@ -124,7 +125,7 @@ class NewsSentimentAgent(BaseAgent):
                 ticker,
                 lookback_hours=336,
                 as_of=as_of,
-                since=last_run_at,
+                since=news_since or last_run_at,
                 allowed_sources=allowed_sources,
             )
 
@@ -167,6 +168,7 @@ class NewsSentimentAgent(BaseAgent):
             news_context = build_news_context_text(
                 session, ticker,
                 lookback_hours=336, as_of=as_of,
+                since=news_since or last_run_at,
                 expanded_articles=expanded_articles or None,
                 allowed_sources=allowed_sources,
             )

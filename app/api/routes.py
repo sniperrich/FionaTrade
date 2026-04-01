@@ -1173,6 +1173,9 @@ def live_status(
     enabled = control.get_live_enabled(session, settings)
     live_control_row = control.get(session, "live_trading_enabled") or {}
     overnight_state = control.get(session, CONTROL_OVERNIGHT_RISK_STATE) or {}
+    effective_sources = list(getattr(settings, "live_allowed_sources", []) or [])
+    if not effective_sources:
+        effective_sources = ["benzinga", "reuters", "cnbc", "earnings_release", "sec"]
     worker_bundle = runtime.worker_status_snapshot(session)
     latest_run = WorkerRuntimeService().latest_run(session, "live_cycle")
     last_cycle: dict | None = None
@@ -1208,7 +1211,11 @@ def live_status(
             default="CANCEL_ORDERS",
         ),
         "tickers": settings.live_trading_tickers or list(settings.agent_tickers_override or []),
-        "live_allowed_sources": list(getattr(settings, "live_allowed_sources", []) or []),
+        "live_allowed_sources": effective_sources,
+        "live_allowed_sources_configured": list(getattr(settings, "live_allowed_sources", []) or []),
+        "live_enable_warmup_minutes": int(getattr(settings, "live_enable_warmup_minutes", 15) or 15),
+        "live_enabled_at": live_control_row.get("enabled_at"),
+        "live_warmup_until": live_control_row.get("warmup_until"),
         "live_overnight_risk_enabled": bool(getattr(settings, "live_overnight_risk_enabled", True)),
         "live_flatten_before_close": bool(getattr(settings, "live_flatten_before_close", False)),
         "live_overnight_mode": OvernightRiskService.effective_overnight_mode(settings),
@@ -1230,6 +1237,12 @@ def live_status(
         "finnhub_company_news_live_lookback_days": int(
             getattr(settings, "finnhub_company_news_live_lookback_days", 2) or 2
         ),
+        "live_startup_max_new_positions": int(getattr(settings, "live_startup_max_new_positions", 2) or 2),
+        "live_startup_ramp_minutes": int(getattr(settings, "live_startup_ramp_minutes", 30) or 30),
+        "live_max_net_long_exposure_pct": float(getattr(settings, "live_max_net_long_exposure_pct", 0.35) or 0.35),
+        "live_max_net_short_exposure_pct": float(getattr(settings, "live_max_net_short_exposure_pct", 0.35) or 0.35),
+        "live_max_same_direction_positions": int(getattr(settings, "live_max_same_direction_positions", 4) or 4),
+        "live_max_same_theme_direction_positions": int(getattr(settings, "live_max_same_theme_direction_positions", 2) or 2),
         "last_cycle": last_cycle,
         "worker": worker_bundle["worker"],
         "supervisor": worker_bundle["supervisor"],
@@ -2022,6 +2035,7 @@ def set_live_enabled(
 
     _cache_invalidate("live:")
     _cache_invalidate("ui:")
+    live_state = control.get(session, "live_trading_enabled") or {}
 
     broker_action: dict[str, Any] | None = None
     if not enabled:
@@ -2064,11 +2078,13 @@ def set_live_enabled(
     return {
         "enabled": enabled,
         "disable_mode": disable_mode,
+        "live_enabled_at": live_state.get("enabled_at"),
+        "live_warmup_until": live_state.get("warmup_until"),
         "broker_action": broker_action,
         "message": (
             f"Live trading {'enabled' if enabled else 'disabled'} in shared runtime control. "
             + (
-                "Queued bar backfill and an immediate live cycle for worker. "
+                f"Queued bar backfill and an immediate live cycle for worker. Warm-up {int(getattr(settings, 'live_enable_warmup_minutes', 15) or 15)} min. "
                 if enabled and not write_result.get("was_enabled") else ""
             )
             + (

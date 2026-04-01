@@ -116,6 +116,12 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 - 无新增事件时仅 10 分钟兜底触发一次 fast-path
 - fast-path 复用 Macro/Fund TTL 缓存（默认 60/120 分钟）
 - live 执行前有置信度闸门：`LIVE_MIN_CONFIDENCE`（默认 50），低于阈值的 BUY/SHORT/SELL 会被降级为 HOLD（不下单）
+- `Enable Live` 后默认先 warm-up `15` 分钟（`LIVE_ENABLE_WARMUP_MINUTES`），只采集/分析，不拿启动前积压新闻直接下单
+- live 默认只允许高质量来源：`benzinga,reuters,cnbc,earnings_release,sec`
+- directional live order 现在必须带 `trigger_event_id`；没有事件链的 BUY/SHORT/SELL 会被强制降级为 HOLD
+- 若 `news_signal=BUY` 但最终想做 `SHORT/SELL`，默认降级为 HOLD；只有 tier0/1 高质量来源达到双重确认才允许逆向做空
+- 启动前 30 分钟默认最多只开 `2` 笔新仓（`LIVE_STARTUP_MAX_NEW_POSITIONS / LIVE_STARTUP_RAMP_MINUTES`）
+- live 额外执行硬上限：`LIVE_MAX_NET_LONG_EXPOSURE_PCT / LIVE_MAX_NET_SHORT_EXPOSURE_PCT / LIVE_MAX_SAME_DIRECTION_POSITIONS / LIVE_MAX_SAME_THEME_DIRECTION_POSITIONS`
 - `Disable Live` 支持三种模式：`PAUSE_ONLY / CANCEL_ORDERS / FLATTEN_ALL`
 - 新增独立 `overnight_risk_control`：默认收盘前 5 分钟检查一次总敞口，按 `REDUCE / FLATTEN / ALERT_ONLY` 执行；即使 `live=false` 也可继续保护已有仓位
 
@@ -310,17 +316,24 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,JNJ,PG,HD,A
 
 `LIVE_TRADING_TICKERS` 与 `AGENT_TICKERS_OVERRIDE` 现在兼容 CSV 和 JSON 数组两种写法。
 
-收缩升级新增配置（基础项在 `/settings`，实盘策略项在 `/live` 可直接改）：
+收缩升级新增配置（统一在 `/settings` 编辑并回显当前值）：
 - `LIVE_EVENT_DRIVEN_MODE=true`
+- `LIVE_ENABLE_WARMUP_MINUTES=15`
 - `LIVE_OPEN_CYCLE_SECONDS=900`（开盘 15 分钟）
 - `LIVE_CLOSED_CYCLE_SECONDS=7200`（闭市 120 分钟）
 - `LIVE_TICKER_COOLDOWN_MINUTES=60`（同票无新事件去抖）
+- `LIVE_STARTUP_MAX_NEW_POSITIONS=2`
+- `LIVE_STARTUP_RAMP_MINUTES=30`
+- `LIVE_MAX_NET_LONG_EXPOSURE_PCT=0.35`
+- `LIVE_MAX_NET_SHORT_EXPOSURE_PCT=0.35`
+- `LIVE_MAX_SAME_DIRECTION_POSITIONS=4`
+- `LIVE_MAX_SAME_THEME_DIRECTION_POSITIONS=2`
 - `LIVE_FALLBACK_CYCLE_SECONDS=600`（兼容旧版本保留）
 - `LIVE_FAST_PATH_MACRO_TTL_MIN=60`
 - `LIVE_FAST_PATH_FUND_TTL_MIN=120`
 - `LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS=20`
 - `LIVE_PORTFOLIO_LLM_MAX_RETRIES=2`
-- `LIVE_ALLOWED_SOURCES=`（空=全部；可填 `finnhub,sec,cnbc,...`）
+- `LIVE_ALLOWED_SOURCES=benzinga,reuters,cnbc,earnings_release,sec`（留空也会回退到这组高质量默认值）
 - `ENABLE_FINNHUB_COMPANY_NEWS_LIVE=true`
 - `FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS=2`
 - `FLOW_CONFIRMATION_ENABLED=true`
