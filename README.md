@@ -523,6 +523,10 @@ if dt.tzinfo is None:
     dt = dt.replace(tzinfo=timezone.utc)
 ```
 
+### PostgreSQL 运行态时间注意事项
+- PostgreSQL 连接现在会强制 `SET TIME ZONE 'UTC'`，避免新的 `worker_runs / worker_commands` 把本地时区时钟写进 `timestamp without time zone`
+- 迁移到 PostgreSQL 之前写入的运行态行，可能已经混入“本地时区 naive 时间”；stale watchdog 现在会兼容这种旧行，不再把刚启动几分钟的 `live_cycle` 误判成超时
+
 ---
 
 ## 数据源

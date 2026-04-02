@@ -14,7 +14,8 @@ from app.backtest_engine.service import BacktestEngineService
 from app.core.config import get_settings
 from app.core.logging import get_app_logger, log_writeout, setup_logging
 from app.core.market_hours import is_market_open, market_session_info
-from app.db.database import db_session, init_db, is_sqlite_lock_error
+from app.core.utils import utc_now
+from app.db.database import db_session, init_db, is_sqlite_lock_error, normalize_db_datetime, session_db_backend_name
 from app.db.models import BacktestRun, WorkerCommand
 from app.ingestion.service import IngestionService
 from app.monitoring.health import HealthAuditService
@@ -206,6 +207,8 @@ def _target_live_interval_seconds() -> tuple[int, str]:
 def _should_run_scheduled_live_cycle(session) -> tuple[bool, dict[str, object]]:
     required_interval, market_label = _target_live_interval_seconds()
     latest_run = runtime.latest_run(session, "live_cycle")
+    backend = session_db_backend_name(session)
+    now = utc_now()
     if latest_run is None:
         return True, {
             "reason": "no_previous_run",
@@ -214,12 +217,10 @@ def _should_run_scheduled_live_cycle(session) -> tuple[bool, dict[str, object]]:
             "elapsed_seconds": None,
         }
     if str(latest_run.status or "").upper() == "RUNNING":
-        updated_at = latest_run.updated_at or latest_run.started_at
-        if updated_at is not None and updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        updated_at = normalize_db_datetime(latest_run.updated_at or latest_run.started_at, backend=backend)
         stale_after_seconds = max(60, int(getattr(settings, "live_cycle_stale_seconds", 900) or 900))
         age_seconds = (
-            (datetime.now(timezone.utc) - updated_at).total_seconds()
+            (now - updated_at).total_seconds()
             if updated_at is not None
             else float("inf")
         )
@@ -270,9 +271,8 @@ def _should_run_scheduled_live_cycle(session) -> tuple[bool, dict[str, object]]:
             "required_interval_seconds": required_interval,
             "elapsed_seconds": None,
         }
-    if started_at.tzinfo is None:
-        started_at = started_at.replace(tzinfo=timezone.utc)
-    elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+    started_at = normalize_db_datetime(started_at, backend=backend)
+    elapsed = (now - started_at).total_seconds() if started_at is not None else float("inf")
     if elapsed < required_interval:
         return False, {
             "reason": "interval_not_elapsed",

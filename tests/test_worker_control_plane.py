@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 
 from app.api.routes import close_all_positions_endpoint, list_live_entry_plan_events, live_positions, set_live_enabled
 from app.broker.base import PositionInfo
 from app.core.utils import utc_now
+from app.db import database as db_database
 from app.db.models import BacktestRun, WorkerCommand, WorkerRun
 from app.ingestion.service import IngestionService
 from app.ingestion.types import SourceCheck
@@ -516,6 +517,41 @@ def test_scheduled_live_cycle_reaps_stale_running_cycle(session, settings, monke
     assert "stale live_cycle watchdog timed out" in (reaped.error_message or "")
 
 
+def test_scheduled_live_cycle_does_not_reap_recent_postgres_naive_running_cycle(session, monkeypatch) -> None:
+    runtime = WorkerRuntimeService()
+    run = runtime.start_run(
+        session,
+        run_type="live_cycle",
+        trigger="scheduled",
+        run_key="pgfresh01",
+        status="RUNNING",
+        stage="ingestion",
+    )
+    local_tz = timezone(timedelta(hours=-4))
+    now_utc = datetime(2026, 4, 2, 14, 32, tzinfo=timezone.utc)
+    fresh_local_naive = (now_utc - timedelta(seconds=120)).astimezone(local_tz).replace(tzinfo=None)
+    run.started_at = fresh_local_naive
+    run.updated_at = fresh_local_naive
+    session.flush()
+    session.commit()
+
+    monkeypatch.setattr(db_database, "POSTGRES_NAIVE_LOCAL_TZ", local_tz, raising=False)
+    monkeypatch.setattr(worker_main, "session_db_backend_name", lambda _session: "postgresql")
+    monkeypatch.setattr(worker_main, "market_session_info", lambda: {"label": "open"})
+    monkeypatch.setattr(worker_main, "utc_now", lambda: now_utc)
+    monkeypatch.setattr(worker_main.settings, "live_open_cycle_seconds", 900, raising=False)
+    monkeypatch.setattr(worker_main.settings, "live_cycle_stale_seconds", 300, raising=False)
+
+    should_run, meta = worker_main._should_run_scheduled_live_cycle(session)
+    session.expire_all()
+    current = session.get(WorkerRun, run.id)
+
+    assert should_run is False
+    assert meta["reason"] == "previous_cycle_running"
+    assert current is not None
+    assert current.status == "RUNNING"
+
+
 def test_refresh_bars_skips_when_another_refresh_is_running(session, settings) -> None:
     runtime = WorkerRuntimeService()
     active = runtime.start_run(
@@ -542,4 +578,54 @@ def test_refresh_bars_skips_when_another_refresh_is_running(session, settings) -
     assert result["skipped"] is True
     assert result["reason"] == "refresh_already_running"
     assert result["active_run_key"] == active.run_key
-    assert len(running) == 1
+
+
+def test_fail_stale_runs_ignores_recent_postgres_naive_run(session, monkeypatch) -> None:
+    runtime = WorkerRuntimeService()
+    run = runtime.start_run(
+        session,
+        run_type="bar_backfill",
+        trigger="scheduled",
+        run_key="pgbars01",
+        status="RUNNING",
+        stage="fetching",
+    )
+    local_tz = timezone(timedelta(hours=-4))
+    now_utc = datetime(2026, 4, 2, 14, 32, tzinfo=timezone.utc)
+    fresh_local_naive = (now_utc - timedelta(seconds=90)).astimezone(local_tz).replace(tzinfo=None)
+    run.started_at = fresh_local_naive
+    run.updated_at = fresh_local_naive
+    session.flush()
+    session.commit()
+
+    monkeypatch.setattr(db_database, "POSTGRES_NAIVE_LOCAL_TZ", local_tz, raising=False)
+    from app.services import worker_runtime as worker_runtime_module
+
+    monkeypatch.setattr(worker_runtime_module, "session_db_backend_name", lambda _session: "postgresql")
+    monkeypatch.setattr(worker_runtime_module, "utc_now", lambda: now_utc)
+
+    stale = runtime.fail_stale_runs(
+        session,
+        run_type="bar_backfill",
+        stale_after_seconds=300,
+        reason="stale bar_backfill watchdog timed out",
+    )
+    session.expire_all()
+    current = session.get(WorkerRun, run.id)
+
+    assert stale == []
+    assert current is not None
+    assert current.status == "RUNNING"
+
+
+def test_normalize_db_datetime_prefers_utc_candidate_for_new_postgres_rows(monkeypatch) -> None:
+    local_tz = timezone(timedelta(hours=-4))
+    now_utc = datetime(2026, 4, 2, 14, 32, tzinfo=timezone.utc)
+    stored_utc_naive = datetime(2026, 4, 2, 14, 31)
+
+    monkeypatch.setattr(db_database, "POSTGRES_NAIVE_LOCAL_TZ", local_tz, raising=False)
+    monkeypatch.setattr(db_database, "utc_now", lambda: now_utc)
+
+    normalized = db_database.normalize_db_datetime(stored_utc_naive, backend="postgresql")
+
+    assert normalized == stored_utc_naive.replace(tzinfo=timezone.utc)

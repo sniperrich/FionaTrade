@@ -8,6 +8,7 @@ from sqlalchemy import case, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.core.utils import ensure_utc, utc_now
+from app.db.database import normalize_db_datetime, session_db_backend_name
 from app.db.models import BacktestRun, WorkerCommand, WorkerRun, WorkerRunEvent
 from app.services.runtime_control import RuntimeControlService
 
@@ -275,21 +276,24 @@ class WorkerRuntimeService:
         stale_after_seconds: int,
         reason: str,
     ) -> list[WorkerRun]:
-        cutoff = utc_now() - timedelta(seconds=max(1, int(stale_after_seconds)))
-        stale_runs = session.execute(
+        backend = session_db_backend_name(session)
+        threshold = max(1, int(stale_after_seconds))
+        now = utc_now()
+        candidates = session.execute(
             select(WorkerRun)
             .where(
                 WorkerRun.run_type == run_type,
                 WorkerRun.status == "RUNNING",
-                WorkerRun.updated_at < cutoff,
             )
             .order_by(WorkerRun.updated_at.asc(), WorkerRun.id.asc())
         ).scalars().all()
-        for run in stale_runs:
-            stale_for_seconds = max(
-                0,
-                int((utc_now() - ensure_utc(run.updated_at or run.started_at or utc_now())).total_seconds()),
-            )
+        stale_runs: list[WorkerRun] = []
+        for run in candidates:
+            updated_at = normalize_db_datetime(run.updated_at or run.started_at or now, backend=backend) or now
+            stale_for_seconds = max(0, int((now - updated_at).total_seconds()))
+            if stale_for_seconds < threshold:
+                continue
+            stale_runs.append(run)
             self.fail_run(
                 session,
                 run,
@@ -333,6 +337,7 @@ class WorkerRuntimeService:
         return session.execute(stmt).scalars().all()
 
     def command_queue_snapshot(self, session: Session, limit: int = 8) -> dict[str, Any]:
+        backend = session_db_backend_name(session)
         counts = {status: count for status, count in session.execute(
             select(WorkerCommand.status, func.count(WorkerCommand.id)).group_by(WorkerCommand.status)
         ).all()}
@@ -348,7 +353,7 @@ class WorkerRuntimeService:
             "cancelled": int(counts.get("CANCELLED", 0)),
             "completed": int(counts.get("COMPLETED", 0)),
             "open": int(counts.get("PENDING", 0) + counts.get("RUNNING", 0)),
-            "recent": [self._serialize_command(row) for row in rows],
+            "recent": [self._serialize_command(row, backend=backend) for row in rows],
         }
 
     def has_open_commands(self, session: Session, command_types: list[str]) -> bool:
@@ -377,6 +382,7 @@ class WorkerRuntimeService:
         command_limit: int = 10,
         event_limit: int = 20,
     ) -> dict[str, Any]:
+        backend = session_db_backend_name(session)
         runs = self.recent_runs(session, ["live_cycle", "bar_backfill", "backtest"], limit=run_limit)
         commands = session.execute(
             select(WorkerCommand)
@@ -385,12 +391,13 @@ class WorkerRuntimeService:
         ).scalars().all()
         events = self.recent_events(session, ["live_cycle", "bar_backfill", "backtest"], limit=event_limit)
         return {
-            "runs": [self._serialize_run_summary(run) for run in runs],
-            "commands": [self._serialize_command(command) for command in commands],
-            "events": [self._serialize_event(event) for event in events],
+            "runs": [self._serialize_run_summary(run, backend=backend) for run in runs],
+            "commands": [self._serialize_command(command, backend=backend) for command in commands],
+            "events": [self._serialize_event(event, backend=backend) for event in events],
         }
 
     def runtime_snapshot(self, session: Session) -> dict[str, Any]:
+        backend = session_db_backend_name(session)
         live_run = self.latest_run(session, "live_cycle")
         backfill_run = self.latest_run(session, "bar_backfill")
         backtest_run = self.latest_run(session, "backtest")
@@ -402,10 +409,10 @@ class WorkerRuntimeService:
         timestamps = [
             value
             for value in [
-                self._ensure_utc_dt(live_run.updated_at if live_run else None),
-                self._ensure_utc_dt(backfill_run.updated_at if backfill_run else None),
-                self._ensure_utc_dt(backtest_run.updated_at if backtest_run else None),
-                self._ensure_utc_dt(events[-1].created_at if events else None),
+                self._ensure_utc_dt(live_run.updated_at if live_run else None, backend=backend),
+                self._ensure_utc_dt(backfill_run.updated_at if backfill_run else None, backend=backend),
+                self._ensure_utc_dt(backtest_run.updated_at if backtest_run else None, backend=backend),
+                self._ensure_utc_dt(events[-1].created_at if events else None, backend=backend),
                 self._parse_iso_dt(worker.get("last_seen_at")),
                 self._parse_iso_dt(supervisor.get("last_seen_at")),
             ]
@@ -417,10 +424,10 @@ class WorkerRuntimeService:
             "worker": worker,
             "supervisor": supervisor,
             "command_queue": queue,
-            "live_cycle": self._serialize_run(live_run),
-            "bar_backfill": self._serialize_run(backfill_run),
-            "backtest": self._serialize_run(backtest_run),
-            "recent_events": [self._serialize_event(event) for event in events],
+            "live_cycle": self._serialize_run(live_run, backend=backend),
+            "bar_backfill": self._serialize_run(backfill_run, backend=backend),
+            "backtest": self._serialize_run(backtest_run, backend=backend),
+            "recent_events": [self._serialize_event(event, backend=backend) for event in events],
         }
 
     def reconcile_orphaned_state(self, session: Session, reason: str | None = None) -> dict[str, int]:
@@ -485,7 +492,7 @@ class WorkerRuntimeService:
             session.commit()
         return counts
 
-    def _serialize_run(self, run: WorkerRun | None) -> dict[str, Any]:
+    def _serialize_run(self, run: WorkerRun | None, *, backend: str | None = None) -> dict[str, Any]:
         if run is None:
             return {
                 "cycle_id": None,
@@ -540,9 +547,9 @@ class WorkerRuntimeService:
             "completed_tickers": run.completed_tickers,
             "last_result": summary or None,
             "error": run.error_message,
-            "started_at": self._dt_to_iso(run.started_at),
-            "updated_at": self._dt_to_iso(run.updated_at),
-            "finished_at": self._dt_to_iso(run.finished_at),
+            "started_at": self._dt_to_iso(run.started_at, backend=backend),
+            "updated_at": self._dt_to_iso(run.updated_at, backend=backend),
+            "finished_at": self._dt_to_iso(run.finished_at, backend=backend),
             "mode": run.trigger,
             "skipped_reason": summary.get("reason"),
             "run_mode": summary.get("run_mode"),
@@ -550,7 +557,7 @@ class WorkerRuntimeService:
             "flow": flow,
         }
 
-    def _serialize_event(self, event: WorkerRunEvent) -> dict[str, Any]:
+    def _serialize_event(self, event: WorkerRunEvent, *, backend: str | None = None) -> dict[str, Any]:
         return {
             "id": event.id,
             "kind": event.run_type,
@@ -560,23 +567,23 @@ class WorkerRuntimeService:
             "agent": event.agent,
             "message": event.message,
             "payload": event.payload_json or {},
-            "ts": self._dt_to_iso(event.created_at),
+            "ts": self._dt_to_iso(event.created_at, backend=backend),
             "run_key": event.run_key,
         }
 
-    def _serialize_command(self, command: WorkerCommand) -> dict[str, Any]:
+    def _serialize_command(self, command: WorkerCommand, *, backend: str | None = None) -> dict[str, Any]:
         return {
             "id": command.id,
             "command_type": command.command_type,
             "status": command.status,
             "requested_by": command.requested_by,
-            "created_at": self._dt_to_iso(command.created_at),
-            "started_at": self._dt_to_iso(command.started_at),
-            "finished_at": self._dt_to_iso(command.finished_at),
+            "created_at": self._dt_to_iso(command.created_at, backend=backend),
+            "started_at": self._dt_to_iso(command.started_at, backend=backend),
+            "finished_at": self._dt_to_iso(command.finished_at, backend=backend),
             "error": command.error_message,
         }
 
-    def _serialize_run_summary(self, run: WorkerRun) -> dict[str, Any]:
+    def _serialize_run_summary(self, run: WorkerRun, *, backend: str | None = None) -> dict[str, Any]:
         return {
             "id": run.id,
             "run_key": run.run_key,
@@ -592,18 +599,18 @@ class WorkerRuntimeService:
             "completed_tickers": run.completed_tickers,
             "error": run.error_message,
             "summary": run.summary_json or {},
-            "started_at": self._dt_to_iso(run.started_at),
-            "updated_at": self._dt_to_iso(run.updated_at),
-            "finished_at": self._dt_to_iso(run.finished_at),
+            "started_at": self._dt_to_iso(run.started_at, backend=backend),
+            "updated_at": self._dt_to_iso(run.updated_at, backend=backend),
+            "finished_at": self._dt_to_iso(run.finished_at, backend=backend),
         }
 
-    def _ensure_utc_dt(self, value: datetime | None) -> datetime | None:
+    def _ensure_utc_dt(self, value: datetime | None, *, backend: str | None = None) -> datetime | None:
         if value is None:
             return None
-        return ensure_utc(value)
+        return normalize_db_datetime(value, backend=backend)
 
-    def _dt_to_iso(self, value: datetime | None) -> str | None:
-        normalized = self._ensure_utc_dt(value)
+    def _dt_to_iso(self, value: datetime | None, *, backend: str | None = None) -> str | None:
+        normalized = self._ensure_utc_dt(value, backend=backend)
         return normalized.isoformat() if normalized is not None else None
 
     def _parse_iso_dt(self, value: Any) -> datetime | None:

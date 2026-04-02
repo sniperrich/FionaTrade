@@ -15,6 +15,12 @@ def ensure_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def ensure_utc_from_timezone(dt: datetime, tzinfo) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tzinfo).astimezone(timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def make_hash(*parts: str) -> str:
     payload = "||".join(parts)
     return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
