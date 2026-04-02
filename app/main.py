@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -22,6 +24,8 @@ app.include_router(web_router)
 @app.on_event("startup")
 def startup_event() -> None:
     init_db()
+    host = os.getenv("FIONA_WEB_HOST", "127.0.0.1")
+    port = os.getenv("FIONA_WEB_PORT", "6888")
     logger.info("Web startup complete")
-    logger.info("中文提示：打开 WebUI http://127.0.0.1:6888 ，健康检查 http://127.0.0.1:6888/api/health")
+    logger.info("中文提示：打开 WebUI http://%s:%s ，健康检查 http://%s:%s/api/health", host, port, host, port)
     logger.info("中文提示：后台任务已迁移到 worker 进程，推荐单独运行 python -m app.worker.supervisor")

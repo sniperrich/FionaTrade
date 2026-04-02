@@ -6,7 +6,7 @@ import json
 import math
 from typing import Any
 
-from sqlalchemy import MetaData, create_engine, func, inspect, select, text
+from sqlalchemy import Integer, MetaData, create_engine, func, inspect, select, text
 from sqlalchemy.engine import Engine
 
 
@@ -278,6 +278,39 @@ def _spot_check(source_engine: Engine, target_engine: Engine, source_table, targ
     return True, "ok"
 
 
+def _reset_postgres_sequences(engine: Engine, tables: list[Any]) -> None:
+    with engine.begin() as conn:
+        for table in tables:
+            pk_cols = list(table.primary_key.columns)
+            if len(pk_cols) != 1:
+                continue
+            pk_col = pk_cols[0]
+            if not isinstance(pk_col.type, Integer):
+                continue
+
+            table_name = table.name.replace('"', '""')
+            col_name = pk_col.name.replace('"', '""')
+            seq_name = conn.execute(
+                text(
+                    "SELECT pg_get_serial_sequence(:table_name, :column_name)"
+                ),
+                {"table_name": table.name, "column_name": pk_col.name},
+            ).scalar_one_or_none()
+            if not seq_name:
+                continue
+            conn.execute(
+                text(
+                    f'SELECT setval('
+                    f'CAST(:seq_name AS regclass), '
+                    f'COALESCE(MAX("{col_name}"), 1), '
+                    f'MAX("{col_name}") IS NOT NULL'
+                    f') '
+                    f'FROM "{table_name}"'
+                ),
+                {"seq_name": seq_name},
+            )
+
+
 def main() -> int:
     args = _parse_args()
     if _backend_from_url(args.sqlite_url) != "sqlite":
@@ -364,6 +397,12 @@ def main() -> int:
             f"[migrate] {name}: copied={copied} dropped_orphans={dropped_orphans} target_after={dst_after} "
             f"count_ok={ok} sample_ok={sample_ok} ({sample_msg})"
         )
+
+    _reset_postgres_sequences(
+        target_engine,
+        [target_meta.tables[name] for name in table_names if name in target_meta.tables],
+    )
+    print("[migrate] reset PostgreSQL sequences to max(id)")
 
     failed = [row for row in summary if (not row["count_ok"] or not row["sample_ok"])]
     print("\n[migrate] summary")

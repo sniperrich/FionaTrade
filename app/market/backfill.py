@@ -10,6 +10,8 @@ from time import sleep
 
 import httpx
 from sqlalchemy import and_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -277,6 +279,22 @@ class MarketBackfillService:
                 continue
         return parsed, None
 
+    def _insert_bars(self, session: Session, payload: list[dict[str, object]]) -> int:
+        if not payload:
+            return 0
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            stmt = pg_insert(Bar1m).values(payload).on_conflict_do_nothing(index_elements=["ticker", "ts"])
+            result = session.execute(stmt)
+            return max(int(result.rowcount or 0), 0)
+        if dialect == "sqlite":
+            stmt = sqlite_insert(Bar1m).values(payload).on_conflict_do_nothing(index_elements=["ticker", "ts"])
+            result = session.execute(stmt)
+            return max(int(result.rowcount or 0), 0)
+        for row in payload:
+            session.add(Bar1m(**row))
+        return len(payload)
+
     def run(
         self,
         session: Session,
@@ -355,26 +373,29 @@ class MarketBackfillService:
                         continue
 
                     req_ok += 1
+                    chunk_payload: list[dict[str, object]] = []
                     for bar in bars:
                         ts = ensure_utc(bar["ts"])
                         if ts in existing_ts:
                             skipped_existing += 1
                             continue
-                        session.add(
-                            Bar1m(
-                                ticker=ticker,
-                                ts=ts,
-                                open=bar["open"],
-                                high=bar["high"],
-                                low=bar["low"],
-                                close=bar["close"],
-                                volume=bar["volume"],
-                                source="finnhub_1m",
-                            )
+                        chunk_payload.append(
+                            {
+                                "ticker": ticker,
+                                "ts": ts,
+                                "open": bar["open"],
+                                "high": bar["high"],
+                                "low": bar["low"],
+                                "close": bar["close"],
+                                "volume": bar["volume"],
+                                "source": "finnhub_1m",
+                            }
                         )
                         existing_ts.add(ts)
-                        inserted += 1
-                        finnhub_inserted_for_ticker += 1
+                    inserted_now = self._insert_bars(session, chunk_payload)
+                    inserted += inserted_now
+                    finnhub_inserted_for_ticker += inserted_now
+                    skipped_existing += max(len(chunk_payload) - inserted_now, 0)
 
                     sleep(sleep_seconds)
 
@@ -386,26 +407,29 @@ class MarketBackfillService:
                 if alpaca_bars:
                     logger.info("alpaca 1m fallback for %s: %d bars", ticker, len(alpaca_bars))
                     alpaca_fallback_tickers += 1
+                    alpaca_payload: list[dict[str, object]] = []
                     for bar in alpaca_bars:
                         ts = ensure_utc(bar["ts"])
                         if ts in existing_ts:
                             skipped_existing += 1
                             continue
-                        session.add(
-                            Bar1m(
-                                ticker=ticker,
-                                ts=ts,
-                                open=bar["open"],
-                                high=bar["high"],
-                                low=bar["low"],
-                                close=bar["close"],
-                                volume=bar["volume"],
-                                source="alpaca_1m_fallback",
-                            )
+                        alpaca_payload.append(
+                            {
+                                "ticker": ticker,
+                                "ts": ts,
+                                "open": bar["open"],
+                                "high": bar["high"],
+                                "low": bar["low"],
+                                "close": bar["close"],
+                                "volume": bar["volume"],
+                                "source": "alpaca_1m_fallback",
+                            }
                         )
                         existing_ts.add(ts)
-                        inserted += 1
-                        alpaca_bars_inserted += 1
+                    inserted_now = self._insert_bars(session, alpaca_payload)
+                    inserted += inserted_now
+                    alpaca_bars_inserted += inserted_now
+                    skipped_existing += max(len(alpaca_payload) - inserted_now, 0)
                 else:
                     if alpaca_err and alpaca_err != "alpaca credentials not configured":
                         logger.warning("alpaca fallback failed for %s: %s", ticker, alpaca_err)
@@ -413,26 +437,29 @@ class MarketBackfillService:
                     yf_bars, yf_err = self._fetch_yfinance_hourly(ticker, start_dt, end_dt)
                     if yf_bars:
                         logger.info("yfinance hourly fallback for %s: %d bars", ticker, len(yf_bars))
+                        yf_payload: list[dict[str, object]] = []
                         for bar in yf_bars:
                             ts = ensure_utc(bar["ts"])
                             if ts in existing_ts:
                                 skipped_existing += 1
                                 continue
-                            session.add(
-                                Bar1m(
-                                    ticker=ticker,
-                                    ts=ts,
-                                    open=bar["open"],
-                                    high=bar["high"],
-                                    low=bar["low"],
-                                    close=bar["close"],
-                                    volume=bar["volume"],
-                                    source="yfinance_hourly",
-                                )
+                            yf_payload.append(
+                                {
+                                    "ticker": ticker,
+                                    "ts": ts,
+                                    "open": bar["open"],
+                                    "high": bar["high"],
+                                    "low": bar["low"],
+                                    "close": bar["close"],
+                                    "volume": bar["volume"],
+                                    "source": "yfinance_hourly",
+                                }
                             )
                             existing_ts.add(ts)
-                            inserted += 1
-                            stooq_fallback_tickers += 1
+                        inserted_now = self._insert_bars(session, yf_payload)
+                        inserted += inserted_now
+                        stooq_fallback_tickers += 1
+                        skipped_existing += max(len(yf_payload) - inserted_now, 0)
                     else:
                         if yf_err:
                             logger.warning("yfinance fallback failed for %s: %s", ticker, yf_err)
@@ -444,26 +471,29 @@ class MarketBackfillService:
                         else:
                             if stooq_bars:
                                 stooq_fallback_tickers += 1
+                            stooq_payload: list[dict[str, object]] = []
                             for bar in stooq_bars:
                                 ts = ensure_utc(bar["ts"])
                                 if ts in existing_ts:
                                     skipped_existing += 1
                                     continue
-                                session.add(
-                                    Bar1m(
-                                        ticker=ticker,
-                                        ts=ts,
-                                        open=bar["open"],
-                                        high=bar["high"],
-                                        low=bar["low"],
-                                        close=bar["close"],
-                                        volume=bar["volume"],
-                                        source="stooq_daily_fallback",
-                                    )
+                                stooq_payload.append(
+                                    {
+                                        "ticker": ticker,
+                                        "ts": ts,
+                                        "open": bar["open"],
+                                        "high": bar["high"],
+                                        "low": bar["low"],
+                                        "close": bar["close"],
+                                        "volume": bar["volume"],
+                                        "source": "stooq_daily_fallback",
+                                    }
                                 )
                                 existing_ts.add(ts)
-                                inserted += 1
-                                stooq_bars_inserted += 1
+                            inserted_now = self._insert_bars(session, stooq_payload)
+                            inserted += inserted_now
+                            stooq_bars_inserted += inserted_now
+                            skipped_existing += max(len(stooq_payload) - inserted_now, 0)
 
             session.flush()
             if progress_callback:

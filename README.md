@@ -15,6 +15,9 @@ pip install -e .[dev]
 cp .env.example .env
 nano .env   # 填写 FINNHUB_API_KEY / LLM_API_KEY / ALPACA_API_KEY
 
+# 本地默认数据库（当前仓库 .env）
+# DATABASE_URL=postgresql+psycopg://rich@127.0.0.1:55432/fionatrade_pgtest
+
 # 一键本地启动（自动同时拉起 Web + Worker Supervisor）
 ./run_local.sh
 
@@ -32,9 +35,12 @@ open http://localhost:6888
 - `run_local.sh` 会优先使用当前已激活的 conda 环境
 - 如果当前没激活 conda 环境，它会自动尝试 `CONDA_ENV_NAME`，默认值是 `FionaTrade`
 - `run_local.sh` 现在会自动探测常见 Miniconda/Anaconda 安装路径，并把输出写到 `logs/web.local.log` / `logs/supervisor.local.log`
+- 当 `DATABASE_URL` 指向本机 PostgreSQL（`127.0.0.1/localhost`）时，`run_local.sh` 会自动检查数据库是否在线；若未启动，会自动尝试拉起本地 PostgreSQL，并在脚本退出时一起停止
+- 当 `DATABASE_URL` 指向远端 PostgreSQL，或仍然使用 SQLite 时，`run_local.sh` 不会接管数据库进程
 - 若 supervisor 在启动后几秒内退出，脚本会直接报错，不再出现“只有 web 起了、worker 没起来”的假成功
 - 已修复 Bash 变量展开坑：中文标点紧邻 `$WEB_PID` 这类变量时会被误判成更长变量名，当前脚本已统一改成 `${VAR}` 写法
 - 需要改端口时可这样运行：`PORT=6999 ./run_local.sh`
+- `run_local.sh` 现在会把真实 `HOST/PORT` 传给 web 进程，应用启动日志不再写死 `6888`
 - 停止时直接 `Ctrl+C`
 
 ## 最近复盘
@@ -60,6 +66,7 @@ python scripts/migrate_sqlite_to_postgres.py \
 - 迁移脚本现在使用 FionaTrade ORM metadata 创建 PostgreSQL 表，不再复用 SQLite 反射出来的 `DATETIME` 等类型
 - 迁移脚本会递归清洗 JSON 中的 `Infinity/NaN`，避免 PostgreSQL JSON 列拒收
 - 迁移脚本会按外键拓扑顺序复制表，并对源 SQLite 中已经损坏的 orphan FK 行做过滤与计数报告
+- 迁移完成后会自动把 PostgreSQL 自增序列回拨到 `max(id)`，避免 `worker_runs/raw_items/...` 新写入时从 `1` 开始撞主键
 - 本地实测：`fionatrade.db -> PostgreSQL 16` 已可完整迁移；其中 `event_evidence` 因源库存在坏外键，过滤了 `1708` 条 orphan 行
 
 ---
@@ -91,6 +98,7 @@ db     -> SQLite/Postgres，统一保存状态、结果、行情缓存、运行�
 - 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
 - SQLite 现在默认启用 `WAL + busy_timeout`，降低 worker/supervisor/backtest 并发写锁冲突
 - 已支持 PostgreSQL 单库运行（推荐 live/backtest 并发场景使用 Postgres）
+- `bars_1m` backfill 现在改为数据库级幂等插入（SQLite/PostgreSQL 都走 `ON CONFLICT DO NOTHING`），重复 K 线不会再把 worker 启动流程炸掉
 - worker 启动时会自动清算遗留的 `RUNNING` 命令/运行/回测，避免重启后旧任务永久显示运行中
 - `CNBC / Yahoo` 现在统一视为 **secondary confirmation sources**：可做 corroboration，但不会再作为单独 primary trigger 使用
 - 回测默认已打开 **同 ticker + 同有效事件类型 + 同日去重**（`backtest_dedup_same_day_event=true`）
