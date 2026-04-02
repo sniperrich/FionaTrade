@@ -334,6 +334,8 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,JNJ,PG,HD,A
 - `LIVE_FAST_PATH_FUND_TTL_MIN=120`
 - `LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS=20`
 - `LIVE_PORTFOLIO_LLM_MAX_RETRIES=2`
+- `LIVE_CYCLE_STALE_SECONDS=900`（若 live cycle 卡死超过 15 分钟，worker 会自动判失败并恢复后续调度）
+- `BAR_BACKFILL_STALE_SECONDS=900`（若行情补数卡死超过 15 分钟，会被 watchdog 回收）
 - `LIVE_ALLOWED_SOURCES=benzinga,reuters,cnbc,earnings_release,sec`
   - 推荐把这行显式写进 `.env`
   - 即使 `.env` 不写，代码默认也会从 `app/core/config.py::DEFAULT_LIVE_ALLOWED_SOURCES` 回退到这组高质量源
@@ -356,6 +358,9 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,JNJ,PG,HD,A
 > Enable Live 现在不会再让 Web 进程直接起后台线程。
 > 它会写入共享 `runtime_controls`，再给 worker 排队 `refresh_bars + live_cycle`。
 > worker/supervisor 心跳都写在 `runtime_controls`，可从 `/api/worker/status` 或 Live 页面直接确认后台是否在线。
+> worker 现在还会对 `RUNNING` 状态做两层保护：
+> 1. `live_cycle` 超过 `LIVE_CYCLE_STALE_SECONDS` 无更新时自动标记 `FAILED`
+> 2. `bar_backfill` 若已经在跑，后续刷新请求会直接复用/跳过，不再并发起第二个行情补数把 cycle 卡死
 
 ---
 

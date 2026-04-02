@@ -11,6 +11,7 @@ from app.db.models import BacktestRun, WorkerCommand, WorkerRun
 from app.ingestion.service import IngestionService
 from app.ingestion.types import SourceCheck
 from app.services.live_trading import LiveTradingService, _LIVE_CYCLE_MUTEX
+from app.services.market_data import MarketDataService
 from app.services.runtime_control import CONTROL_WORKER_HEARTBEAT, RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
@@ -481,3 +482,64 @@ def test_scheduled_live_cycle_throttles_by_interval(session, monkeypatch) -> Non
     should_run, meta = worker_main._should_run_scheduled_live_cycle(session)
     assert should_run is False
     assert meta["reason"] == "interval_not_elapsed"
+
+
+def test_scheduled_live_cycle_reaps_stale_running_cycle(session, settings, monkeypatch) -> None:
+    runtime = WorkerRuntimeService()
+    run = runtime.start_run(
+        session,
+        run_type="live_cycle",
+        trigger="scheduled",
+        run_key="stale999",
+        status="RUNNING",
+        stage="bar_refresh",
+    )
+    stale_at = utc_now() - timedelta(minutes=30)
+    run.started_at = stale_at
+    run.updated_at = stale_at
+    session.flush()
+    session.commit()
+
+    monkeypatch.setattr(worker_main, "market_session_info", lambda: {"label": "open"})
+    monkeypatch.setattr(worker_main.settings, "live_open_cycle_seconds", 900, raising=False)
+    monkeypatch.setattr(worker_main.settings, "live_cycle_stale_seconds", 300, raising=False)
+
+    should_run, meta = worker_main._should_run_scheduled_live_cycle(session)
+    session.expire_all()
+    reaped = session.get(WorkerRun, run.id)
+
+    assert should_run is True
+    assert meta["reason"] == "reaped_stale_previous_cycle"
+    assert reaped is not None
+    assert reaped.status == "FAILED"
+    assert reaped.stage == "failed_stale"
+    assert "stale live_cycle watchdog timed out" in (reaped.error_message or "")
+
+
+def test_refresh_bars_skips_when_another_refresh_is_running(session, settings) -> None:
+    runtime = WorkerRuntimeService()
+    active = runtime.start_run(
+        session,
+        run_type="bar_backfill",
+        trigger="scheduled",
+        run_key="bars1234",
+        status="RUNNING",
+        stage="fetching",
+        total_tickers=1,
+        completed_tickers=0,
+    )
+    session.commit()
+
+    result = MarketDataService(settings).refresh_bars(
+        session,
+        start_date="2026-04-01",
+        end_date="2026-04-02",
+        tickers=["AAPL"],
+        trigger="live_cycle",
+    )
+
+    running = session.query(WorkerRun).filter(WorkerRun.run_type == "bar_backfill", WorkerRun.status == "RUNNING").all()
+    assert result["skipped"] is True
+    assert result["reason"] == "refresh_already_running"
+    assert result["active_run_key"] == active.run_key
+    assert len(running) == 1

@@ -266,6 +266,37 @@ class MarketDataService:
     ) -> dict[str, Any]:
         normalized_tickers = [ticker.upper() for ticker in (tickers or []) if ticker]
         tracked = normalized_tickers or self.tracked_tickers()
+        stale_runs = self.runtime.fail_stale_runs(
+            session,
+            run_type=run_type,
+            stale_after_seconds=int(getattr(self.settings, "bar_backfill_stale_seconds", 900) or 900),
+            reason=f"stale {run_type} watchdog timed out",
+        )
+        active_run = self.runtime.latest_running_run(session, run_type)
+        if active_run is not None:
+            payload = {
+                "skipped": True,
+                "reason": "refresh_already_running",
+                "run_type": run_type,
+                "trigger": trigger,
+                "active_run_id": active_run.id,
+                "active_run_key": active_run.run_key,
+                "active_run_stage": active_run.stage,
+                "active_run_trigger": active_run.trigger,
+                "tracked_tickers": tracked,
+                "reaped_stale_runs": [run.run_key for run in stale_runs],
+            }
+            self.runtime.add_event(
+                session,
+                run_type,
+                f"Skipped {trigger} bar refresh: run {active_run.run_key} already RUNNING",
+                run=active_run,
+                level="warn",
+                stage="dedup_skip",
+                payload=payload,
+            )
+            session.commit()
+            return payload
         run = self.runtime.start_run(
             session,
             run_type=run_type,
@@ -318,6 +349,8 @@ class MarketDataService:
             )
             payload = result.to_dict()
             payload["run_key"] = run.run_key
+            if stale_runs:
+                payload["reaped_stale_runs"] = [stale.run_key for stale in stale_runs]
             self.runtime.finish_run(
                 session,
                 run,

@@ -214,11 +214,53 @@ def _should_run_scheduled_live_cycle(session) -> tuple[bool, dict[str, object]]:
             "elapsed_seconds": None,
         }
     if str(latest_run.status or "").upper() == "RUNNING":
+        updated_at = latest_run.updated_at or latest_run.started_at
+        if updated_at is not None and updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        stale_after_seconds = max(60, int(getattr(settings, "live_cycle_stale_seconds", 900) or 900))
+        age_seconds = (
+            (datetime.now(timezone.utc) - updated_at).total_seconds()
+            if updated_at is not None
+            else float("inf")
+        )
+        if age_seconds >= stale_after_seconds:
+            reason = f"stale live_cycle watchdog timed out after {int(age_seconds)}s"
+            runtime.fail_run(
+                session,
+                latest_run,
+                reason=reason,
+                stage="failed_stale",
+                summary_extra={"stale_for_seconds": int(age_seconds)},
+            )
+            runtime.add_event(
+                session,
+                "live_cycle",
+                f"Marked stale live cycle {latest_run.run_key} as FAILED",
+                run=latest_run,
+                level="warn",
+                stage="failed_stale",
+                payload={"reason": reason, "stale_for_seconds": int(age_seconds)},
+            )
+            session.commit()
+            logger.warning(
+                "[live] Reaped stale cycle run_key=%s age=%ss",
+                latest_run.run_key,
+                int(age_seconds),
+            )
+            return True, {
+                "reason": "reaped_stale_previous_cycle",
+                "market_session": market_label,
+                "required_interval_seconds": required_interval,
+                "elapsed_seconds": age_seconds,
+                "stale_after_seconds": stale_after_seconds,
+                "reaped_run_key": latest_run.run_key,
+            }
         return False, {
             "reason": "previous_cycle_running",
             "market_session": market_label,
             "required_interval_seconds": required_interval,
-            "elapsed_seconds": 0.0,
+            "elapsed_seconds": age_seconds if updated_at is not None else 0.0,
+            "stale_after_seconds": stale_after_seconds,
         }
     started_at = latest_run.started_at
     if started_at is None:

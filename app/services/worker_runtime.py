@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 from typing import Any
 
@@ -232,6 +232,83 @@ class WorkerRuntimeService:
             .order_by(desc(WorkerRun.updated_at), desc(WorkerRun.id))
             .limit(1)
         ).scalar_one_or_none()
+
+    def latest_running_run(self, session: Session, run_type: str) -> WorkerRun | None:
+        return session.execute(
+            select(WorkerRun)
+            .where(
+                WorkerRun.run_type == run_type,
+                WorkerRun.status == "RUNNING",
+            )
+            .order_by(desc(WorkerRun.updated_at), desc(WorkerRun.id))
+            .limit(1)
+        ).scalar_one_or_none()
+
+    def fail_run(
+        self,
+        session: Session,
+        run: WorkerRun,
+        *,
+        reason: str,
+        stage: str = "failed",
+        summary_extra: dict[str, Any] | None = None,
+    ) -> WorkerRun:
+        summary = dict(run.summary_json or {})
+        summary.setdefault("reconciled", True)
+        summary["reason"] = reason
+        if summary_extra:
+            summary.update(summary_extra)
+        run.summary_json = summary
+        run.status = "FAILED"
+        run.stage = stage
+        run.finished_at = utc_now()
+        run.updated_at = utc_now()
+        run.error_message = reason[:4000]
+        session.flush()
+        return run
+
+    def fail_stale_runs(
+        self,
+        session: Session,
+        *,
+        run_type: str,
+        stale_after_seconds: int,
+        reason: str,
+    ) -> list[WorkerRun]:
+        cutoff = utc_now() - timedelta(seconds=max(1, int(stale_after_seconds)))
+        stale_runs = session.execute(
+            select(WorkerRun)
+            .where(
+                WorkerRun.run_type == run_type,
+                WorkerRun.status == "RUNNING",
+                WorkerRun.updated_at < cutoff,
+            )
+            .order_by(WorkerRun.updated_at.asc(), WorkerRun.id.asc())
+        ).scalars().all()
+        for run in stale_runs:
+            stale_for_seconds = max(
+                0,
+                int((utc_now() - ensure_utc(run.updated_at or run.started_at or utc_now())).total_seconds()),
+            )
+            self.fail_run(
+                session,
+                run,
+                reason=reason,
+                stage="failed_stale",
+                summary_extra={"stale_for_seconds": stale_for_seconds},
+            )
+            self.add_event(
+                session,
+                run_type,
+                f"Marked stale {run_type} run {run.run_key} as FAILED: {reason}",
+                run=run,
+                level="warn",
+                stage="failed_stale",
+                payload={"reason": reason, "stale_for_seconds": stale_for_seconds},
+            )
+        if stale_runs:
+            session.flush()
+        return stale_runs
 
     def recent_events(
         self,

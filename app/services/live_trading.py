@@ -141,7 +141,16 @@ class LiveTradingService:
             if not dry_run:
                 try:
                     self._update_run(session, run, stage="bar_refresh", current_agent=None)
-                    self._refresh_bars(session, tickers)
+                    refresh_result = self._refresh_bars(session, tickers)
+                    if refresh_result.get("skipped"):
+                        self._emit_event(
+                            session,
+                            run,
+                            f"Cycle {cycle_id} bar refresh skipped: {refresh_result.get('reason')}",
+                            level="warn",
+                            stage="bar_refresh",
+                            payload=refresh_result,
+                        )
                 except Exception as exc:
                     self._emit_event(session, run, f"Cycle {cycle_id} bar refresh failed: {exc}", level="warn", stage="bar_refresh")
                     logger.warning("[live] Bar refresh failed (continuing): %s", exc)
@@ -1053,7 +1062,7 @@ class LiveTradingService:
 
         return False, f"unsupported execution mode={mode}"
 
-    def _refresh_bars(self, session: Session, tickers: list[str]) -> None:
+    def _refresh_bars(self, session: Session, tickers: list[str]) -> dict[str, Any]:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
         logger.info("[live] Refreshing Bar1m for %d tickers (%s)", len(tickers), today)
@@ -1067,6 +1076,7 @@ class LiveTradingService:
             trigger="live_cycle",
         )
         logger.info("[live] Bar refresh complete: %s", result)
+        return result
 
     def _get_last_agent_run_time(self, session: Session, ticker: str | None) -> datetime | None:
         try:

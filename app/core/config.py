@@ -221,6 +221,10 @@ class Settings(BaseSettings):
     live_disable_default_mode: str = "CANCEL_ORDERS"
     # Refuse new live orders when local Bar1m cache is older than this threshold.
     live_data_max_age_minutes: float = 20.0
+    # Watchdog: reap stuck live cycles so future scheduled cycles can continue.
+    live_cycle_stale_seconds: int = 900
+    # Watchdog: reap stuck bar refresh runs and avoid duplicate refresh overlap.
+    bar_backfill_stale_seconds: int = 900
     # Event-driven live mode: run full graph when new tradeable news arrives.
     live_event_driven_mode: bool = True
     # When live is enabled, warm up ingestion/cache first before placing orders.
