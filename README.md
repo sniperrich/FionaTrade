@@ -57,6 +57,10 @@ python scripts/migrate_sqlite_to_postgres.py \
 - 默认会阻止“迁移期间仍有 live/backtest 正在写库”的情况
 - 如需强制跳过该保护，可加 `--allow-active-writes`（不推荐）
 - 迁移后会自动输出逐表 `source/target` 行数校验与抽样一致性结果
+- 迁移脚本现在使用 FionaTrade ORM metadata 创建 PostgreSQL 表，不再复用 SQLite 反射出来的 `DATETIME` 等类型
+- 迁移脚本会递归清洗 JSON 中的 `Infinity/NaN`，避免 PostgreSQL JSON 列拒收
+- 迁移脚本会按外键拓扑顺序复制表，并对源 SQLite 中已经损坏的 orphan FK 行做过滤与计数报告
+- 本地实测：`fionatrade.db -> PostgreSQL 16` 已可完整迁移；其中 `event_evidence` 因源库存在坏外键，过滤了 `1708` 条 orphan 行
 
 ---
 

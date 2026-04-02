@@ -346,7 +346,7 @@ class FundamentalsSnapshot(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ticker: Mapped[str] = mapped_column(String(16), index=True)
     period: Mapped[str] = mapped_column(String(16))       # e.g. "2024Q4", "2024"
-    period_type: Mapped[str] = mapped_column(String(8))   # "quarterly" or "annual"
+    period_type: Mapped[str] = mapped_column(String(16))  # "quarterly" or "annual"
 
     # Income statement
     revenue: Mapped[float | None] = mapped_column(Float, nullable=True)

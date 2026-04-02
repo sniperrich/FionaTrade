@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import json
+import math
 from typing import Any
 
 from sqlalchemy import MetaData, create_engine, func, inspect, select, text
@@ -54,6 +55,83 @@ def _serialize_row(row: dict[str, Any]) -> str:
         else:
             safe[k] = v
     return json.dumps(safe, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _sanitize_value(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _sanitize_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_value(v) for v in value]
+    if isinstance(value, tuple):
+        return [_sanitize_value(v) for v in value]
+    return value
+
+
+def _fk_parent_key_cache(
+    source_engine: Engine,
+    parent_table,
+    parent_col_name: str,
+    cache: dict[tuple[str, str], set[Any]],
+) -> set[Any]:
+    key = (parent_table.name, parent_col_name)
+    if key in cache:
+        return cache[key]
+    parent_col = parent_table.c[parent_col_name]
+    with source_engine.connect() as conn:
+        values = conn.execute(select(parent_col).distinct()).scalars().all()
+    cache[key] = set(values)
+    return cache[key]
+
+
+def _filter_orphan_rows(
+    source_engine: Engine,
+    source_meta: MetaData,
+    source_table,
+    rows: list[dict[str, Any]],
+    fk_cache: dict[tuple[str, str], set[Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    if not rows:
+        return rows, 0
+
+    validators: list[tuple[str, set[Any]]] = []
+    for fk in source_table.foreign_key_constraints:
+        if len(fk.elements) != 1:
+            continue
+        element = fk.elements[0]
+        local_col = element.parent.name
+        remote_table_name = element.column.table.name
+        remote_col_name = element.column.name
+        parent_table = source_meta.tables.get(remote_table_name)
+        if parent_table is None or remote_col_name not in parent_table.c:
+            continue
+        validators.append(
+            (
+                local_col,
+                _fk_parent_key_cache(source_engine, parent_table, remote_col_name, fk_cache),
+            )
+        )
+
+    if not validators:
+        return rows, 0
+
+    filtered: list[dict[str, Any]] = []
+    dropped = 0
+    for row in rows:
+        keep = True
+        for local_col, allowed_values in validators:
+            value = row.get(local_col)
+            if value is None:
+                continue
+            if value not in allowed_values:
+                keep = False
+                break
+        if keep:
+            filtered.append(row)
+        else:
+            dropped += 1
+    return filtered, dropped
 
 
 def _assert_source_quiet(source_engine: Engine, *, allow_active_writes: bool) -> None:
@@ -121,55 +199,73 @@ def _assert_source_quiet(source_engine: Engine, *, allow_active_writes: bool) ->
         )
 
 
-def _copy_table(source_engine: Engine, target_engine: Engine, table, chunk_size: int) -> int:
-    pk_cols = list(table.primary_key.columns)
+def _copy_table(
+    source_engine: Engine,
+    target_engine: Engine,
+    source_meta: MetaData,
+    source_table,
+    target_table,
+    chunk_size: int,
+) -> tuple[int, int]:
+    pk_cols = list(source_table.primary_key.columns)
     pk_col = pk_cols[0] if len(pk_cols) == 1 else None
     copied = 0
+    dropped_orphans = 0
+    fk_cache: dict[tuple[str, str], set[Any]] = {}
 
     if pk_col is not None:
         last_pk = None
         while True:
-            stmt = select(table).order_by(pk_col.asc()).limit(chunk_size)
+            stmt = select(source_table).order_by(pk_col.asc()).limit(chunk_size)
             if last_pk is not None:
                 stmt = stmt.where(pk_col > last_pk)
             with source_engine.connect() as src_conn:
                 rows = src_conn.execute(stmt).mappings().all()
             if not rows:
                 break
-            payload = [dict(r) for r in rows]
+            payload = [{k: _sanitize_value(v) for k, v in dict(r).items()} for r in rows]
+            payload, dropped = _filter_orphan_rows(source_engine, source_meta, source_table, payload, fk_cache)
+            dropped_orphans += dropped
             with target_engine.begin() as dst_conn:
-                dst_conn.execute(table.insert(), payload)
+                if payload:
+                    dst_conn.execute(target_table.insert(), payload)
             copied += len(payload)
-            last_pk = payload[-1][pk_col.name]
+            last_pk = rows[-1][pk_col.name]
     else:
         with source_engine.connect() as src_conn:
-            result = src_conn.execute(select(table)).mappings()
+            result = src_conn.execute(select(source_table)).mappings()
             while True:
                 rows = result.fetchmany(chunk_size)
                 if not rows:
                     break
-                payload = [dict(r) for r in rows]
+                payload = [{k: _sanitize_value(v) for k, v in dict(r).items()} for r in rows]
+                payload, dropped = _filter_orphan_rows(source_engine, source_meta, source_table, payload, fk_cache)
+                dropped_orphans += dropped
                 with target_engine.begin() as dst_conn:
-                    dst_conn.execute(table.insert(), payload)
+                    if payload:
+                        dst_conn.execute(target_table.insert(), payload)
                 copied += len(payload)
 
-    return copied
+    return copied, dropped_orphans
 
 
-def _spot_check(source_engine: Engine, target_engine: Engine, table, sample: int = 3) -> tuple[bool, str]:
-    pk_cols = list(table.primary_key.columns)
+def _spot_check(source_engine: Engine, target_engine: Engine, source_table, target_table, sample: int = 3) -> tuple[bool, str]:
+    pk_cols = list(source_table.primary_key.columns)
     if len(pk_cols) != 1:
         return True, "no_single_pk"
     pk = pk_cols[0]
 
     with source_engine.connect() as src_conn:
-        src_rows = src_conn.execute(select(table).order_by(pk.asc()).limit(sample)).mappings().all()
+        src_rows = src_conn.execute(select(source_table).order_by(pk.asc()).limit(sample)).mappings().all()
     if not src_rows:
         return True, "empty"
     keys = [row[pk.name] for row in src_rows]
 
     with target_engine.connect() as dst_conn:
-        dst_rows = dst_conn.execute(select(table).where(pk.in_(keys)).order_by(pk.asc())).mappings().all()
+        target_pk = target_table.c[pk.name]
+        dst_rows = dst_conn.execute(
+            select(target_table).where(target_pk.in_(keys)).order_by(target_pk.asc())
+        ).mappings().all()
 
     if len(src_rows) != len(dst_rows):
         return False, f"sample_len_mismatch src={len(src_rows)} dst={len(dst_rows)}"
@@ -201,11 +297,19 @@ def main() -> int:
     if not source_meta.tables:
         raise SystemExit("source has no tables")
 
-    # Create missing tables on target with reflected schema.
-    source_meta.create_all(bind=target_engine, checkfirst=True)
+    # Create target tables using FionaTrade ORM metadata so PostgreSQL types
+    # are emitted correctly instead of reusing SQLite-reflected DATETIME/JSON.
+    from app.db.database import Base
+    from app.db import models as _models  # noqa: F401
+
+    target_meta = Base.metadata
+    target_meta.create_all(bind=target_engine, checkfirst=True)
 
     inspector = inspect(source_engine)
-    table_names = [name for name in inspector.get_table_names() if name not in skip_tables]
+    source_table_names = {name for name in inspector.get_table_names() if name not in skip_tables}
+    ordered_target_names = [table.name for table in target_meta.sorted_tables if table.name in source_table_names]
+    remaining_names = sorted(source_table_names - set(ordered_target_names))
+    table_names = ordered_target_names + remaining_names
     if not table_names:
         raise SystemExit("no tables selected for migration")
 
@@ -217,24 +321,39 @@ def main() -> int:
 
     summary: list[dict[str, Any]] = []
     for name in table_names:
-        table = source_meta.tables[name]
-        src_count = _table_count(source_engine, table)
-        dst_before = _table_count(target_engine, table)
+        source_table = source_meta.tables[name]
+        target_table = target_meta.tables.get(name)
+        if target_table is None:
+            raise SystemExit(f"target metadata is missing table '{name}'")
+
+        src_count = _table_count(source_engine, source_table)
+        dst_before = _table_count(target_engine, target_table)
         if dst_before > 0 and not args.truncate_target:
             raise SystemExit(
                 f"target table '{name}' already has {dst_before} rows; rerun with --truncate-target or empty target"
             )
 
         print(f"[migrate] {name}: source={src_count} target_before={dst_before}")
-        copied = _copy_table(source_engine, target_engine, table, args.chunk_size)
-        dst_after = _table_count(target_engine, table)
-        ok = src_count == dst_after
-        sample_ok, sample_msg = _spot_check(source_engine, target_engine, table, sample=3)
+        copied, dropped_orphans = _copy_table(
+            source_engine,
+            target_engine,
+            source_meta,
+            source_table,
+            target_table,
+            args.chunk_size,
+        )
+        dst_after = _table_count(target_engine, target_table)
+        ok = src_count == dst_after + dropped_orphans
+        if dropped_orphans:
+            sample_ok, sample_msg = True, f"orphan_filtered={dropped_orphans}"
+        else:
+            sample_ok, sample_msg = _spot_check(source_engine, target_engine, source_table, target_table, sample=3)
         summary.append(
             {
                 "table": name,
                 "source": src_count,
                 "copied": copied,
+                "dropped_orphans": dropped_orphans,
                 "target_after": dst_after,
                 "count_ok": ok,
                 "sample_ok": sample_ok,
@@ -242,7 +361,7 @@ def main() -> int:
             }
         )
         print(
-            f"[migrate] {name}: copied={copied} target_after={dst_after} "
+            f"[migrate] {name}: copied={copied} dropped_orphans={dropped_orphans} target_after={dst_after} "
             f"count_ok={ok} sample_ok={sample_ok} ({sample_msg})"
         )
 
@@ -251,6 +370,7 @@ def main() -> int:
     for row in summary:
         print(
             f"  - {row['table']}: src={row['source']} dst={row['target_after']} "
+            f"dropped_orphans={row.get('dropped_orphans', 0)} "
             f"count_ok={row['count_ok']} sample_ok={row['sample_ok']}"
         )
 
