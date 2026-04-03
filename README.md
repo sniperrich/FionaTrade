@@ -535,6 +535,7 @@ if dt.tzinfo is None:
 - `News Feed` 现在按 `Raw Intake / Event Evidence / Agent Input / Live Input` 四个分层直接展示内容，不再只显示摘要 badge
 - 页面顶部的用途筛选现在是“切换分层视图”，不会再触发后端只返回单层结果导致其它分类看起来像“没内容”
 - 自动刷新统一拉取 `purpose=all`，前端本地分桶渲染，避免用途分层和摘要统计脱节
+- `source` 下拉现在会触发后端重新查询；不再只在当前前端已加载的 200 条里做本地筛选，避免像 `benzinga` 这种“全库有数据但当前窗口没有”的 source 看起来恒为 0 条
 
 ---
 

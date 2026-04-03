@@ -59,7 +59,7 @@
     <option value="live">用途: Live Input</option>
   </select>
   <input type="text" id="filter-text" placeholder="Search headlines…" oninput="filterNews()" style="max-width:280px" />
-  <select id="filter-source" onchange="filterNews()" style="max-width:180px">
+  <select id="filter-source" onchange="onSourceFilterChange()" style="max-width:180px">
     <option value="">All sources</option>
     {% for name in source_names %}
     <option value="{{ name }}">{{ name }}</option>
@@ -288,6 +288,10 @@ function refreshPurposeSections(){
   });
 }
 
+function currentSourceFilter(){
+  return (document.getElementById('filter-source')?.value || '').trim();
+}
+
 function filterNews(){
   const purpose=document.getElementById('filter-purpose').value || 'all';
   const text=document.getElementById('filter-text').value.toLowerCase();
@@ -470,7 +474,10 @@ function replaceNewsList(items){
 }
 
 async function reloadNewsListFromApi(){
-  const d=await apiFetch('/api/news?limit=200&purpose=all', { timeout: 12000 });
+  const source=currentSourceFilter();
+  const query=new URLSearchParams({ limit: '200', purpose: 'all' });
+  if(source) query.set('source', source);
+  const d=await apiFetch(`/api/news?${query.toString()}`, { timeout: 12000 });
   latestNewsId = Math.max(latestNewsId, d.latest_id || 0);
   replaceNewsList(d.items || []);
   renderPurposeSummary(d);
@@ -487,7 +494,14 @@ async function refreshSourceStatus(){
 
 async function pollLatestNews(){
   try{
-    const d=await apiFetch(`/api/news?since_id=${encodeURIComponent(latestNewsId)}&limit=50&purpose=all`, { timeout: 12000 });
+    const source=currentSourceFilter();
+    const query=new URLSearchParams({
+      since_id: String(latestNewsId),
+      limit: '50',
+      purpose: 'all',
+    });
+    if(source) query.set('source', source);
+    const d=await apiFetch(`/api/news?${query.toString()}`, { timeout: 12000 });
     const items=d.items || [];
     const added=prependNews(items);
     latestNewsId=Math.max(latestNewsId, d.latest_id || 0);
@@ -502,6 +516,19 @@ async function pollLatestNews(){
 
 async function onPurposeFilterChange(){
   currentPurposeFilter = document.getElementById('filter-purpose').value || 'all';
+  filterNews();
+}
+
+async function onSourceFilterChange(){
+  latestNewsId = 0;
+  if(NEWS_LIVE_PAGE){
+    try{
+      await reloadNewsListFromApi();
+    } catch(e){
+      toast(`Source refresh failed: ${e.message}`, 'error');
+      return;
+    }
+  }
   filterNews();
 }
 
