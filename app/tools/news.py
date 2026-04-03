@@ -112,6 +112,11 @@ _TICKER_COMPANY_NAMES: dict[str, list[str]] = {
 }
 
 
+def _metadata_ticker_pattern_clause(ticker_upper: str):
+    pattern = f'%\"ticker\": \"{ticker_upper}\"%'
+    return sa.cast(RawItem.metadata_json, sa.Text).ilike(pattern)
+
+
 def get_recent_events(
     session: Session,
     ticker: str | None = None,
@@ -262,9 +267,6 @@ def get_ticker_news_summary(
     for name in company_names:
         title_patterns.append(f"%{name}%")
 
-    # Metadata exact match for SEC/Finnhub/Yahoo tagged items
-    metadata_pattern = f'%"ticker": "{ticker_upper}"%'
-
     title_conditions = [RawItem.title.ilike(p) for p in title_patterns]
 
     # Body text matching for company names (first 600 chars to keep it efficient)
@@ -272,7 +274,7 @@ def get_ticker_news_summary(
     for name in company_names:
         body_conditions.append(sa.func.substr(RawItem.body, 1, 600).ilike(f"%{name}%"))
 
-    all_conditions = [*title_conditions, RawItem.metadata_json.ilike(metadata_pattern)]
+    all_conditions = [*title_conditions, _metadata_ticker_pattern_clause(ticker_upper)]
     if body_conditions:
         all_conditions.extend(body_conditions)
 

@@ -529,6 +529,7 @@ if dt.tzinfo is None:
 - `live_cycle` 的 agent graph 进度写入现在走独立 session；`LiveTrade / AgentRun` 的 best-effort 持久化改为 savepoint，避免单条可选写入失败把整个 PostgreSQL 事务污染成 `InFailedSqlTransaction`
 - `live_cycle` 的 run stage / worker event / finish_run 现在都不再复用主交易事务；每个 ticker 成功后会显式 `commit` 业务写入，失败时会先 `rollback` 再继续下一票，避免某一票的事务污染把整轮 `agent_runs/live_trades` 一起回滚
 - `AgentGraph` 中 `batch_score_runs / build_performance_context / persist_run` 这些“非主路径”失败后现在会主动 `rollback` 当前 session，避免吞错后把后续 live 决策链留在 PostgreSQL aborted transaction 状态
+- `app/tools/news.py::get_ticker_news_summary()` 里对 `RawItem.metadata_json` 的 ticker 匹配现在显式 `CAST(... AS TEXT)`；PostgreSQL 不再因为对 JSON 列直接做 `ILIKE` 而把 `news_sentiment` 阶段炸掉
 
 ---
 

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
 from app.db.models import Event, EventEvidence, RawItem
-from app.tools.news import get_recent_events, get_ticker_news_summary
+from app.tools.news import _metadata_ticker_pattern_clause, get_recent_events, get_ticker_news_summary
 
 
 def _raw_item(
@@ -72,6 +75,15 @@ def test_ticker_news_summary_allowed_sources_normalizes_yahoo_finance(session):
     )
     assert len(items) == 1
     assert items[0]["source"] == "yahoo_finance"
+
+
+def test_metadata_ticker_pattern_clause_casts_json_for_postgres():
+    compiled = str(
+        sa.select(RawItem.id)
+        .where(_metadata_ticker_pattern_clause("AAPL"))
+        .compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "CAST(raw_items.metadata_json AS TEXT)" in compiled
 
 
 def test_get_recent_events_allowed_sources_filters_and_empty_fallback(session):
