@@ -52,11 +52,11 @@
 <!-- Filter bar -->
 <div class="filter-bar mb12">
   <select id="filter-purpose" onchange="onPurposeFilterChange()" style="max-width:180px">
-    <option value="all" selected>用途: 全量采集流</option>
-    <option value="raw">用途: 仅原始采集</option>
-    <option value="event">用途: 已进入事件层</option>
-    <option value="agent">用途: 已进入 Agent 决策</option>
-    <option value="live">用途: 已用于 Live 交易</option>
+    <option value="all" selected>用途: 全部分层</option>
+    <option value="raw">用途: Raw Intake</option>
+    <option value="event">用途: Event Evidence</option>
+    <option value="agent">用途: Agent Input</option>
+    <option value="live">用途: Live Input</option>
   </select>
   <input type="text" id="filter-text" placeholder="Search headlines…" oninput="filterNews()" style="max-width:280px" />
   <select id="filter-source" onchange="filterNews()" style="max-width:180px">
@@ -185,6 +185,41 @@ function getNewsCards(){
   return [...document.querySelectorAll('.news-card')];
 }
 
+const PURPOSE_SECTIONS = [
+  {
+    key: 'RAW_INGEST_ONLY',
+    slug: 'raw',
+    title: 'Raw Intake',
+    subtitle: '全量采集流。还没有进入事件层或交易链路。',
+    badgeClass: 'badge-grey',
+    emptyText: 'No raw-only news in the current window.',
+  },
+  {
+    key: 'EVENT_EVIDENCE',
+    slug: 'event',
+    title: 'Event Evidence',
+    subtitle: '已经进入结构化事件层，可以追溯到 Event / EventEvidence。',
+    badgeClass: 'badge-blue',
+    emptyText: 'No event-evidence news in the current window.',
+  },
+  {
+    key: 'AGENT_TRIGGER_INPUT',
+    slug: 'agent',
+    title: 'Agent Input',
+    subtitle: '已经被 Agent 决策链使用，但还没有直接落到 live trade。',
+    badgeClass: 'badge-accent',
+    emptyText: 'No agent-input news in the current window.',
+  },
+  {
+    key: 'LIVE_TRADE_INPUT',
+    slug: 'live',
+    title: 'Live Input',
+    subtitle: '已经与 live trade 建立直接链路。',
+    badgeClass: 'badge-green',
+    emptyText: 'No live-linked news in the current window.',
+  },
+];
+
 function parseNewsSortKey(obj){
   const ts=Number(obj?.sortTs ?? obj?.dataset?.sortTs ?? 0);
   const id=Number(obj?.id ?? obj?.dataset?.sortId ?? 0);
@@ -195,6 +230,17 @@ function itemSortKey(item){
   const published=item?.published_at ? new Date(item.published_at) : null;
   const ts=published && Number.isFinite(published.getTime()) ? Math.floor(published.getTime()/1000) : 0;
   return parseNewsSortKey({ sortTs: ts, id: Number(item?.id || 0) });
+}
+
+function bucketItemsByPurpose(items){
+  const buckets=Object.fromEntries(PURPOSE_SECTIONS.map(section=>[section.key, []]));
+  (items || []).forEach(item=>{
+    const key=PURPOSE_SECTIONS.some(section=>section.key===item?.purpose_layer)
+      ? item.purpose_layer
+      : 'RAW_INGEST_ONLY';
+    buckets[key].push(item);
+  });
+  return buckets;
 }
 
 function rebuildTickerFilter(){
@@ -215,6 +261,10 @@ function rebuildTickerFilter(){
 
 function purposeMatch(card, purpose){
   if(purpose === 'all') return true;
+  const sectionSlug=(card.dataset.sectionSlug || '').toLowerCase();
+  if(sectionSlug){
+    return sectionSlug === purpose;
+  }
   const hasEvent = card.dataset.hasEvent === '1';
   const hasAgent = card.dataset.hasAgent === '1';
   const hasLive = card.dataset.hasLive === '1';
@@ -223,6 +273,19 @@ function purposeMatch(card, purpose){
   if(purpose === 'agent') return hasAgent;
   if(purpose === 'live') return hasLive;
   return true;
+}
+
+function refreshPurposeSections(){
+  const selectedPurpose=document.getElementById('filter-purpose').value || 'all';
+  document.querySelectorAll('[data-purpose-section]').forEach(section=>{
+    const slug=section.dataset.purposeSection || '';
+    const cards=[...section.querySelectorAll('.news-card')];
+    const visibleCount=cards.filter(card=>card.style.display !== 'none').length;
+    const visibleNode=section.querySelector('[data-visible-count]');
+    if(visibleNode) visibleNode.textContent=String(visibleCount);
+    const shouldShowSection=selectedPurpose === 'all' || selectedPurpose === slug;
+    section.style.display=shouldShowSection ? '' : 'none';
+  });
 }
 
 function filterNews(){
@@ -241,6 +304,7 @@ function filterNews(){
     if(show) visible++;
   });
   document.getElementById('news-count').textContent=visible+' items';
+  refreshPurposeSections();
 }
 
 function renderSourceStatuses(items){
@@ -302,7 +366,36 @@ function renderPurposeBadges(item){
   return badges.join('');
 }
 
-function renderNewsCard(item){
+function renderPurposeSection(section, items){
+  const count=Array.isArray(items) ? items.length : 0;
+  const body=count
+    ? items.map(item=>renderNewsCard(item, section.slug)).join('')
+    : `<div class="empty-state text-muted" style="padding:14px 12px">${escapeHtml(section.emptyText)}</div>`;
+  return `
+    <section
+      class="card mb12 purpose-section"
+      data-purpose-section="${section.slug}"
+      data-purpose-key="${section.key}"
+      style="padding:16px 18px"
+    >
+      <div class="section-header mb12" style="align-items:flex-start">
+        <div>
+          <div class="card-title" style="margin:0">${escapeHtml(section.title)}</div>
+          <div class="text-muted text-sm" style="margin-top:4px">${escapeHtml(section.subtitle)}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="badge ${section.badgeClass}">Visible <span data-visible-count>${count}</span></span>
+          <span class="badge badge-grey">Total ${count}</span>
+        </div>
+      </div>
+      <div class="purpose-section-body">
+        ${body}
+      </div>
+    </section>
+  `;
+}
+
+function renderNewsCard(item, sectionSlug=''){
   const ticker=item.metadata?.ticker || '';
   const source=item.source || 'unknown';
   const published=item.published_at ? new Date(item.published_at) : null;
@@ -330,7 +423,7 @@ function renderNewsCard(item){
     <div class="news-body">${escapeHtml(item.body_preview)}</div>
   ` : '';
   return `
-    <div class="news-card" data-id="${item.id}" data-sort-id="${item.id}" data-sort-ts="${publishedTs}" data-source="${escapeHtml(source)}" data-tickers="${escapeHtml(ticker)}" data-headline="${escapeHtml((item.title || '').toLowerCase())}" data-purpose-layer="${escapeHtml(purposeLayer)}" data-has-event="${hasEvent ? '1' : '0'}" data-has-agent="${hasAgent ? '1' : '0'}" data-has-live="${hasLive ? '1' : '0'}">
+    <div class="news-card" data-id="${item.id}" data-sort-id="${item.id}" data-sort-ts="${publishedTs}" data-source="${escapeHtml(source)}" data-tickers="${escapeHtml(ticker)}" data-headline="${escapeHtml((item.title || '').toLowerCase())}" data-purpose-layer="${escapeHtml(purposeLayer)}" data-section-slug="${escapeHtml(sectionSlug)}" data-has-event="${hasEvent ? '1' : '0'}" data-has-agent="${hasAgent ? '1' : '0'}" data-has-live="${hasLive ? '1' : '0'}">
       <div class="news-headline">${escapeHtml(item.title || '(no title)')}</div>
       <div class="news-meta">
         ${ticker ? `<span class="badge badge-accent">${escapeHtml(ticker)}</span>` : ''}
@@ -347,42 +440,8 @@ function renderNewsCard(item){
 }
 
 function prependNews(items){
-  const list=document.getElementById('news-list');
   const seen=new Set(getNewsCards().map(card=>card.dataset.id));
-  const fresh=(items||[]).filter(item=>!seen.has(String(item.id)));
-  if(!fresh.length) return 0;
-  const empty=list.querySelector('.empty-state');
-  if(empty && !getNewsCards().length) empty.remove();
-  const sorted=fresh.slice().sort((a,b)=>{
-    const ka=itemSortKey(a);
-    const kb=itemSortKey(b);
-    if(ka.ts!==kb.ts) return kb.ts-ka.ts;
-    return kb.id-ka.id;
-  });
-  sorted.forEach(item=>{
-    const wrapper=document.createElement('div');
-    wrapper.innerHTML=renderNewsCard(item).trim();
-    const node=wrapper.firstElementChild;
-    if(!node) return;
-    const key=itemSortKey(item);
-    let inserted=false;
-    for(const card of getNewsCards()){
-      const ck=parseNewsSortKey({ dataset: card.dataset });
-      if(key.ts>ck.ts || (key.ts===ck.ts && key.id>ck.id)){
-        card.before(node);
-        inserted=true;
-        break;
-      }
-    }
-    if(!inserted){
-      list.appendChild(node);
-    }
-  });
-  const cards=getNewsCards();
-  cards.slice(250).forEach(card=>card.remove());
-  rebuildTickerFilter();
-  filterNews();
-  return fresh.length;
+  return (items || []).filter(item=>!seen.has(String(item.id))).length;
 }
 
 function replaceNewsList(items){
@@ -404,14 +463,14 @@ function replaceNewsList(items){
     filterNews();
     return;
   }
-  list.innerHTML = sorted.map(renderNewsCard).join('');
+  const buckets=bucketItemsByPurpose(sorted);
+  list.innerHTML = PURPOSE_SECTIONS.map(section=>renderPurposeSection(section, buckets[section.key] || [])).join('');
   rebuildTickerFilter();
   filterNews();
 }
 
 async function reloadNewsListFromApi(){
-  const purpose=document.getElementById('filter-purpose').value || 'all';
-  const d=await apiFetch(`/api/news?limit=200&purpose=${encodeURIComponent(purpose)}`, { timeout: 12000 });
+  const d=await apiFetch('/api/news?limit=200&purpose=all', { timeout: 12000 });
   latestNewsId = Math.max(latestNewsId, d.latest_id || 0);
   replaceNewsList(d.items || []);
   renderPurposeSummary(d);
@@ -427,13 +486,13 @@ async function refreshSourceStatus(){
 }
 
 async function pollLatestNews(){
-  const purpose=document.getElementById('filter-purpose').value || 'all';
   try{
-    const d=await apiFetch(`/api/news?since_id=${encodeURIComponent(latestNewsId)}&limit=50&purpose=${encodeURIComponent(purpose)}`, { timeout: 12000 });
+    const d=await apiFetch(`/api/news?since_id=${encodeURIComponent(latestNewsId)}&limit=50&purpose=all`, { timeout: 12000 });
     const items=d.items || [];
     const added=prependNews(items);
     latestNewsId=Math.max(latestNewsId, d.latest_id || 0);
     if(added>0){
+      await reloadNewsListFromApi();
       toast(`Fetched ${added} new item${added===1?'':'s'}`,'success');
     }
   } catch(e){
@@ -443,16 +502,7 @@ async function pollLatestNews(){
 
 async function onPurposeFilterChange(){
   currentPurposeFilter = document.getElementById('filter-purpose').value || 'all';
-  latestNewsId = 0;
-  if(NEWS_LIVE_PAGE){
-    try{
-      await reloadNewsListFromApi();
-    } catch(e){
-      toast(`Layer refresh failed: ${e.message}`, 'error');
-    }
-  } else {
-    filterNews();
-  }
+  filterNews();
 }
 
 async function loadNews(){
