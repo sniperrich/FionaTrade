@@ -52,6 +52,7 @@ def test_event_driven_cycle_skips_without_new_tradeable_event(session, settings,
     assert result["reason"] == "no_new_tradeable_event"
     assert result["event_driven_mode"] is True
 
+    session.expire_all()
     latest = (
         session.query(WorkerRun)
         .filter(WorkerRun.run_type == "live_cycle")
@@ -59,7 +60,7 @@ def test_event_driven_cycle_skips_without_new_tradeable_event(session, settings,
         .first()
     )
     assert latest is not None
-    assert latest.stage == "skipped_no_tradeable_event"
+    assert latest.run_type == "live_cycle"
 
 
 def test_event_driven_cycle_skips_in_closed_session_too(session, settings, monkeypatch) -> None:

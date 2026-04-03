@@ -12,6 +12,7 @@ from app.db import database as db_database
 from app.db.models import BacktestRun, WorkerCommand, WorkerRun
 from app.ingestion.service import IngestionService
 from app.ingestion.types import SourceCheck
+from app.services import live_trading as live_trading_module
 from app.services.live_trading import LiveTradingService, _LIVE_CYCLE_MUTEX
 from app.services.market_data import MarketDataService
 from app.services.runtime_control import CONTROL_WORKER_HEARTBEAT, RuntimeControlService
@@ -504,6 +505,82 @@ def test_process_ticker_survives_progress_runtime_write_failure(session, setting
     assert result["ticker"] == "AAPL"
     assert result["action"] == "BUY"
     assert result["dry_run"] is True
+    assert session.execute(select(WorkerRun).where(WorkerRun.id == run.id)).scalar_one().id == run.id
+
+
+def test_emit_event_failure_does_not_abort_main_session(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+    runtime = WorkerRuntimeService()
+    run = runtime.start_run(
+        session,
+        run_type="live_cycle",
+        trigger="manual",
+        run_key="evtisol1",
+        status="RUNNING",
+        stage="starting",
+    )
+    session.commit()
+
+    class _FakeSession:
+        def get(self, model, obj_id):
+            assert model is WorkerRun
+            assert obj_id == run.id
+            return run
+
+    class _Ctx:
+        def __enter__(self):
+            return _FakeSession()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(live_trading_module, "db_session", lambda: _Ctx())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("event write failed")
+
+    monkeypatch.setattr(service.runtime, "add_event", _boom)
+
+    service._emit_event(session, run, "test event", stage="ticker_completed", ticker="AAPL")
+
+    assert session.execute(select(WorkerRun).where(WorkerRun.id == run.id)).scalar_one().id == run.id
+
+
+def test_update_run_failure_does_not_abort_main_session(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+    runtime = WorkerRuntimeService()
+    run = runtime.start_run(
+        session,
+        run_type="live_cycle",
+        trigger="manual",
+        run_key="runisol1",
+        status="RUNNING",
+        stage="starting",
+    )
+    session.commit()
+
+    class _FakeSession:
+        def get(self, model, obj_id):
+            assert model is WorkerRun
+            assert obj_id == run.id
+            return run
+
+    class _Ctx:
+        def __enter__(self):
+            return _FakeSession()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(live_trading_module, "db_session", lambda: _Ctx())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("run update failed")
+
+    monkeypatch.setattr(service.runtime, "update_run", _boom)
+
+    service._update_run(session, run, stage="processing_ticker", current_ticker="AAPL")
+
     assert session.execute(select(WorkerRun).where(WorkerRun.id == run.id)).scalar_one().id == run.id
 
 

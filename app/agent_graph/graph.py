@@ -22,6 +22,13 @@ from app.db.models import AgentRun
 logger = get_app_logger()
 
 
+def _rollback_session_safely(session: Session, *, context: str) -> None:
+    try:
+        session.rollback()
+    except Exception as rollback_exc:
+        logger.debug("[graph] rollback failed after %s: %s", context, rollback_exc)
+
+
 class AgentGraph:
     """
     Multi-agent decision graph for FionaTrade.
@@ -68,6 +75,7 @@ class AgentGraph:
         try:
             batch_score_runs(session, as_of=as_of)
         except Exception as exc:
+            _rollback_session_safely(session, context="batch_score_runs")
             logger.debug("[graph] batch_score_runs failed (non-critical): %s", exc)
 
         # Build per-agent performance context
@@ -78,6 +86,7 @@ class AgentGraph:
                 if perf_text:
                     agent_perf_ctx[agent_name] = perf_text
             except Exception:
+                _rollback_session_safely(session, context=f"build_performance_context:{agent_name}")
                 pass
         context["agent_performance"] = agent_perf_ctx
 
@@ -323,4 +332,5 @@ class AgentGraph:
             except Exception:
                 pass
         except Exception as exc:
+            _rollback_session_safely(session, context=f"persist_run:{ticker}")
             logger.warning("[graph] Failed to persist AgentRun for %s: %s", ticker, exc)

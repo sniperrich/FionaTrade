@@ -71,6 +71,7 @@ class LiveTradingService:
             }
 
         cycle_id = str(uuid.uuid4())[:8]
+        run: WorkerRun | None = None
         try:
             msi = market_session_info()
             tickers = self._get_tickers()
@@ -91,6 +92,7 @@ class LiveTradingService:
                 total_tickers=len(tickers),
                 completed_tickers=0,
             )
+            session.commit()
             self._emit_event(
                 session,
                 run,
@@ -117,17 +119,16 @@ class LiveTradingService:
 
             if not tickers:
                 summary = {"cycle_id": cycle_id, "error": "No tickers configured for live trading"}
-                self.runtime.finish_run(
-                    session,
-                    run,
+                self._finish_run_record(
+                    run_id=run.id,
                     status="COMPLETED",
                     stage="no_tickers",
+                    summary=summary,
+                    error_message=None,
                     current_ticker=None,
                     current_agent=None,
                     total_tickers=0,
                     completed_tickers=0,
-                    summary=summary,
-                    error_message=None,
                 )
                 self._emit_event(
                     session,
@@ -210,14 +211,13 @@ class LiveTradingService:
                     "warmup_until": warmup_until.isoformat() if warmup_until else None,
                     "live_allowed_sources": sorted(allowed_sources),
                 }
-                self.runtime.finish_run(
-                    session,
-                    run,
+                self._finish_run_record(
+                    run_id=run.id,
                     status="COMPLETED",
                     stage="warmup",
+                    summary=summary,
                     current_ticker=None,
                     current_agent=None,
-                    summary=summary,
                 )
                 self._emit_event(
                     session,
@@ -253,14 +253,13 @@ class LiveTradingService:
                         "market_session": msi.get("label"),
                         "live_allowed_sources": sorted(allowed_sources),
                     }
-                    self.runtime.finish_run(
-                        session,
-                        run,
+                    self._finish_run_record(
+                        run_id=run.id,
                         status="COMPLETED",
                         stage="skipped_no_tradeable_event",
+                        summary=summary,
                         current_ticker=None,
                         current_agent=None,
-                        summary=summary,
                     )
                     self._emit_event(
                         session,
@@ -302,9 +301,8 @@ class LiveTradingService:
             except Exception as exc:
                 if not dry_run:
                     summary = {"cycle_id": cycle_id, "error": f"Broker error: {exc}", "run_key": run.run_key}
-                    self.runtime.finish_run(
-                        session,
-                        run,
+                    self._finish_run_record(
+                        run_id=run.id,
                         status="ERROR",
                         stage="broker_error",
                         error_message=f"Broker error: {exc}",
@@ -402,6 +400,7 @@ class LiveTradingService:
                         allowed_sources=allowed_sources,
                     )
                     results.append(result)
+                    session.commit()
                     self._emit_event(
                         session,
                         run,
@@ -415,6 +414,7 @@ class LiveTradingService:
                         },
                     )
                 except Exception as exc:
+                    session.rollback()
                     logger.exception("[live] Error processing %s: %s", ticker, exc)
                     results.append({"ticker": ticker, "error": str(exc)})
                     self._emit_event(
@@ -459,17 +459,17 @@ class LiveTradingService:
                 len(tickers),
                 " (ANALYSIS MODE)" if dry_run else "",
             )
-            self.runtime.finish_run(
-                session,
-                run,
+            session.commit()
+            self._finish_run_record(
+                run_id=run.id,
                 status="COMPLETED",
                 stage="completed",
+                summary=summary,
+                error_message=None,
                 current_ticker=None,
                 current_agent=None,
                 completed_tickers=len(tickers),
                 total_tickers=len(tickers),
-                summary=summary,
-                error_message=None,
             )
             self._emit_event(
                 session,
@@ -483,12 +483,32 @@ class LiveTradingService:
             except Exception:
                 pass
             return summary
+        except Exception as exc:
+            session.rollback()
+            if run is not None:
+                failure_summary = {"cycle_id": cycle_id, "error": str(exc), "run_key": run.run_key}
+                self._finish_run_record(
+                    run_id=run.id,
+                    status="FAILED",
+                    stage="failed",
+                    summary=failure_summary,
+                    error_message=str(exc),
+                    current_ticker=None,
+                    current_agent=None,
+                )
+                self._persist_runtime_event(
+                    run_id=run.id,
+                    message=f"Cycle {cycle_id} failed: {exc}",
+                    level="error",
+                    stage="failed",
+                    payload=failure_summary,
+                )
+            raise
         finally:
             _LIVE_CYCLE_MUTEX.release()
 
     def _update_run(self, session: Session, run: WorkerRun, **fields: Any) -> None:
-        self.runtime.update_run(session, run, **fields)
-        session.commit()
+        self._persist_run_update(run_id=run.id, **fields)
 
     def _emit_event(
         self,
@@ -502,18 +522,15 @@ class LiveTradingService:
         agent: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> None:
-        self.runtime.add_event(
-            session,
-            "live_cycle",
-            message,
-            run=run,
+        self._persist_runtime_event(
+            run_id=run.id,
+            message=message,
             level=level,
             stage=stage,
             ticker=ticker,
             agent=agent,
             payload=payload,
         )
-        session.commit()
 
     def _emit_plan_event(
         self,
@@ -530,18 +547,102 @@ class LiveTradingService:
             return
         normalized_payload = dict(payload or {})
         normalized_payload.setdefault("event", stage)
-        self.runtime.add_event(
-            session,
-            "live_cycle",
-            message,
-            run=run,
+        self._persist_runtime_event(
+            run_id=run.id,
+            message=message,
             level=level,
             stage=stage,
             ticker=ticker,
             agent="entry_planner",
             payload=normalized_payload,
         )
-        session.flush()
+
+    def _persist_run_update(self, *, run_id: int | None, **fields: Any) -> None:
+        if not run_id:
+            return
+        try:
+            with db_session() as runtime_session:
+                db_run = runtime_session.get(WorkerRun, run_id)
+                if db_run is None:
+                    return
+                self.runtime.update_run(runtime_session, db_run, **fields)
+        except Exception as exc:
+            logger.warning(
+                "[live] runtime run update failed for run_id=%s stage=%s: %s",
+                run_id,
+                fields.get("stage"),
+                exc,
+            )
+
+    def _finish_run_record(
+        self,
+        *,
+        run_id: int | None,
+        status: str,
+        summary: dict[str, Any] | None = None,
+        error_message: str | None = None,
+        **fields: Any,
+    ) -> None:
+        if not run_id:
+            return
+        try:
+            with db_session() as runtime_session:
+                db_run = runtime_session.get(WorkerRun, run_id)
+                if db_run is None:
+                    return
+                self.runtime.finish_run(
+                    runtime_session,
+                    db_run,
+                    status=status,
+                    summary=summary,
+                    error_message=error_message,
+                    **fields,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[live] runtime finish_run failed for run_id=%s status=%s: %s",
+                run_id,
+                status,
+                exc,
+            )
+
+    def _persist_runtime_event(
+        self,
+        *,
+        run_id: int | None,
+        message: str,
+        level: str = "info",
+        stage: str | None = None,
+        ticker: str | None = None,
+        agent: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if not run_id:
+            return
+        try:
+            with db_session() as runtime_session:
+                db_run = runtime_session.get(WorkerRun, run_id)
+                if db_run is None:
+                    return
+                self.runtime.add_event(
+                    runtime_session,
+                    "live_cycle",
+                    message,
+                    run=db_run,
+                    level=level,
+                    stage=stage,
+                    ticker=ticker,
+                    agent=agent,
+                    payload=payload,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[live] runtime event write failed for run_id=%s stage=%s ticker=%s: %s",
+                run_id,
+                stage,
+                ticker,
+                exc,
+            )
 
     def _get_tickers(self) -> list[str]:
         tickers = list(self.settings.live_trading_tickers)
@@ -559,36 +660,20 @@ class LiveTradingService:
     ) -> None:
         if not run_id:
             return
-        try:
-            with db_session() as progress_session:
-                db_run = progress_session.get(WorkerRun, run_id)
-                if db_run is None:
-                    return
-                self.runtime.update_run(
-                    progress_session,
-                    db_run,
-                    stage=update.get("stage", "agent_graph"),
-                    current_ticker=ticker,
-                    current_agent=update.get("agent"),
-                )
-                if update.get("message"):
-                    self.runtime.add_event(
-                        progress_session,
-                        "live_cycle",
-                        str(update["message"]),
-                        run=db_run,
-                        ticker=ticker,
-                        agent=update.get("agent"),
-                        stage=update.get("stage"),
-                        payload={"cycle_id": cycle_id},
-                    )
-        except Exception as exc:
-            logger.warning(
-                "[live] progress runtime write failed for cycle=%s ticker=%s stage=%s: %s",
-                cycle_id,
-                ticker,
-                update.get("stage"),
-                exc,
+        self._persist_run_update(
+            run_id=run_id,
+            stage=update.get("stage", "agent_graph"),
+            current_ticker=ticker,
+            current_agent=update.get("agent"),
+        )
+        if update.get("message"):
+            self._persist_runtime_event(
+                run_id=run_id,
+                message=str(update["message"]),
+                ticker=ticker,
+                agent=update.get("agent"),
+                stage=update.get("stage"),
+                payload={"cycle_id": cycle_id},
             )
 
     def _allowed_source_set(self) -> set[str]:
@@ -1422,14 +1507,12 @@ class LiveTradingService:
                 f"downgraded {prior_action}->HOLD"
             )[:1000]
             if run is not None:
-                self.runtime.add_event(
-                    session,
-                    "live_cycle",
-                    (
+                self._persist_runtime_event(
+                    run_id=run.id,
+                    message=(
                         f"{ticker}: confidence gate blocked {prior_action} "
                         f"(confidence={final_confidence}, min={live_min_confidence})"
                     ),
-                    run=run,
                     level="info",
                     stage="confidence_gate_blocked",
                     ticker=ticker,
@@ -1440,7 +1523,6 @@ class LiveTradingService:
                         "live_min_confidence": live_min_confidence,
                     },
                 )
-                session.commit()
 
         news_signal = str((state.get("news_sentiment_result") or {}).get("signal", "") or "").upper().strip()
         if desired_action in {"BUY", "SHORT", "SELL"} and not trigger_event:
@@ -1453,18 +1535,15 @@ class LiveTradingService:
                 f"{reasoning} | event_gate=no_trigger_event, downgraded {prior_action}->HOLD"
             )[:1000]
             if run is not None:
-                self.runtime.add_event(
-                    session,
-                    "live_cycle",
-                    f"{ticker}: event gate blocked {prior_action} (missing trigger_event_id)",
-                    run=run,
+                self._persist_runtime_event(
+                    run_id=run.id,
+                    message=f"{ticker}: event gate blocked {prior_action} (missing trigger_event_id)",
                     level="info",
                     stage="event_gate_blocked",
                     ticker=ticker,
                     agent="portfolio_manager",
                     payload={"blocked_action": prior_action, "reason": "missing_trigger_event"},
                 )
-                session.commit()
 
         if (
             desired_action in {"SHORT", "SELL"}
@@ -1482,11 +1561,9 @@ class LiveTradingService:
                 f"high_quality_sources={trigger_event.get('high_quality_source_count', 0)}<2"
             )[:1000]
             if run is not None:
-                self.runtime.add_event(
-                    session,
-                    "live_cycle",
-                    f"{ticker}: news conflict blocked {prior_action} (tier0/1 corroboration insufficient)",
-                    run=run,
+                self._persist_runtime_event(
+                    run_id=run.id,
+                    message=f"{ticker}: news conflict blocked {prior_action} (tier0/1 corroboration insufficient)",
                     level="info",
                     stage="news_conflict_blocked",
                     ticker=ticker,
@@ -1498,7 +1575,6 @@ class LiveTradingService:
                         "high_quality_source_count": int(trigger_event.get("high_quality_source_count", 0) or 0),
                     },
                 )
-                session.commit()
 
         agent_run_id: int | None = None
         try:
