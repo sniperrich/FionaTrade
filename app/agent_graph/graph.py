@@ -278,33 +278,34 @@ class AgentGraph:
     ) -> None:
         """Store a summary of this run in the AgentRun table."""
         try:
-            final_confidence = None
-            portfolio = state.get("portfolio_manager_result")
-            if isinstance(portfolio, dict):
-                try:
-                    final_confidence = int(portfolio.get("confidence"))
-                except Exception:
-                    final_confidence = None
-            run = AgentRun(
-                ticker=ticker.upper(),
-                trigger=str((state.get("context") or {}).get("trigger") or "scheduled"),
-                trigger_event_id=(state.get("context") or {}).get("trigger_event_id"),
-                macro_output=state.get("macro_analyst_result") or {},
-                news_output=state.get("news_sentiment_result") or {},
-                fundamentals_output=state.get("fundamentals_result") or {},
-                technicals_output=state.get("technicals_result") or {},
-                risk_output=state.get("risk_manager_result") or {},
-                portfolio_output=state.get("portfolio_manager_result") or {},
-                final_action=state.get("final_action", "HOLD"),
-                final_confidence=final_confidence,
-                final_position_pct=state.get("final_position_pct", 0.0),
-                final_reasoning=state.get("final_reasoning", ""),
-                execution_ms=int(elapsed * 1000),
-                status="FAILED" if state.get("error") else "COMPLETED",
-                error_message=state.get("error"),
-            )
-            session.add(run)
-            session.flush()
+            with session.begin_nested():
+                final_confidence = None
+                portfolio = state.get("portfolio_manager_result")
+                if isinstance(portfolio, dict):
+                    try:
+                        final_confidence = int(portfolio.get("confidence"))
+                    except Exception:
+                        final_confidence = None
+                run = AgentRun(
+                    ticker=ticker.upper(),
+                    trigger=str((state.get("context") or {}).get("trigger") or "scheduled"),
+                    trigger_event_id=(state.get("context") or {}).get("trigger_event_id"),
+                    macro_output=state.get("macro_analyst_result") or {},
+                    news_output=state.get("news_sentiment_result") or {},
+                    fundamentals_output=state.get("fundamentals_result") or {},
+                    technicals_output=state.get("technicals_result") or {},
+                    risk_output=state.get("risk_manager_result") or {},
+                    portfolio_output=state.get("portfolio_manager_result") or {},
+                    final_action=state.get("final_action", "HOLD"),
+                    final_confidence=final_confidence,
+                    final_position_pct=state.get("final_position_pct", 0.0),
+                    final_reasoning=state.get("final_reasoning", ""),
+                    execution_ms=int(elapsed * 1000),
+                    status="FAILED" if state.get("error") else "COMPLETED",
+                    error_message=state.get("error"),
+                )
+                session.add(run)
+                session.flush()
             # Structured agent run log for monitoring / debugging
             try:
                 log_agent_run(ticker, {

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 
 from app.api.routes import close_all_positions_endpoint, list_live_entry_plan_events, live_positions, set_live_enabled
 from app.broker.base import PositionInfo
@@ -443,6 +444,67 @@ def test_stale_market_data_suppresses_order_before_price_fetch(session, settings
     assert result["order_placed"] is False
     assert result["reason"] == "stale_market_data"
     assert result["cache_age_minutes"] == 45.0
+
+
+def test_process_ticker_survives_progress_runtime_write_failure(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+    runtime = WorkerRuntimeService()
+    run = runtime.start_run(session, run_type="live_cycle", trigger="pytest", run_key="progress01")
+    session.commit()
+
+    class DummyGraph:
+        def run(self, _session, _ticker, context=None, progress_callback=None):
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "parallel_agent_running",
+                        "agent": "news_sentiment",
+                        "message": "AAPL: news_sentiment analyzing",
+                    }
+                )
+            return {
+                "final_action": "BUY",
+                "final_position_pct": 0.05,
+                "final_reasoning": "progress write failure should not abort cycle",
+                "portfolio_manager_result": {
+                    "confidence": 81,
+                    "metadata": {"action": "BUY", "position_pct": 0.05},
+                },
+            }
+
+    service._agent_graph = DummyGraph()
+    monkeypatch.setattr(
+        service.runtime,
+        "update_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("runtime write failed")),
+    )
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 301,
+            "event_type": "earnings_release",
+            "confidence": 90,
+            "high_quality_source_count": 2,
+        },
+    )
+
+    result = service._process_ticker(
+        session=session,
+        broker=object(),
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="pytest-progress-failure",
+        msi={"et_time_str": "18:05 ET", "label": "closed", "tradeable": False, "context_string": "closed"},
+        dry_run=True,
+        run=run,
+        fast_path=False,
+    )
+
+    assert result["ticker"] == "AAPL"
+    assert result["action"] == "BUY"
+    assert result["dry_run"] is True
+    assert session.execute(select(WorkerRun).where(WorkerRun.id == run.id)).scalar_one().id == run.id
 
 
 def test_scheduled_live_cycle_uses_open_closed_intervals(session, monkeypatch) -> None:

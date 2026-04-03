@@ -32,6 +32,7 @@ from app.broker.alpaca import AlpacaBroker
 from app.core.config import DEFAULT_LIVE_ALLOWED_SOURCES, Settings
 from app.core.logging import get_app_logger, log_live_cycle
 from app.core.market_hours import market_session_info
+from app.db.database import db_session
 from app.db.models import AgentRun, Bar1m, EntryPlan, Event, EventEvidence, LiveTrade, RawItem, WorkerRun
 from app.ingestion.service import IngestionService
 from app.services.capital_confirmation import CapitalConfirmationService
@@ -547,6 +548,48 @@ class LiveTradingService:
         if not tickers:
             tickers = list(self.settings.agent_tickers_override or [])
         return [t.upper() for t in tickers if t]
+
+    def _persist_progress_update(
+        self,
+        *,
+        run_id: int | None,
+        ticker: str,
+        cycle_id: str,
+        update: dict[str, Any],
+    ) -> None:
+        if not run_id:
+            return
+        try:
+            with db_session() as progress_session:
+                db_run = progress_session.get(WorkerRun, run_id)
+                if db_run is None:
+                    return
+                self.runtime.update_run(
+                    progress_session,
+                    db_run,
+                    stage=update.get("stage", "agent_graph"),
+                    current_ticker=ticker,
+                    current_agent=update.get("agent"),
+                )
+                if update.get("message"):
+                    self.runtime.add_event(
+                        progress_session,
+                        "live_cycle",
+                        str(update["message"]),
+                        run=db_run,
+                        ticker=ticker,
+                        agent=update.get("agent"),
+                        stage=update.get("stage"),
+                        payload={"cycle_id": cycle_id},
+                    )
+        except Exception as exc:
+            logger.warning(
+                "[live] progress runtime write failed for cycle=%s ticker=%s stage=%s: %s",
+                cycle_id,
+                ticker,
+                update.get("stage"),
+                exc,
+            )
 
     def _allowed_source_set(self) -> set[str]:
         configured = getattr(self.settings, "live_allowed_sources", []) or []
@@ -1131,19 +1174,20 @@ class LiveTradingService:
         if not agent_run_id:
             return
         try:
-            row = session.get(AgentRun, agent_run_id)
-            if row is None:
-                return
-            portfolio = dict(row.portfolio_output or {})
-            metadata = dict(portfolio.get("metadata") or {})
-            live_meta = dict(metadata.get("live_runtime") or {})
-            live_meta.update({k: v for k, v in updates.items() if v is not None})
-            metadata["live_runtime"] = live_meta
-            portfolio["metadata"] = metadata
-            row.portfolio_output = portfolio
-            session.flush()
-        except Exception:
-            logger.debug("[live] failed to annotate agent run %s", agent_run_id)
+            with session.begin_nested():
+                row = session.get(AgentRun, agent_run_id)
+                if row is None:
+                    return
+                portfolio = dict(row.portfolio_output or {})
+                metadata = dict(portfolio.get("metadata") or {})
+                live_meta = dict(metadata.get("live_runtime") or {})
+                live_meta.update({k: v for k, v in updates.items() if v is not None})
+                metadata["live_runtime"] = live_meta
+                portfolio["metadata"] = metadata
+                row.portfolio_output = portfolio
+                session.flush()
+        except Exception as exc:
+            logger.debug("[live] failed to annotate agent run %s: %s", agent_run_id, exc)
 
     def _count_new_tradeable_articles(
         self,
@@ -1296,25 +1340,12 @@ class LiveTradingService:
         def progress_callback(update: dict[str, Any]) -> None:
             if run is None:
                 return
-            self.runtime.update_run(
-                session,
-                run,
-                stage=update.get("stage", "agent_graph"),
-                current_ticker=ticker,
-                current_agent=update.get("agent"),
+            self._persist_progress_update(
+                run_id=run.id,
+                ticker=ticker,
+                cycle_id=cycle_id,
+                update=update,
             )
-            if update.get("message"):
-                self.runtime.add_event(
-                    session,
-                    "live_cycle",
-                    str(update["message"]),
-                    run=run,
-                    ticker=ticker,
-                    agent=update.get("agent"),
-                    stage=update.get("stage"),
-                    payload={"cycle_id": cycle_id},
-                )
-            session.commit()
 
         last_run_at = self._get_last_agent_run_time(session, ticker=ticker)
         warmup_state = self._warmup_state(session)
@@ -1372,8 +1403,12 @@ class LiveTradingService:
         used_cached_macro = bool(state.get("used_cached_macro", graph_context.get("used_cached_macro", False)))
         used_cached_fund = bool(state.get("used_cached_fundamentals", graph_context.get("used_cached_fundamentals", False)))
         if run is not None:
-            self.runtime.update_run(session, run, stage="decision_ready", current_ticker=ticker, current_agent="portfolio_manager")
-            session.commit()
+            self._persist_progress_update(
+                run_id=run.id,
+                ticker=ticker,
+                cycle_id=cycle_id,
+                update={"stage": "decision_ready", "agent": "portfolio_manager"},
+            )
 
         target_pct = min(target_pct, self.settings.live_max_position_pct)
         if desired_action in {"BUY", "SHORT", "SELL"} and final_confidence < live_min_confidence:
@@ -1951,8 +1986,12 @@ class LiveTradingService:
         trigger_event: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if run is not None:
-            self.runtime.update_run(session, run, stage="pricing", current_ticker=ticker, current_agent=None)
-            session.commit()
+            self._persist_progress_update(
+                run_id=run.id,
+                ticker=ticker,
+                cycle_id=cycle_id,
+                update={"stage": "pricing", "agent": None},
+            )
         cache_is_fresh, cache_age_minutes = self.market_data.is_ticker_cache_fresh(
             session,
             ticker,
@@ -2009,8 +2048,12 @@ class LiveTradingService:
         current_qty = float(current_pos.quantity) if current_pos else 0.0
 
         if run is not None:
-            self.runtime.update_run(session, run, stage="position_sizing", current_ticker=ticker, current_agent=None)
-            session.commit()
+            self._persist_progress_update(
+                run_id=run.id,
+                ticker=ticker,
+                cycle_id=cycle_id,
+                update={"stage": "position_sizing", "agent": None},
+            )
         target_dollars = portfolio_value * target_pct
         target_qty = int(target_dollars / current_price)
         if target_qty < _MIN_SHARES:
@@ -2277,8 +2320,12 @@ class LiveTradingService:
         )
 
         if run is not None:
-            self.runtime.update_run(session, run, stage="placing_order", current_ticker=ticker, current_agent=None)
-            session.commit()
+            self._persist_progress_update(
+                run_id=run.id,
+                ticker=ticker,
+                cycle_id=cycle_id,
+                update={"stage": "placing_order", "agent": None},
+            )
         result = broker.place_bracket_order(
             ticker=ticker,
             action=order_action,
@@ -2364,22 +2411,23 @@ class LiveTradingService:
         error: str | None = None,
     ) -> None:
         try:
-            trade = LiveTrade(
-                cycle_id=cycle_id,
-                ticker=ticker,
-                agent_run_id=agent_run_id,
-                action=action,
-                quantity=quantity,
-                target_pct=target_pct,
-                order_id=order_id,
-                status=status,
-                et_time=et_time,
-                market_session=market_session,
-                reasoning=reasoning,
-                error=error,
-                created_at=datetime.now(timezone.utc),
-            )
-            session.add(trade)
-            session.flush()
+            with session.begin_nested():
+                trade = LiveTrade(
+                    cycle_id=cycle_id,
+                    ticker=ticker,
+                    agent_run_id=agent_run_id,
+                    action=action,
+                    quantity=quantity,
+                    target_pct=target_pct,
+                    order_id=order_id,
+                    status=status,
+                    et_time=et_time,
+                    market_session=market_session,
+                    reasoning=reasoning,
+                    error=error,
+                    created_at=datetime.now(timezone.utc),
+                )
+                session.add(trade)
+                session.flush()
         except Exception as exc:
             logger.warning("[live] Failed to record LiveTrade for %s: %s", ticker, exc)

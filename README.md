@@ -526,6 +526,7 @@ if dt.tzinfo is None:
 ### PostgreSQL 运行态时间注意事项
 - PostgreSQL 连接现在会强制 `SET TIME ZONE 'UTC'`，避免新的 `worker_runs / worker_commands` 把本地时区时钟写进 `timestamp without time zone`
 - 迁移到 PostgreSQL 之前写入的运行态行，可能已经混入“本地时区 naive 时间”；stale watchdog 现在会兼容这种旧行，不再把刚启动几分钟的 `live_cycle` 误判成超时
+- `live_cycle` 的 agent graph 进度写入现在走独立 session；`LiveTrade / AgentRun` 的 best-effort 持久化改为 savepoint，避免单条可选写入失败把整个 PostgreSQL 事务污染成 `InFailedSqlTransaction`
 
 ---
 
