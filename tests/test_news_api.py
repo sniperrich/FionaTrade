@@ -53,6 +53,7 @@ def test_list_news_defaults_to_published_time_order(session, settings):
         before_id=None,
         source=None,
         q=None,
+        purpose="all",
     )
 
     ids = [row["id"] for row in payload["items"]]
@@ -90,6 +91,7 @@ def test_list_news_marks_historical_backfill(session, settings):
         before_id=None,
         source=None,
         q=None,
+        purpose="all",
     )
 
     by_id = {row["id"]: row for row in payload["items"]}

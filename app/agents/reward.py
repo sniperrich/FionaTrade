@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_app_logger
+from app.core.utils import ensure_utc
 from app.db.models import AgentScore, AgentRun, Bar1m
 
 logger = get_app_logger()
@@ -355,7 +356,7 @@ def _get_price_near(session: Session, ticker: str, target_time: datetime) -> flo
     ).scalars().all()
     bar = min(
         bars,
-        key=lambda row: abs((row.ts - target_time).total_seconds()),
+        key=lambda row: abs((ensure_utc(row.ts) - ensure_utc(target_time)).total_seconds()),
         default=None,
     )
     return float(bar.close) if bar else None

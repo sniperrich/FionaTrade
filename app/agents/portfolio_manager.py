@@ -278,10 +278,19 @@ class PortfolioManagerAgent(BaseAgent):
             logger.exception("[portfolio_manager] Unexpected error for %s: %s", ticker, exc)
             return AgentSignal.error_signal(self.name, str(exc))
 
-    def _compute_weighted_confidence(self, agent_signals: dict[str, dict], weights: dict[str, float]) -> float:
-        """Weighted average confidence using the weights resolved for this run."""
+    def _compute_weighted_confidence(
+        self,
+        agent_signals: dict[str, dict],
+        weights: dict[str, float] | None = None,
+    ) -> float:
+        """Weighted average confidence using resolved weights for this run.
+
+        `weights` remains optional for direct callers and tests; when omitted,
+        fall back to the configured base weights.
+        """
+        resolved_weights = weights or self._base_weights()
         total, weight_sum = 0.0, 0.0
-        for agent, weight in weights.items():
+        for agent, weight in resolved_weights.items():
             sig = agent_signals.get(agent)
             if sig and sig.get("signal") != "NO_SIGNAL":
                 total += float(sig.get("confidence", 50)) * weight

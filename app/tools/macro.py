@@ -122,13 +122,14 @@ def get_macro_news_summary(
 
     macro_items = []
     for row in rows:
-        text = (row.title + " " + row.body[:300]).lower()
+        body = (row.body or "")
+        text = (f"{row.title} {body[:300]}").lower()
         if any(kw in text for kw in _MACRO_KEYWORDS):
             macro_items.append({
                 "title": row.title,
                 "source": row.source,
                 "published_at": row.published_at.isoformat(),
-                "body_snippet": row.body[:300],
+                "body_snippet": body[:300],
             })
         if len(macro_items) >= limit:
             break
@@ -162,13 +163,14 @@ def get_geopolitical_news(
     # Filter to only geo-keyword-relevant articles from those sources
     results: list[dict] = []
     for row in geo_rows:
-        text = (row.title + " " + row.body[:400]).lower()
+        body = (row.body or "")
+        text = (f"{row.title} {body[:400]}").lower()
         if any(kw in text for kw in _GEO_KEYWORDS):
             results.append({
                 "title": row.title,
                 "source": row.source,
                 "published_at": row.published_at.isoformat(),
-                "body_snippet": row.body[:400],
+                "body_snippet": body[:400],
             })
         if len(results) >= limit:
             break
@@ -187,14 +189,15 @@ def get_geopolitical_news(
         ).scalars().all()
         seen_urls = {r["title"] for r in results}
         for row in other_rows:
-            text = (row.title + " " + row.body[:400]).lower()
+            body = (row.body or "")
+            text = (f"{row.title} {body[:400]}").lower()
             kw_count = sum(1 for kw in _GEO_KEYWORDS if kw in text)
             if kw_count >= 2 and row.title not in seen_urls:
                 results.append({
                     "title": row.title,
                     "source": row.source,
                     "published_at": row.published_at.isoformat(),
-                    "body_snippet": row.body[:400],
+                    "body_snippet": body[:400],
                 })
                 seen_urls.add(row.title)
             if len(results) >= limit:
