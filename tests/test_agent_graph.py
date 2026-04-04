@@ -12,7 +12,7 @@ from app.db.models import AgentRun, Bar1m
 
 
 def _add_bars(session, ticker: str, count: int = 60) -> None:
-    base = datetime.datetime.utcnow() - datetime.timedelta(minutes=count + 30)
+    base = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=count + 30)
     for i in range(count):
         session.add(Bar1m(
             ticker=ticker,

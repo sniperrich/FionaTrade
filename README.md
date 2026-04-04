@@ -530,6 +530,7 @@ if dt.tzinfo is None:
 - `live_cycle` 的 run stage / worker event / finish_run 现在都不再复用主交易事务；每个 ticker 成功后会显式 `commit` 业务写入，失败时会先 `rollback` 再继续下一票，避免某一票的事务污染把整轮 `agent_runs/live_trades` 一起回滚
 - `AgentGraph` 中 `batch_score_runs / build_performance_context / persist_run` 这些“非主路径”失败后现在会主动 `rollback` 当前 session，避免吞错后把后续 live 决策链留在 PostgreSQL aborted transaction 状态
 - `app/tools/news.py::get_ticker_news_summary()` 里对 `RawItem.metadata_json` 的 ticker 匹配现在显式 `CAST(... AS TEXT)`；PostgreSQL 不再因为对 JSON 列直接做 `ILIKE` 而把 `news_sentiment` 阶段炸掉
+- `app/db/database.py` 只会在 PostgreSQL 下传入 `pool_size / max_overflow`；SQLite（尤其是内存库和测试环境）不再因为收到不兼容的连接池参数而在 `create_engine()` 阶段直接报错
 
 ### News Feed 用途分层前端
 - `News Feed` 现在按 `Raw Intake / Event Evidence / Agent Input / Live Input` 四个分层直接展示内容，不再只显示摘要 badge

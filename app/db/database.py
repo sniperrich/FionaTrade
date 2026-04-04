@@ -20,6 +20,7 @@ if settings.database_url.startswith("sqlite"):
         "check_same_thread": False,
         "timeout": settings.sqlite_busy_timeout_seconds,
     }
+elif settings.database_url.startswith("postgresql") or settings.database_url.startswith("postgres"):
     engine_kwargs["pool_size"] = 10
     engine_kwargs["max_overflow"] = 20
 engine = create_engine(settings.database_url, **engine_kwargs)

@@ -169,7 +169,6 @@
 <script>
 let latestNewsId = {{ latest_id or 0 }};
 const NEWS_LIVE_PAGE = {{ 'true' if pager.page == 1 else 'false' }};
-let currentPurposeFilter = 'all';
 
 function escapeHtml(s){
   return String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -515,7 +514,6 @@ async function pollLatestNews(){
 }
 
 async function onPurposeFilterChange(){
-  currentPurposeFilter = document.getElementById('filter-purpose').value || 'all';
   filterNews();
 }
 
@@ -544,7 +542,6 @@ rebuildTickerFilter();
 filterNews();
 refreshSourceStatus();
 if(NEWS_LIVE_PAGE){
-  currentPurposeFilter = document.getElementById('filter-purpose').value || 'all';
   reloadNewsListFromApi();
   setInterval(loadNews, 30000);
 }
