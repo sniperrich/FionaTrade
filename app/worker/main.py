@@ -540,6 +540,7 @@ def _execute_claimed_command(command_id: int) -> None:
                     trigger=str(payload.get("trigger", "manual")),
                     stage="running",
                     summary_json={
+                        "engine_mode": str(payload.get("engine_mode") or "event"),
                         "start_date": payload.get("start_date"),
                         "end_date": payload.get("end_date"),
                         "use_llm": bool(payload.get("use_llm", False)),

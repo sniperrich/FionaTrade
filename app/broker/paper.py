@@ -29,44 +29,20 @@ class PaperBroker(AbstractBroker):
         quantity: float,
         order_type: str = "market",
     ) -> OrderResult:
-        from app.db.models import Signal
-        from sqlalchemy import select
-        from datetime import datetime as dt, timedelta, timezone
-
         ticker = ticker.upper()
-        # Paper engine executes pending Signal rows; we create a synthetic one here
         try:
-            sig = Signal(
+            if order_type.lower() != "market":
+                raise ValueError("PaperBroker only supports market orders")
+            order, fill_price = self._engine.execute_direct_order(
+                self._session,
                 ticker=ticker,
                 action=action.upper(),
-                confidence=80,
-                horizon_min=self._settings.default_horizon_min,
-                reason="agent_graph_direct_order",
-                expires_at=dt.now(timezone.utc)
-                + timedelta(minutes=self._settings.default_horizon_min),
+                quantity=quantity,
             )
-            self._session.add(sig)
-            self._session.flush()
-
-            result = self._engine.execute(self._session)
-
-            executed = result.executed > 0
-            fill_price = None
-            if executed:
-                from app.db.models import PaperFill
-                from sqlalchemy import desc
-                last_fill = self._session.execute(
-                    select(PaperFill)
-                    .where(PaperFill.ticker == ticker)
-                    .order_by(desc(PaperFill.filled_at))
-                    .limit(1)
-                ).scalar_one_or_none()
-                if last_fill:
-                    fill_price = float(last_fill.fill_price or 0)
 
             return OrderResult(
-                success=executed,
-                order_id=str(sig.id),
+                success=True,
+                order_id=str(order.id),
                 ticker=ticker,
                 action=action.upper(),
                 quantity=quantity,

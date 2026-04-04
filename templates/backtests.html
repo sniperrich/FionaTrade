@@ -57,20 +57,43 @@
       </div>
       <div class="form-row mb8">
         <div class="form-group">
+          <label>Execution Model</label>
+          <div class="seg-group">
+            <input type="radio" name="bt-mode" id="bt-agent" value="agent" {% if backtest_defaults.engine_mode == 'agent' %}checked{% endif %}>
+            <label for="bt-agent">Agent</label>
+            <input type="radio" name="bt-mode" id="bt-llm" value="llm" {% if backtest_defaults.engine_mode != 'agent' and backtest_defaults.use_llm %}checked{% endif %}>
+            <label for="bt-llm">Event + LLM</label>
+            <input type="radio" name="bt-mode" id="bt-rules" value="rules" {% if backtest_defaults.engine_mode != 'agent' and not backtest_defaults.use_llm %}checked{% endif %}>
+            <label for="bt-rules">Event + Rules</label>
+          </div>
+          <div class="text-muted text-sm mt4">`Agent` 会走和 live trading 更接近的多 Agent 决策链；Event 模式保留做旧版事件研究。</div>
+        </div>
+        <div class="form-group">
           <label>Event Profile</label>
           <select id="bt-event-profile">
             <option value="" selected>All Events</option>
             <option value="earnings_only">Earnings Only</option>
           </select>
         </div>
+      </div>
+      <div class="form-row mb8">
         <div class="form-group">
-          <label>Mode</label>
-          <div class="seg-group">
-            <input type="radio" name="bt-mode" id="bt-rules" value="rules" {% if not backtest_defaults.use_llm %}checked{% endif %}>
-            <label for="bt-rules">Rules</label>
-            <input type="radio" name="bt-mode" id="bt-llm" value="llm" {% if backtest_defaults.use_llm %}checked{% endif %}>
-            <label for="bt-llm">LLM</label>
-          </div>
+          <label>Tickers</label>
+          <input type="text" id="bt-tickers" value="{{ backtest_defaults.tickers|join(',') }}" placeholder="AAPL,NVDA,MSFT" />
+        </div>
+        <div class="form-group">
+          <label>Decision Frequency (trading days)</label>
+          <input type="number" id="bt-decision-frequency" min="1" max="20" step="1" value="{{ backtest_defaults.decision_frequency }}" />
+        </div>
+      </div>
+      <div class="form-row mb8">
+        <div class="form-group">
+          <label>Initial Capital</label>
+          <input type="number" id="bt-initial-capital" min="1000" step="1000" value="{{ backtest_defaults.initial_capital }}" />
+        </div>
+        <div class="form-group">
+          <label>Max Position %</label>
+          <input type="number" id="bt-max-position-pct" min="0.01" max="1" step="0.01" value="{{ backtest_defaults.max_position_pct }}" />
         </div>
       </div>
       <div class="form-row mb8">
@@ -105,7 +128,7 @@
       </div>
       <div class="form-group mb12">
         <label>Source Filter</label>
-        <div class="text-muted text-sm mb8">Leave all unchecked to use every source.</div>
+        <div class="text-muted text-sm mb8">仅 `Event + LLM / Event + Rules` 模式使用。留空表示不过滤。</div>
         <div id="bt-sources" class="grid g3" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
           {% for source in backtest_sources %}
           <label class="text-sm"><input type="checkbox" value="{{ source }}" /> {{ source }}</label>
@@ -314,13 +337,25 @@ function selectedSources(){
   return [...document.querySelectorAll('#bt-sources input[type="checkbox"]:checked')].map(el => el.value);
 }
 
+function selectedTickers(){
+  return String(document.getElementById('bt-tickers').value || '')
+    .split(',')
+    .map(value => value.trim().toUpperCase())
+    .filter(Boolean);
+}
+
 function currentBacktestPayload(){
-  const mode = document.querySelector('input[name="bt-mode"]:checked')?.value || 'rules';
+  const mode = document.querySelector('input[name="bt-mode"]:checked')?.value || 'agent';
   return {
     start_date: document.getElementById('bt-start-date').value,
     end_date: document.getElementById('bt-end-date').value,
+    engine_mode: mode === 'agent' ? 'agent' : 'event',
     event_profile: document.getElementById('bt-event-profile').value,
     use_llm: mode === 'llm',
+    tickers: selectedTickers(),
+    decision_frequency: Number(document.getElementById('bt-decision-frequency').value || 1),
+    initial_capital: Number(document.getElementById('bt-initial-capital').value || 100000),
+    max_position_pct: Number(document.getElementById('bt-max-position-pct').value || 0.1),
     min_confidence: Number(document.getElementById('bt-min-confidence').value || 0),
     min_severity: Number(document.getElementById('bt-min-severity').value || 0),
     use_signal_validation: document.getElementById('bt-use-validation').checked,
@@ -373,12 +408,13 @@ async function loadBacktestRuns(){
   }
   document.getElementById('bt-runs-body').innerHTML = items.map(row => {
     const sources = (row.sources || []).length ? row.sources.join(', ') : 'All';
+    const tickers = (row.tickers || []).length ? row.tickers.join(', ') : '—';
     return `<tr>
       <td class="mono text-xs">#${row.id}</td>
       <td>${backtestStatusBadge(row.status)}</td>
       <td>${escapeHtml(row.start_date || '—')} → ${escapeHtml(row.end_date || '—')}</td>
-      <td><span class="badge ${row.use_llm ? 'badge-accent' : 'badge-grey'}">${row.use_llm ? 'LLM' : 'RULES'}</span></td>
-      <td class="text-xs">${escapeHtml(sources)}</td>
+      <td><span class="badge ${row.engine_mode === 'agent' ? 'badge-green' : (row.use_llm ? 'badge-accent' : 'badge-grey')}">${escapeHtml(row.mode_label || 'EVENT')}</span></td>
+      <td class="text-xs">${escapeHtml(row.engine_mode === 'agent' ? tickers : sources)}</td>
       <td>${runProgressBlock(row.metrics)}</td>
       <td class="num">${row.metrics?.trades ?? row.metrics?.trades_so_far ?? 0}</td>
       <td class="num">${fmtPct(row.metrics?.win_rate || 0)}</td>
@@ -468,8 +504,12 @@ async function selectBacktestRun(runId){
     </div>
     <div class="mt12 text-sm text-muted">
       Range ${escapeHtml(data.start_date || '—')} → ${escapeHtml(data.end_date || '—')} ·
-      Mode ${data.use_llm ? 'LLM' : 'RULES'} ·
+      Mode ${escapeHtml(data.mode_label || (data.use_llm ? 'EVENT / LLM' : 'EVENT / RULES'))} ·
       Status ${escapeHtml(data.status || '—')}
+    </div>
+    <div class="mt12 text-sm text-muted">
+      Tickers ${escapeHtml((data.tickers || []).join(', ') || '—')} ·
+      Decision Frequency ${escapeHtml(String((data.params || {}).decision_frequency || data.metrics_full?.decision_frequency || '—'))}
     </div>
     <div class="mt12 tbl-wrap">
       <table>

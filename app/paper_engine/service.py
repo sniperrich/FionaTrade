@@ -454,6 +454,61 @@ class PaperEngineService:
 
         return closed
 
+    def execute_direct_order(
+        self,
+        session: Session,
+        *,
+        ticker: str,
+        action: str,
+        quantity: float,
+        submitted_at: datetime | None = None,
+    ) -> tuple[PaperOrder, float]:
+        side = str(action or "").upper()
+        if side not in {"BUY", "SELL", "SHORT", "COVER"}:
+            raise ValueError(f"unsupported paper order action: {action}")
+        qty = max(round(float(quantity or 0.0), 4), 0.0)
+        if qty <= 0:
+            raise ValueError("quantity must be positive")
+
+        now = ensure_utc(submitted_at) if submitted_at else utc_now()
+        base_price = self._latest_price(session, ticker.upper())
+        fill_price = self._slipped_price(side, base_price)
+        pos = self._position(session, ticker.upper())
+
+        order = PaperOrder(
+            signal_id=None,
+            side=side,
+            ticker=ticker.upper(),
+            qty=qty,
+            submitted_at=now,
+            status="SUBMITTED",
+        )
+        session.add(order)
+        session.flush()
+
+        self._apply_fill(pos, side, qty, fill_price, now)
+        session.add(
+            PaperFill(
+                order_id=order.id,
+                side=side,
+                ticker=ticker.upper(),
+                qty=qty,
+                submitted_at=now,
+                filled_at=now,
+                fill_price=fill_price,
+                slippage_bps=self.settings.default_slippage_bps,
+                fee=0.0,
+                notional=qty * fill_price,
+            )
+        )
+        if pos.qty == 0:
+            self._clear_position_horizon(session, ticker.upper())
+        elif side in {"BUY", "SHORT"}:
+            self._set_position_horizon(session, ticker.upper(), self.settings.default_horizon_min)
+        self._mark_to_market(session)
+        session.flush()
+        return order, fill_price
+
     def execute(self, session: Session) -> PaperExecutionResult:
         now = utc_now()
 

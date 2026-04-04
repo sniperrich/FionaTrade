@@ -135,7 +135,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | `/live` | 实盘：持仓、手动下单（market/limit/bracket）、Enable/Disable Live 停机模式、`Flatten All` 一键平仓、持仓风险摘要（gross/net exposure、position risk P&L、today total P&L、overnight guard）、runtime activity、worker heartbeat、command queue、worker history、local bar cache、ticker K-line、entry plan 面板、entry plan trigger log、成交历史翻页（策略参数改在 `/settings`） |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页、**Trigger Event 证据链可视化 + 关联 Live Trade 明细** |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**用途分层（RAW/Event/Agent/Live）**、按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页 |
-| `/backtests` | Backtest 控制台：时间区间、LLM/rules、source filter、后台排队执行、结果列表与快速检查 |
+| `/backtests` | Backtest 控制台：默认走 **Agent live-like** 模式（ticker、decision frequency、initial capital、max position %），也保留 legacy Event + LLM / Event + Rules 研究模式 |
 | `/backtests/{run_id}` | Backtest 详情页：大图模式（收益率曲线 + 回撤曲线）+ Sharpe/回撤/PF + 全量交易明细 |
 | `/attribution` | 模块归因面板：Agent 边际贡献、事件类型/source/source tier/flow bucket 分桶、过滤器价值排行、评分回填 |
 | `/settings` | 统一配置中心：LLM 网关、采集周期、数据源开关 + Live 策略参数（ticker/source 白名单、节奏、flow gate、agent 权重、执行内核、收盘前是否平仓），并回显当前值（已选 ticker/source 等） |
@@ -358,7 +358,8 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,JNJ,PG,HD,A
 - `/backtests` 现在是正式控制页面，不再要求手动跑脚本才能研究
 - WebUI 负责：
   - 选择 `start_date / end_date`
-  - 选择 `rules / llm`
+  - 选择 `Agent / Event + LLM / Event + Rules`
+  - 选择 `tickers / decision_frequency / initial_capital / max_position_pct`
   - 选择 `event_profile`
   - 选择 `source filter`
   - 选择 `flow confirmation` 与 `soft gate` 参数
@@ -373,6 +374,8 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,JNJ,PG,HD,A
 - 当 `flow_score < 40` 且 soft gate 开启时，回测会模拟 `WAIT_BREAKOUT_CONFIRMATION`：在有效窗口内等待突破确认，未触发则跳过该笔
 - Supervisor heartbeat 遇到短时 SQLite lock 会跳过本次写入并继续守护，不会再因为 heartbeat 写失败把 worker 一起带崩
 - Worker 重启时会把上次异常中断留下的 `RUNNING` backtest / worker command / worker run 统一标记为 `FAILED`
+- 默认的 `Agent` 模式现在直接复用 `AgentBacktestEngine`，按 ticker + 交易日频率运行多 Agent 决策，行为更接近 live trading
+- legacy `Event + LLM / Event + Rules` 仍保留，方便做旧版事件研究和 source filter 对比
 
 当前支持的 source filter 语义：
 - 若选择 `sources`，会按 **规范化后的 source 名称** 过滤（例如 `yahoo` 会归一为 `yahoo_finance`）
@@ -383,9 +386,7 @@ LIVE_TRADING_TICKERS=AAPL,NVDA,MSFT,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,JNJ,PG,HD,A
 - `CNBC / Yahoo / Yahoo Finance RSS` 会被降成二级确认源；`Reuters/Bloomberg/SEC/company` 这类仍可作为 primary evidence
 - `trade tracker / what's going on with / why are ... trading / returns to haunt / preview / long-term potential / top movers / market chatter / recap` 这类 follow-up/commentary 标题会被降级或直接过滤
 - 纯 secondary-only 的事件不会通过 validation 成为可交易 primary event，也会在 tradeability gate 被挡掉
-- RSS/SEC/Finnhub source status 在写入 `source_status` 前会先按 `source_key` 聚合，避免同域多 feed 触发 SQLite `UNIQUE constraint failed: source_status.source_key`
-
-当前实现仍然是事件回测，不是 AgentGraph 全链回测。
+- RSS/SEC/Finnhub source status 在写入 `source_status` 前会先按 `source_key` 聚合，避免同域多 feed 触发 `source_status.source_key` 冲突
 
 ### 下单逻辑
 - Alpaca bracket 订单（止损 + 止盈原子提交）

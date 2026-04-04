@@ -151,7 +151,7 @@ function render(){
     { title: 'Sharpe', value: fmtNum(metrics.sharpe || 0, 2), sub: `Profit factor ${fmtNum(metrics.profit_factor || 0, 2)}` },
     { title: 'Max Drawdown', value: fmtPct(metrics.max_drawdown || 0), sub: `Win rate ${fmtPct(metrics.win_rate || 0)}` },
     { title: 'Trades', value: String(metrics.trades ?? 0), sub: `Events ${metrics.events_considered ?? 0}` },
-    { title: 'Mode', value: RUN.use_llm ? 'LLM' : 'RULES', sub: `Min conf ${RUN.min_confidence ?? '—'}` },
+    { title: 'Mode', value: escapeHtml(RUN.mode_label || (RUN.use_llm ? 'EVENT / LLM' : 'EVENT / RULES')), sub: `Min conf ${RUN.min_confidence ?? '—'}` },
     { title: 'Status', value: escapeHtml(RUN.status || '—'), sub: `Created ${fmtTs(RUN.created_at)}` },
   ];
   document.getElementById('metric-cards').innerHTML = cards.map(card => `
@@ -175,8 +175,11 @@ function render(){
   });
 
   const sources = Array.isArray(RUN.sources) && RUN.sources.length ? RUN.sources.join(', ') : 'All sources';
+  const tickers = Array.isArray(RUN.tickers) && RUN.tickers.length ? RUN.tickers.join(', ') : '—';
   document.getElementById('run-meta').innerHTML = `
     <div><span class="bold">Date Range:</span> ${escapeHtml(RUN.start_date || '—')} → ${escapeHtml(RUN.end_date || '—')}</div>
+    <div class="mt4"><span class="bold">Execution Model:</span> ${escapeHtml(RUN.mode_label || '—')}</div>
+    <div class="mt4"><span class="bold">Tickers:</span> ${escapeHtml(tickers)}</div>
     <div class="mt4"><span class="bold">Event Profile:</span> ${escapeHtml(RUN.event_profile || 'all')}</div>
     <div class="mt4"><span class="bold">Sources:</span> ${escapeHtml(sources)}</div>
     <div class="mt4"><span class="bold">Progress Phase:</span> ${escapeHtml(metrics.phase_label || metrics.phase || '—')} (${fmtNum(metrics.phase_pct || 0, 1)}%)</div>
@@ -202,4 +205,3 @@ function render(){
 render();
 </script>
 {% endblock %}
-

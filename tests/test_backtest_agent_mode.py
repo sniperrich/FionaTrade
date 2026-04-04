@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+from datetime import date
+
+from app.api.routes import backtest_options, queue_backtest
+from app.backtest_engine.agent_backtest import AgentBacktestResult, BTDecision, BTTrade
+from app.backtest_engine.service import BacktestEngineService
+from app.db.models import BacktestTrade, WorkerCommand
+
+
+def _fake_agent_result() -> AgentBacktestResult:
+    return AgentBacktestResult(
+        start_date=date(2026, 1, 5),
+        end_date=date(2026, 1, 6),
+        tickers=["AAPL"],
+        initial_capital=100_000.0,
+        final_equity=101_000.0,
+        total_return_pct=1.0,
+        max_drawdown_pct=0.5,
+        total_trades=2,
+        winning_trades=1,
+        losing_trades=0,
+        stop_losses=0,
+        equity_curve=[
+            {"date": "2026-01-05", "equity": 100_000.0},
+            {"date": "2026-01-06", "equity": 101_000.0},
+        ],
+        trades=[
+            BTTrade(
+                date=date(2026, 1, 5),
+                ticker="AAPL",
+                side="BUY",
+                shares=10.0,
+                price=100.0,
+                notional=1_000.0,
+                reason="agent_buy_5%",
+            ),
+            BTTrade(
+                date=date(2026, 1, 6),
+                ticker="AAPL",
+                side="SELL",
+                shares=10.0,
+                price=110.0,
+                notional=1_100.0,
+                reason="agent_sell",
+            ),
+        ],
+        decisions=[
+            BTDecision(
+                date=date(2026, 1, 5),
+                ticker="AAPL",
+                action="BUY",
+                position_pct=0.05,
+                reasoning="positive catalyst",
+                agent_signals={"news": "BUY", "risk": "BUY"},
+            )
+        ],
+        errors=[],
+    )
+
+
+def test_backtest_options_default_to_agent_mode(session, settings) -> None:
+    payload = backtest_options(session=session, settings=settings)
+
+    assert payload["defaults"]["engine_mode"] == "agent"
+    assert payload["defaults"]["decision_frequency"] == 1
+    assert payload["defaults"]["tickers"] == list(settings.live_trading_tickers)
+
+
+def test_queue_backtest_defaults_to_agent_mode(session, settings) -> None:
+    response = queue_backtest(
+        payload={"start_date": "2026-01-01", "end_date": "2026-02-01"},
+        session=session,
+        settings=settings,
+    )
+
+    assert response["queued"] is True
+    command = session.query(WorkerCommand).order_by(WorkerCommand.id.desc()).first()
+    assert command is not None
+    assert command.payload_json["engine_mode"] == "agent"
+    assert command.payload_json["tickers"] == list(settings.live_trading_tickers)
+
+
+def test_backtest_service_agent_mode_persists_live_like_run(session, settings, monkeypatch) -> None:
+    monkeypatch.setattr("app.backtest_engine.service.AgentBacktestEngine.run", lambda *_args, **_kwargs: _fake_agent_result())
+
+    result = BacktestEngineService(settings).run(
+        session,
+        params={
+            "engine_mode": "agent",
+            "start_date": "2026-01-01",
+            "end_date": "2026-02-01",
+            "tickers": ["AAPL"],
+            "decision_frequency": 1,
+        },
+    )
+
+    run = BacktestEngineService(settings).get_run(session, result.run_id)
+    assert run is not None
+    assert result.status == "DONE"
+    assert run.params["engine_mode"] == "agent"
+    assert run.metrics["engine_mode"] == "agent"
+    assert run.metrics["mode_label"] == "AGENT"
+    assert run.metrics["events_considered"] == 1
+    assert run.metrics["trades"] == 1
+    assert len(run.trade_log) == 1
+    assert run.trade_log[0]["ticker"] == "AAPL"
+    assert run.trade_log[0]["side"] == "LONG"
+    assert session.query(BacktestTrade).filter(BacktestTrade.run_id == run.id).count() == 1

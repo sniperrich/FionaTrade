@@ -570,11 +570,13 @@ class AgentBacktestEngine:
     ) -> float | None:
         """Get open or close price during regular trading hours for a ticker on a specific day.
 
-        Uses 14:30-21:00 UTC filter to match 9:30-16:00 ET regular session.
+        Convert the target trading day from New York session hours into UTC so
+        DST transitions match the live trading path.
         """
-        # Regular trading hours in UTC: 14:30-21:00
-        rth_start = datetime.combine(day, dt_time(14, 30), tzinfo=timezone.utc)
-        rth_end = datetime.combine(day, dt_time(21, 0), tzinfo=timezone.utc)
+        ny_start = datetime.combine(day, _MARKET_OPEN, tzinfo=_NY)
+        ny_end = datetime.combine(day, _MARKET_CLOSE, tzinfo=_NY)
+        rth_start = ny_start.astimezone(timezone.utc)
+        rth_end = ny_end.astimezone(timezone.utc)
 
         if which == "open":
             bar = session.execute(
@@ -631,10 +633,11 @@ class AgentBacktestEngine:
         """
         cutoff = datetime.combine(as_of, dt_time(0, 0), tzinfo=timezone.utc)
         lookback_start = cutoff - timedelta(days=lookback_days)
+        day_expr = func.date(Bar1m.ts)
 
         rows = session.execute(
             select(
-                func.strftime('%Y-%m-%d', Bar1m.ts).label("day"),
+                day_expr.label("day"),
                 func.max(Bar1m.high).label("day_high"),
                 func.min(Bar1m.low).label("day_low"),
                 func.avg(Bar1m.close).label("day_close"),
@@ -644,8 +647,8 @@ class AgentBacktestEngine:
                 Bar1m.ts >= lookback_start,
                 Bar1m.ts < cutoff,
             )
-            .group_by(func.strftime('%Y-%m-%d', Bar1m.ts))
-            .order_by(func.strftime('%Y-%m-%d', Bar1m.ts).desc())
+            .group_by(day_expr)
+            .order_by(day_expr.desc())
             .limit(20)
         ).all()
 

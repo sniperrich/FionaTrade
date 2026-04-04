@@ -228,8 +228,13 @@ def backtests_page(
             "backtest_defaults": {
                 "start_date": (utc_now() - timedelta(days=30)).date().isoformat(),
                 "end_date": utc_now().date().isoformat(),
-                "use_llm": False,
+                "engine_mode": "agent",
+                "use_llm": True,
                 "event_profile": "",
+                "tickers": list(settings.live_trading_tickers or settings.agent_tickers_override or settings.sp100_tickers[:5]),
+                "decision_frequency": 1,
+                "initial_capital": settings.initial_nav,
+                "max_position_pct": getattr(settings, "live_max_position_pct", settings.max_position_pct),
                 "min_confidence": settings.min_trade_confidence,
                 "min_severity": 0,
                 "flow_confirmation_enabled": bool(getattr(settings, "flow_confirmation_enabled", True)),
@@ -262,8 +267,15 @@ def backtest_detail_page(
         "start_date": params.get("start_date"),
         "end_date": params.get("end_date"),
         "use_llm": bool(params.get("use_llm", False)),
+        "engine_mode": str(params.get("engine_mode") or metrics.get("engine_mode") or "event"),
+        "mode_label": (
+            "AGENT"
+            if str(params.get("engine_mode") or metrics.get("engine_mode") or "event").strip().lower() == "agent"
+            else ("EVENT / LLM" if bool(params.get("use_llm", False)) else "EVENT / RULES")
+        ),
         "event_profile": params.get("event_profile") or "",
         "sources": params.get("sources") or [],
+        "tickers": params.get("tickers") or [],
         "min_confidence": params.get("min_confidence"),
         "metrics": metrics,
         "equity_curve": run.equity_curve or [],

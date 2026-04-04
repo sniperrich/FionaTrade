@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict, deque
 import math
 import re
 import time
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.backtest_engine.agent_backtest import AgentBacktestEngine
 from app.analysis.service import AnalysisService
 from app.analysis.rules_fallback import fallback_action
 from app.analysis.signal_validator import (
@@ -90,9 +92,15 @@ class BacktestEngineService:
         "cache_warmup": "Cache Warmup",
         "llm_prefetch": "LLM Prefetch",
         "event_execution": "Event Execution",
+        "agent_execution": "Agent Execution",
         "finalizing": "Finalizing",
         "completed": "Completed",
         "failed": "Failed",
+    }
+    _BACKTEST_ENGINE_LABELS = {
+        "agent": "AGENT",
+        "event_llm": "EVENT / LLM",
+        "event_rules": "EVENT / RULES",
     }
 
     def __init__(self, settings: Settings):
@@ -207,6 +215,251 @@ class BacktestEngineService:
         if isinstance(value, (list, tuple, set)):
             return [str(item).strip() for item in value if str(item).strip()]
         return [str(value).strip()]
+
+    @staticmethod
+    def _normalize_engine_mode(value: object | None) -> str:
+        normalized = str(value or "").strip().lower()
+        return "agent" if normalized == "agent" else "event"
+
+    @classmethod
+    def _engine_mode_label(cls, engine_mode: str, *, use_llm: bool) -> str:
+        if engine_mode == "agent":
+            return cls._BACKTEST_ENGINE_LABELS["agent"]
+        return cls._BACKTEST_ENGINE_LABELS["event_llm" if use_llm else "event_rules"]
+
+    @staticmethod
+    def _build_run_ts(day_value: date | str, *, is_exit: bool, reason: str | None = None) -> datetime:
+        if isinstance(day_value, date):
+            day = day_value
+        else:
+            day = date.fromisoformat(str(day_value))
+        intraday_time = dt_time(9, 30)
+        if is_exit and str(reason or "").lower() not in {"reverse_to_long", "reverse_to_short", "agent_sell"}:
+            intraday_time = dt_time(16, 0)
+        return datetime.combine(day, intraday_time)
+
+    @classmethod
+    def _pair_agent_trade_legs(cls, trades: list[object]) -> list[dict[str, Any]]:
+        open_legs: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
+        round_trips: list[dict[str, Any]] = []
+
+        for trade in trades:
+            ticker = str(getattr(trade, "ticker", "") or "").upper()
+            side = str(getattr(trade, "side", "") or "").upper()
+            shares = float(getattr(trade, "shares", 0.0) or 0.0)
+            price = float(getattr(trade, "price", 0.0) or 0.0)
+            reason = str(getattr(trade, "reason", "") or "")
+            trade_day = getattr(trade, "date", None)
+            if not ticker or shares <= 0 or trade_day is None:
+                continue
+
+            if side in {"BUY", "SHORT"}:
+                open_legs[ticker].append(
+                    {
+                        "side": side,
+                        "shares": shares,
+                        "price": price,
+                        "date": trade_day,
+                        "reason": reason,
+                    }
+                )
+                continue
+
+            if side not in {"SELL", "COVER"}:
+                continue
+
+            exit_side = "LONG" if side == "SELL" else "SHORT"
+            remaining = shares
+            while remaining > 1e-9 and open_legs[ticker]:
+                entry = open_legs[ticker][0]
+                entry_side = "LONG" if entry["side"] == "BUY" else "SHORT"
+                if entry_side != exit_side:
+                    open_legs[ticker].popleft()
+                    continue
+
+                matched = min(float(entry["shares"]), remaining)
+                if matched <= 1e-9:
+                    open_legs[ticker].popleft()
+                    continue
+
+                entry_price = float(entry["price"])
+                pnl = matched * (price - entry_price) if entry_side == "LONG" else matched * (entry_price - price)
+                round_trips.append(
+                    {
+                        "ticker": ticker,
+                        "side": entry_side,
+                        "qty": round(matched, 4),
+                        "entry_ts": cls._build_run_ts(entry["date"], is_exit=False).isoformat(),
+                        "entry_price": entry_price,
+                        "exit_ts": cls._build_run_ts(trade_day, is_exit=True, reason=reason).isoformat(),
+                        "exit_price": price,
+                        "pnl": round(pnl, 2),
+                        "event_type": "",
+                        "event_id": None,
+                        "horizon_min": None,
+                        "holding_min": None,
+                        "fallback_used": False,
+                        "position_pct_suggestion": None,
+                        "effective_position_pct_suggestion": None,
+                        "tradeability_score": None,
+                        "tradeability_reason": None,
+                        "conviction_risk_multiplier": None,
+                        "exit_reason": reason or "agent_exit",
+                        "flow_score": None,
+                        "flow_bucket": None,
+                        "flow_position_multiplier": None,
+                        "flow_wait_mode": False,
+                    }
+                )
+
+                entry["shares"] = float(entry["shares"]) - matched
+                remaining -= matched
+                if entry["shares"] <= 1e-9:
+                    open_legs[ticker].popleft()
+
+        return round_trips
+
+    def _run_agent_mode(self, session: Session, params: dict[str, Any], run_id: int | None = None) -> BacktestResult:
+        tickers = sorted(
+            {
+                str(ticker).strip().upper()
+                for ticker in self._as_list(
+                    params.get("tickers")
+                    or self.settings.live_trading_tickers
+                    or self.settings.agent_tickers_override
+                    or self.settings.sp100_tickers[:5]
+                )
+                if str(ticker).strip()
+            }
+        )
+        normalized_params = dict(params)
+        normalized_params["engine_mode"] = "agent"
+        normalized_params["tickers"] = tickers
+        normalized_params["decision_frequency"] = max(1, int(params.get("decision_frequency", 1) or 1))
+        normalized_params["initial_capital"] = float(params.get("initial_capital", self.settings.initial_nav))
+        normalized_params["max_position_pct"] = float(
+            params.get("max_position_pct", getattr(self.settings, "live_max_position_pct", self.settings.max_position_pct))
+        )
+        normalized_params["use_llm"] = True
+
+        if run_id is not None:
+            run = session.get(BacktestRun, run_id)
+            if run is None:
+                run = BacktestRun(id=run_id, params=normalized_params, status="RUNNING")
+                session.add(run)
+            else:
+                run.params = normalized_params
+                run.metrics = {}
+                run.equity_curve = []
+                run.trade_log = []
+                run.status = "RUNNING"
+                run.finished_at = None
+            session.flush()
+            session.execute(delete(BacktestTrade).where(BacktestTrade.run_id == run.id))
+        else:
+            run = BacktestRun(params=normalized_params, status="RUNNING")
+            session.add(run)
+            session.flush()
+
+        run.metrics = {
+            "engine_mode": "agent",
+            "mode_label": self._engine_mode_label("agent", use_llm=True),
+            "phase": "agent_execution",
+            "phase_label": self._BACKTEST_PHASE_LABELS["agent_execution"],
+            "phase_current": 0,
+            "phase_total": len(tickers),
+            "phase_pct": 0.0,
+            "phase_detail": f"Running full agent graph for {len(tickers)} tickers",
+            "last_progress_at": utc_now().isoformat(),
+        }
+        session.flush()
+        session.commit()
+
+        started = time.perf_counter()
+        result = AgentBacktestEngine(self.settings).run(session, params=normalized_params)
+        trade_log = self._pair_agent_trade_legs(result.trades)
+        equity_curve = []
+        for point in result.equity_curve or []:
+            point_date = point.get("date")
+            if not point_date:
+                continue
+            equity_curve.append(
+                {
+                    "ts": self._build_run_ts(point_date, is_exit=True).isoformat(),
+                    "equity": float(point.get("equity", 0.0) or 0.0),
+                }
+            )
+        if not equity_curve:
+            equity_curve = [{"ts": utc_now().isoformat(), "equity": result.initial_capital}]
+
+        pnl_list = [float(row.get("pnl", 0.0) or 0.0) for row in trade_log]
+        metrics = self._compute_metrics(result.initial_capital, equity_curve, pnl_list)
+        metrics.update(
+            {
+                "engine_mode": "agent",
+                "mode_label": self._engine_mode_label("agent", use_llm=True),
+                "use_llm": True,
+                "llm_model": self.settings.llm_model if self.settings.llm_base_url else "",
+                "events_considered": len(result.decisions),
+                "agent_decisions": len(result.decisions),
+                "decision_frequency": normalized_params["decision_frequency"],
+                "tickers": tickers,
+                "errors": list(result.errors or []),
+                "error_count": len(result.errors or []),
+                "winning_trades": result.winning_trades,
+                "losing_trades": result.losing_trades,
+                "stop_losses": result.stop_losses,
+                "progress_current": len(result.decisions),
+                "progress_total": len(result.decisions),
+                "progress_pct": 100.0,
+                "phase": "completed",
+                "phase_label": self._BACKTEST_PHASE_LABELS["completed"],
+                "phase_current": len(result.decisions) if result.decisions else 1,
+                "phase_total": len(result.decisions) if result.decisions else 1,
+                "phase_pct": 100.0,
+                "phase_detail": "Agent backtest completed",
+                "last_progress_at": utc_now().isoformat(),
+                "source_attribution": {},
+                "event_type_attribution": {},
+            }
+        )
+
+        for row in trade_log:
+            session.add(
+                BacktestTrade(
+                    run_id=run.id,
+                    signal_id=None,
+                    ticker=str(row["ticker"]),
+                    side=str(row["side"]),
+                    qty=float(row["qty"]),
+                    entry_ts=ensure_utc(datetime.fromisoformat(str(row["entry_ts"]))),
+                    entry_price=float(row["entry_price"]),
+                    exit_ts=ensure_utc(datetime.fromisoformat(str(row["exit_ts"]))),
+                    exit_price=float(row["exit_price"]),
+                    pnl=float(row["pnl"]),
+                    event_type="",
+                )
+            )
+
+        run.params = normalized_params
+        run.metrics = metrics
+        run.equity_curve = equity_curve
+        run.trade_log = trade_log
+        run.status = "DONE"
+        run.finished_at = utc_now()
+        session.flush()
+        session.commit()
+
+        elapsed = time.perf_counter() - started
+        self.logger.info(
+            "agent回测完成 run_id=%s trades=%s total_return=%.4f decisions=%s elapsed=%.1fs",
+            run.id,
+            metrics.get("trades", 0),
+            metrics.get("total_return", 0.0),
+            len(result.decisions),
+            elapsed,
+        )
+        return BacktestResult(run_id=run.id, status=run.status, metrics=metrics)
 
     def _matches_event_profile(self, event: Event, profile: str | None) -> bool:
         profile_key = (profile or "").strip().lower()
@@ -607,6 +860,9 @@ class BacktestEngineService:
 
     def run(self, session: Session, params: dict | None = None, run_id: int | None = None) -> BacktestResult:
         params = params or {}
+        engine_mode = self._normalize_engine_mode(params.get("engine_mode"))
+        if engine_mode == "agent":
+            return self._run_agent_mode(session, dict(params), run_id=run_id)
         horizon_min = int(params.get("horizon_min", self.settings.default_horizon_min))
         min_conf = int(params.get("min_confidence", self.settings.min_trade_confidence))
         min_severity = int(params.get("min_severity", 0))  # 0 = no filter; 70 = strong events only

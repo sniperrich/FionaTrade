@@ -190,6 +190,13 @@ def _news_backfill_meta(
 def _serialize_backtest_run(run: BacktestRun, include_detail: bool = False) -> dict[str, Any]:
     params = run.params or {}
     metrics = run.metrics or {}
+    engine_mode = str(params.get("engine_mode") or metrics.get("engine_mode") or "event").strip().lower()
+    use_llm = bool(params.get("use_llm", False))
+    mode_label = (
+        "AGENT"
+        if engine_mode == "agent"
+        else ("EVENT / LLM" if use_llm else "EVENT / RULES")
+    )
     payload = {
         "id": run.id,
         "status": run.status,
@@ -197,9 +204,12 @@ def _serialize_backtest_run(run: BacktestRun, include_detail: bool = False) -> d
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "start_date": params.get("start_date"),
         "end_date": params.get("end_date"),
-        "use_llm": bool(params.get("use_llm", False)),
+        "use_llm": use_llm,
+        "engine_mode": engine_mode,
+        "mode_label": mode_label,
         "event_profile": params.get("event_profile") or "",
         "sources": params.get("sources") or [],
+        "tickers": params.get("tickers") or [],
         "min_confidence": params.get("min_confidence"),
         "metrics": {
             "trades": metrics.get("trades", 0),
@@ -616,9 +626,14 @@ def backtest_options(
         "defaults": {
             "start_date": (utc_now() - timedelta(days=30)).date().isoformat(),
             "end_date": utc_now().date().isoformat(),
-            "use_llm": False,
+            "engine_mode": "agent",
+            "use_llm": True,
             "event_profile": "",
             "sources": [],
+            "tickers": list(settings.live_trading_tickers or settings.agent_tickers_override or settings.sp100_tickers[:5]),
+            "decision_frequency": 1,
+            "initial_capital": settings.initial_nav,
+            "max_position_pct": getattr(settings, "live_max_position_pct", settings.max_position_pct),
             "min_confidence": settings.min_trade_confidence,
             "min_severity": 0,
             "use_signal_validation": bool(getattr(settings, "validation_enabled", True)),
@@ -673,13 +688,21 @@ def queue_backtest(
         raise HTTPException(status_code=400, detail=f"invalid date range: {exc}") from exc
     if end_dt <= start_dt:
         raise HTTPException(status_code=400, detail="end_date must be after start_date")
+    engine_mode = str(payload.get("engine_mode") or "agent").strip().lower()
+    if engine_mode not in {"agent", "event"}:
+        raise HTTPException(status_code=400, detail="engine_mode must be one of: agent, event")
 
     params = {
         "start_date": str(start_date),
         "end_date": str(end_date),
+        "engine_mode": engine_mode,
         "use_llm": bool(payload.get("use_llm", False)),
         "event_profile": str(payload.get("event_profile") or "").strip().lower(),
         "sources": _normalize_source_list(payload.get("sources")),
+        "tickers": sorted({str(t).strip().upper() for t in _normalize_upper_list(payload.get("tickers")) if str(t).strip()}) or list(settings.live_trading_tickers),
+        "decision_frequency": max(1, int(payload.get("decision_frequency", 1))),
+        "initial_capital": float(payload.get("initial_capital", settings.initial_nav)),
+        "max_position_pct": float(payload.get("max_position_pct", getattr(settings, "live_max_position_pct", settings.max_position_pct))),
         "min_confidence": int(payload.get("min_confidence", settings.min_trade_confidence)),
         "min_severity": int(payload.get("min_severity", 0)),
         "use_signal_validation": bool(payload.get("use_signal_validation", getattr(settings, "validation_enabled", True))),
