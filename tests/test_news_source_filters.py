@@ -157,3 +157,59 @@ def test_get_recent_events_allowed_sources_filters_and_empty_fallback(session):
     )
     no_filter_ids = {item["id"] for item in no_filter}
     assert no_filter_ids == {event_sec.id, event_benzinga.id}
+
+
+def test_get_recent_events_honors_explicit_since(session):
+    now = datetime.now(timezone.utc)
+    old_event = _event(now=now - timedelta(hours=6), summary="AAPL old summary")
+    old_event.event_time = now - timedelta(hours=6)
+    old_event.created_at = now - timedelta(hours=6)
+    new_event = _event(now=now, summary="AAPL new summary")
+    new_event.event_time = now - timedelta(minutes=10)
+    new_event.created_at = now - timedelta(minutes=9)
+    session.add_all([old_event, new_event])
+    session.flush()
+
+    items = get_recent_events(
+        session,
+        ticker="AAPL",
+        lookback_hours=48,
+        since=now - timedelta(hours=1),
+        limit=20,
+        min_confidence=0,
+        as_of=now,
+    )
+
+    assert {item["id"] for item in items} == {new_event.id}
+
+
+def test_get_ticker_news_summary_honors_explicit_since(session):
+    now = datetime.now(timezone.utc)
+    old_item = _raw_item(
+        source="benzinga",
+        title="AAPL old catalyst",
+        url="https://example.com/old-aapl",
+        item_hash="hash-old-aapl",
+        now=now - timedelta(hours=6),
+    )
+    old_item.published_at = now - timedelta(hours=6)
+    old_item.ingested_at = now - timedelta(hours=6) + timedelta(minutes=1)
+    new_item = _raw_item(
+        source="benzinga",
+        title="AAPL fresh catalyst",
+        url="https://example.com/new-aapl",
+        item_hash="hash-new-aapl",
+        now=now,
+    )
+    session.add_all([old_item, new_item])
+    session.flush()
+
+    items = get_ticker_news_summary(
+        session,
+        ticker="AAPL",
+        lookback_hours=48,
+        since=now - timedelta(hours=1),
+        limit=20,
+    )
+
+    assert [item["id"] for item in items] == [new_item.id]

@@ -84,6 +84,8 @@
 
 <script>
 // ── Global utilities ──────────────────────────────────────────────────────
+const CONTROL_KEY_STORAGE = 'fiona_control_api_key';
+
 function toast(msg, type='') {
   const el = document.createElement('div');
   el.className = 'toast' + (type ? ' '+type : '');
@@ -120,15 +122,39 @@ function clearViewCache(prefix) {
   } catch (_) {}
 }
 
+function getControlApiKey() {
+  try { return (localStorage.getItem(CONTROL_KEY_STORAGE) || '').trim(); } catch (_) { return ''; }
+}
+
+function setControlApiKey(value) {
+  try {
+    const normalized = String(value || '').trim();
+    if (normalized) localStorage.setItem(CONTROL_KEY_STORAGE, normalized);
+    else localStorage.removeItem(CONTROL_KEY_STORAGE);
+  } catch (_) {}
+}
+
 async function apiFetch(url, opts={}) {
-  const { timeout = 8000, ...fetchOpts } = opts;
+  const { timeout = 8000, _retried = false, ...fetchOpts } = opts;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const r = await fetch(url, { ...fetchOpts, signal: controller.signal });
+    const headers = new Headers(fetchOpts.headers || {});
+    const controlKey = getControlApiKey();
+    if (controlKey && !headers.has('X-Fiona-Admin-Key')) {
+      headers.set('X-Fiona-Admin-Key', controlKey);
+    }
+    const r = await fetch(url, { ...fetchOpts, headers, signal: controller.signal });
     const text = await r.text();
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
+    if ((r.status === 401 || r.status === 403) && !_retried) {
+      const entered = window.prompt('Enter FionaTrade control API key');
+      if (entered && entered.trim()) {
+        setControlApiKey(entered);
+        return apiFetch(url, { ...opts, _retried: true });
+      }
+    }
     if (!r.ok) throw new Error(data.detail || data.error || text || r.statusText || `HTTP ${r.status}`);
     return data;
   } catch(e) {

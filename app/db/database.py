@@ -2,51 +2,95 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
-from app.core.utils import ensure_utc, ensure_utc_from_timezone, utc_now
 from app.core.config import get_settings
+from app.core.utils import ensure_utc, ensure_utc_from_timezone, utc_now
 
 Base = declarative_base()
-
-settings = get_settings()
-
-engine_kwargs = {"future": True}
-if settings.database_url.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {
-        "check_same_thread": False,
-        "timeout": settings.sqlite_busy_timeout_seconds,
-    }
-elif settings.database_url.startswith("postgresql") or settings.database_url.startswith("postgres"):
-    engine_kwargs["pool_size"] = 10
-    engine_kwargs["max_overflow"] = 20
-engine = create_engine(settings.database_url, **engine_kwargs)
-
-if settings.database_url.startswith("sqlite"):
-    @event.listens_for(engine, "connect")
-    def _configure_sqlite(dbapi_connection, connection_record) -> None:  # type: ignore[no-redef]
-        cursor = dbapi_connection.cursor()
-        try:
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute(f"PRAGMA busy_timeout={int(settings.sqlite_busy_timeout_seconds * 1000)}")
-        finally:
-            cursor.close()
-elif settings.database_url.startswith("postgresql") or settings.database_url.startswith("postgres"):
-    @event.listens_for(engine, "connect")
-    def _configure_postgres(dbapi_connection, connection_record) -> None:  # type: ignore[no-redef]
-        cursor = dbapi_connection.cursor()
-        try:
-            cursor.execute("SET TIME ZONE 'UTC'")
-        finally:
-            cursor.close()
-
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 POSTGRES_NAIVE_LOCAL_TZ = datetime.now().astimezone().tzinfo or timezone.utc
 POSTGRES_NAIVE_FUTURE_TOLERANCE = timedelta(minutes=5)
+_ENGINE_LOCK = Lock()
+_ENGINE_STATE_KEY: tuple[str, float] | None = None
+_ENGINE: Engine | None = None
+_SESSION_FACTORY = None
+
+
+def _settings_state_key() -> tuple[str, float]:
+    settings = get_settings()
+    return (settings.database_url, float(settings.sqlite_busy_timeout_seconds))
+
+
+def _build_engine() -> Engine:
+    settings = get_settings()
+    engine_kwargs = {"future": True}
+    if settings.database_url.startswith("sqlite"):
+        engine_kwargs["connect_args"] = {
+            "check_same_thread": False,
+            "timeout": settings.sqlite_busy_timeout_seconds,
+        }
+    elif settings.database_url.startswith("postgresql") or settings.database_url.startswith("postgres"):
+        engine_kwargs["pool_size"] = 10
+        engine_kwargs["max_overflow"] = 20
+
+    engine = create_engine(settings.database_url, **engine_kwargs)
+
+    if settings.database_url.startswith("sqlite"):
+        timeout_ms = int(settings.sqlite_busy_timeout_seconds * 1000)
+
+        @event.listens_for(engine, "connect")
+        def _configure_sqlite(dbapi_connection, connection_record) -> None:  # type: ignore[no-redef]
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute(f"PRAGMA busy_timeout={timeout_ms}")
+            finally:
+                cursor.close()
+    elif settings.database_url.startswith("postgresql") or settings.database_url.startswith("postgres"):
+        @event.listens_for(engine, "connect")
+        def _configure_postgres(dbapi_connection, connection_record) -> None:  # type: ignore[no-redef]
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("SET TIME ZONE 'UTC'")
+            finally:
+                cursor.close()
+
+    return engine
+
+
+def get_engine() -> Engine:
+    global _ENGINE, _ENGINE_STATE_KEY, _SESSION_FACTORY
+    state_key = _settings_state_key()
+    with _ENGINE_LOCK:
+        if _ENGINE is None or _SESSION_FACTORY is None or _ENGINE_STATE_KEY != state_key:
+            if _ENGINE is not None:
+                _ENGINE.dispose()
+            _ENGINE = _build_engine()
+            _SESSION_FACTORY = sessionmaker(
+                bind=_ENGINE,
+                autoflush=False,
+                autocommit=False,
+                expire_on_commit=False,
+                future=True,
+            )
+            _ENGINE_STATE_KEY = state_key
+    return _ENGINE
+
+
+def get_session_factory():
+    get_engine()
+    assert _SESSION_FACTORY is not None
+    return _SESSION_FACTORY
+
+
+def SessionLocal() -> Session:
+    return get_session_factory()()
 
 
 @contextmanager
@@ -65,7 +109,7 @@ def db_session() -> Session:
 def init_db() -> None:
     from app.db import models  # noqa: F401
 
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=get_engine())
 
 
 def is_sqlite_lock_error(exc: Exception) -> bool:
@@ -76,6 +120,7 @@ def is_sqlite_lock_error(exc: Exception) -> bool:
 
 
 def db_backend_name() -> str:
+    settings = get_settings()
     if settings.database_url.startswith("sqlite"):
         return "sqlite"
     if settings.database_url.startswith("postgresql") or settings.database_url.startswith("postgres"):
@@ -113,7 +158,7 @@ def normalize_db_datetime(dt: datetime | None, *, backend: str | None = None) ->
 
 def db_connection_ok() -> bool:
     try:
-        with engine.connect() as conn:
+        with get_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
         return True
     except Exception:

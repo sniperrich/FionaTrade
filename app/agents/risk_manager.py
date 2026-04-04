@@ -18,6 +18,61 @@ _MIN_CONSENSUS_COUNT = 2       # at least 2 agents must agree on direction
 _MAX_SAME_DIRECTION = 3        # max tickers in same direction (long or short)
 _TICKER_MAX_CONSECUTIVE_LOSSES = 2  # block ticker after N consecutive losses
 
+
+def _compute_realized_pnl_from_fills(fills: list[PaperFill]) -> float:
+    qty = 0.0
+    avg_price = 0.0
+    realized = 0.0
+
+    for fill in sorted(fills, key=lambda row: (row.filled_at, row.id)):
+        side = str(fill.side or "").upper()
+        fill_qty = float(fill.qty or 0.0)
+        fill_price = float(fill.fill_price or 0.0)
+
+        if side == "BUY":
+            if qty < 0:
+                close_qty = min(abs(qty), fill_qty)
+                realized += close_qty * (avg_price - fill_price)
+                qty += close_qty
+                fill_qty -= close_qty
+                if abs(qty) < 1e-9:
+                    qty = 0.0
+                    avg_price = 0.0
+            if fill_qty > 0:
+                new_qty = qty + fill_qty
+                avg_price = ((avg_price * qty) + (fill_price * fill_qty)) / new_qty if new_qty else 0.0
+                qty = new_qty
+        elif side == "SHORT":
+            if qty > 0:
+                close_qty = min(qty, fill_qty)
+                realized += close_qty * (fill_price - avg_price)
+                qty -= close_qty
+                fill_qty -= close_qty
+                if abs(qty) < 1e-9:
+                    qty = 0.0
+                    avg_price = 0.0
+            if fill_qty > 0:
+                new_abs_qty = abs(qty) + fill_qty
+                existing_notional = abs(qty) * avg_price
+                avg_price = (existing_notional + fill_qty * fill_price) / new_abs_qty if new_abs_qty else 0.0
+                qty -= fill_qty
+        elif side == "SELL" and qty > 0:
+            close_qty = min(qty, fill_qty)
+            realized += close_qty * (fill_price - avg_price)
+            qty -= close_qty
+            if abs(qty) < 1e-9:
+                qty = 0.0
+                avg_price = 0.0
+        elif side == "COVER" and qty < 0:
+            close_qty = min(abs(qty), fill_qty)
+            realized += close_qty * (avg_price - fill_price)
+            qty += close_qty
+            if abs(qty) < 1e-9:
+                qty = 0.0
+                avg_price = 0.0
+
+    return realized
+
 _SYSTEM_PROMPT = """\
 Task: Risk management assessment for equity trading.
 You are a risk manager who sizes positions appropriately. When rule-based checks pass
@@ -101,10 +156,7 @@ class RiskManagerAgent(BaseAgent):
                         PaperFill.filled_at >= today_start,
                     )
                 ).scalars().all()
-                daily_pnl = sum(
-                    float(f.notional) * (-1 if f.side in ("BUY", "COVER") else 1)
-                    for f in today_fills
-                )
+                daily_pnl = _compute_realized_pnl_from_fills(today_fills)
 
             # ── Check 1: Max position size ──
             if position_pct >= _MAX_POSITION_PCT:

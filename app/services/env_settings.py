@@ -71,6 +71,55 @@ class EnvSettingsService:
         "LIVE_DISABLE_DEFAULT_MODE",
         "LIVE_OVERNIGHT_MODE",
     }
+    ALLOWED_EDITABLE_KEYS = {
+        "LIVE_TRADING_TICKERS",
+        "AGENT_TICKERS_OVERRIDE",
+        "LIVE_ALLOWED_SOURCES",
+        "POLL_INTERVAL_SECONDS",
+        "LIVE_CYCLE_INTERVAL_SECONDS",
+        "LIVE_OPEN_CYCLE_SECONDS",
+        "LIVE_CLOSED_CYCLE_SECONDS",
+        "LIVE_MIN_CONFIDENCE",
+        "MIN_TRADE_CONFIDENCE",
+        "LIVE_MAX_POSITION_PCT",
+        "LIVE_MAX_NET_LONG_EXPOSURE_PCT",
+        "LIVE_MAX_NET_SHORT_EXPOSURE_PCT",
+        "LIVE_MAX_SAME_DIRECTION_POSITIONS",
+        "LIVE_MAX_SAME_THEME_DIRECTION_POSITIONS",
+        "LIVE_DISABLE_DEFAULT_MODE",
+        "LIVE_DATA_MAX_AGE_MINUTES",
+        "LIVE_EVENT_DRIVEN_MODE",
+        "LIVE_ENABLE_WARMUP_MINUTES",
+        "LIVE_FALLBACK_CYCLE_SECONDS",
+        "LIVE_TICKER_COOLDOWN_MINUTES",
+        "LIVE_STARTUP_MAX_NEW_POSITIONS",
+        "LIVE_STARTUP_RAMP_MINUTES",
+        "LIVE_FAST_PATH_MACRO_TTL_MIN",
+        "LIVE_FAST_PATH_FUND_TTL_MIN",
+        "LIVE_PORTFOLIO_LLM_TIMEOUT_SECONDS",
+        "LIVE_PORTFOLIO_LLM_MAX_RETRIES",
+        "LIVE_OVERNIGHT_RISK_ENABLED",
+        "LIVE_FLATTEN_BEFORE_CLOSE",
+        "LIVE_OVERNIGHT_MODE",
+        "LIVE_OVERNIGHT_MAX_GROSS_EXPOSURE_PCT",
+        "LIVE_OVERNIGHT_REBALANCE_MINUTES_BEFORE_CLOSE",
+        "LIVE_OVERNIGHT_RUN_WHEN_DISABLED",
+        "ENABLE_FINNHUB_COMPANY_NEWS_LIVE",
+        "FINNHUB_COMPANY_NEWS_LIVE_LOOKBACK_DAYS",
+        "FLOW_CONFIRMATION_ENABLED",
+        "FLOW_CONFIRMATION_SOFT_GATE",
+        "AGENT_WEIGHT_NEWS",
+        "AGENT_WEIGHT_TECHNICALS",
+        "AGENT_WEIGHT_MACRO",
+        "AGENT_WEIGHT_FUNDAMENTALS",
+        "LIVE_TRADING_ENABLED",
+        "LIVE_ALLOW_PREMARKET",
+        "ENABLE_SEC",
+        "ENABLE_RSS",
+        "ENABLE_FINNHUB",
+        "ENABLE_EARNINGS_RELEASE_SOURCE",
+        "LLM_MODEL",
+    }
     KEY_ORDER = [
         "LIVE_TRADING_TICKERS",
         "AGENT_TICKERS_OVERRIDE",
@@ -119,7 +168,6 @@ class EnvSettingsService:
         "ENABLE_FINNHUB",
         "ENABLE_EARNINGS_RELEASE_SOURCE",
         "LLM_MODEL",
-        "LLM_BASE_URL",
     ]
 
     def __init__(self, env_path: Path | None = None):
@@ -176,7 +224,6 @@ class EnvSettingsService:
                 "ENABLE_FINNHUB": settings.enable_finnhub,
                 "ENABLE_EARNINGS_RELEASE_SOURCE": settings.enable_earnings_release_source,
                 "LLM_MODEL": settings.llm_model,
-                "LLM_BASE_URL": settings.llm_base_url,
             },
             "key_order": self.KEY_ORDER,
         }
@@ -280,8 +327,14 @@ class EnvSettingsService:
                 raise ValueError(f"extra_updates line {lineno} must be KEY=VALUE")
             key, value = line.split("=", 1)
             env_key = self._validate_env_key(key)
+            self._assert_editable_key(env_key)
             out[env_key] = value.strip()
         return out
+
+    @classmethod
+    def _assert_editable_key(cls, key: str) -> None:
+        if key not in cls.ALLOWED_EDITABLE_KEYS:
+            raise ValueError(f"{key} is not editable via control plane")
 
     def apply_updates(self, updates: dict[str, Any], extra_updates_text: str = "") -> dict[str, Any]:
         if not isinstance(updates, dict):
@@ -290,6 +343,7 @@ class EnvSettingsService:
         normalized_updates: dict[str, str] = {}
         for raw_key, raw_value in updates.items():
             env_key = self._validate_env_key(str(raw_key))
+            self._assert_editable_key(env_key)
             normalized_updates[env_key] = self._normalize_value(env_key, raw_value)
 
         if extra_updates_text:

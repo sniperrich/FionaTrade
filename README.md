@@ -501,6 +501,24 @@ pytest tests/test_agent_graph.py -v
 
 ## 关键约定
 
+### 控制面 API 鉴权
+- `/api/*` 现在统一经过控制面鉴权依赖
+- 本机 `localhost / 127.0.0.1 / testclient` 默认可免密访问，便于本地开发和 systemd 本机健康检查
+- 远程访问必须提供 `CONTROL_API_KEY`
+- 支持两种头：
+  - `X-Fiona-Admin-Key: <key>`
+  - `Authorization: Bearer <key>`
+- WebUI 前端在远程访问 API 被拒绝时，会提示输入 control key，并保存到浏览器本地存储
+
+### `.env` 可编辑范围
+- `/api/settings/editable` 不再允许任意键写入 `.env`
+- 现在只允许写入显式白名单里的运行时配置项，例如：
+  - live tickers / allowed sources
+  - live cadence / confidence / exposure guardrails
+  - overnight risk / agent weights
+  - `LLM_MODEL`
+- 类似 `DATABASE_URL`、`LLM_BASE_URL`、`FINNHUB_API_KEY` 这类敏感基础配置不再允许通过该 API 修改
+
 ### 配置注入
 所有服务通过构造函数接收 `settings`，通过方法参数接收 `session`。不直接 import 全局 settings。
 
@@ -531,6 +549,12 @@ if dt.tzinfo is None:
 - `AgentGraph` 中 `batch_score_runs / build_performance_context / persist_run` 这些“非主路径”失败后现在会主动 `rollback` 当前 session，避免吞错后把后续 live 决策链留在 PostgreSQL aborted transaction 状态
 - `app/tools/news.py::get_ticker_news_summary()` 里对 `RawItem.metadata_json` 的 ticker 匹配现在显式 `CAST(... AS TEXT)`；PostgreSQL 不再因为对 JSON 列直接做 `ILIKE` 而把 `news_sentiment` 阶段炸掉
 - `app/db/database.py` 只会在 PostgreSQL 下传入 `pool_size / max_overflow`；SQLite（尤其是内存库和测试环境）不再因为收到不兼容的连接池参数而在 `create_engine()` 阶段直接报错
+- `app/db/database.py` 和 `app/tools/market_data.py` 已去掉 import-time 绑定生产配置的全局单例；测试和临时切库现在能真正隔离
+- `PaperEngineService` 在没有可信行情时不再用硬编码 `$100` 成交；现在会拒单并标记 `REJECTED_NO_MARKET_DATA`
+- `PaperBroker` 的资金查询现在和 `PaperEngineService.portfolio()` 返回字段一致，不再永远回退到默认值
+- `get_recent_events()` / `get_ticker_news_summary()` 会尊重调用方传入的 `since`
+- `RiskManagerAgent` 的 daily loss gate 现在按当日已实现损益计算，不再把现金流误当损益
+- NYSE 假日判断已改成动态计算，不再硬编码截止到 2026 年
 
 ### News Feed 用途分层前端
 - `News Feed` 现在按 `Raw Intake / Event Evidence / Agent Input / Live Input` 四个分层直接展示内容，不再只显示摘要 badge

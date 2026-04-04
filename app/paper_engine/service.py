@@ -21,6 +21,10 @@ class PaperExecutionResult:
     halted: bool
 
 
+class NoMarketDataError(RuntimeError):
+    """Raised when paper execution cannot resolve a trustworthy market price."""
+
+
 class PaperEngineService:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -155,7 +159,7 @@ class PaperEngineService:
         if latest:
             return latest.ts, latest.close
 
-        return utc_now(), 100.0
+        raise NoMarketDataError(f"no market data available for {ticker}")
 
     def _latest_price(self, session: Session, ticker: str) -> float:
         bar = session.execute(
@@ -169,7 +173,9 @@ class PaperEngineService:
         bar = session.execute(
             select(Bar1m).where(Bar1m.ticker == ticker).order_by(Bar1m.ts.desc()).limit(1)
         ).scalar_one_or_none()
-        return float(bar.close) if bar else 100.0
+        if bar:
+            return float(bar.close)
+        raise NoMarketDataError(f"no latest price available for {ticker}")
 
     def _position(self, session: Session, ticker: str) -> Position:
         row = session.execute(select(Position).where(Position.ticker == ticker)).scalar_one_or_none()
@@ -262,6 +268,20 @@ class PaperEngineService:
 
         nav = self.settings.initial_nav + realized + unrealized
         return nav, realized, unrealized
+
+    def _cash_balance(self, session: Session) -> float:
+        cash = float(self.settings.initial_nav)
+        fills = session.execute(select(PaperFill)).scalars().all()
+        for fill in fills:
+            notional = float(fill.notional or 0.0)
+            fee = float(fill.fee or 0.0)
+            side = str(fill.side or "").upper()
+            if side in {"BUY", "COVER"}:
+                cash -= notional
+            elif side in {"SELL", "SHORT"}:
+                cash += notional
+            cash -= fee
+        return cash
 
     def _gross_exposure(self, session: Session) -> float:
         gross = 0.0
@@ -417,7 +437,11 @@ class PaperEngineService:
             pos = self._position(session, ticker)
             signal_horizon_min = self._normalize_horizon_min(signal.horizon_min)
 
-            fill_ts, base_price = self._next_open(session, ticker, signal.created_at)
+            try:
+                fill_ts, base_price = self._next_open(session, ticker, signal.created_at)
+            except NoMarketDataError:
+                signal.status = "REJECTED_NO_MARKET_DATA"
+                continue
 
             target_notional = nav * self.settings.max_position_pct
             qty = max(round(target_notional / max(base_price, 0.01), 4), 0.0)
@@ -483,6 +507,7 @@ class PaperEngineService:
 
         auto_closed = self._auto_exit_positions(session)
         self._mark_to_market(session)
+        session.flush()
 
         return PaperExecutionResult(
             executed=executed,
@@ -494,6 +519,7 @@ class PaperEngineService:
 
     def portfolio(self, session: Session) -> dict:
         nav, realized, unrealized = self._mark_to_market(session)
+        cash = self._cash_balance(session)
         positions = session.execute(select(Position).order_by(Position.ticker.asc())).scalars().all()
         active_orders = session.execute(
             select(PaperOrder).where(PaperOrder.status.in_(["SUBMITTED", "AUTO_HORIZON", "AUTO_STOP", "AUTO_TAKE"]))
@@ -501,6 +527,8 @@ class PaperEngineService:
 
         return {
             "nav": nav,
+            "total_value": nav,
+            "cash": cash,
             "realized_pnl": realized,
             "unrealized_pnl": unrealized,
             "positions": [

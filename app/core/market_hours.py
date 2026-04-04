@@ -4,7 +4,8 @@ All functions are pure (no I/O) so they are safe to call anywhere.
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
@@ -17,29 +18,64 @@ _MARKET_CLOSE = time(16, 0)
 _PRE_MARKET_START = time(4, 0)
 _AFTER_HOURS_END = time(20, 0)
 
-# NYSE holidays 2025-2026 (observed dates)
-_NYSE_HOLIDAYS: set[tuple[int, int, int]] = {
-    (2025, 1, 1),   # New Year's Day
-    (2025, 1, 20),  # MLK Day
-    (2025, 2, 17),  # Presidents Day
-    (2025, 4, 18),  # Good Friday
-    (2025, 5, 26),  # Memorial Day
-    (2025, 6, 19),  # Juneteenth
-    (2025, 7, 4),   # Independence Day
-    (2025, 9, 1),   # Labor Day
-    (2025, 11, 27), # Thanksgiving
-    (2025, 12, 25), # Christmas
-    (2026, 1, 1),   # New Year's Day
-    (2026, 1, 19),  # MLK Day
-    (2026, 2, 16),  # Presidents Day
-    (2026, 4, 3),   # Good Friday
-    (2026, 5, 25),  # Memorial Day
-    (2026, 6, 19),  # Juneteenth
-    (2026, 7, 3),   # Independence Day (observed)
-    (2026, 9, 7),   # Labor Day
-    (2026, 11, 26), # Thanksgiving
-    (2026, 12, 25), # Christmas
-}
+def _nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> date:
+    current = date(year, month, 1)
+    while current.weekday() != weekday:
+        current += timedelta(days=1)
+    return current + timedelta(weeks=n - 1)
+
+
+def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        current = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        current = date(year, month + 1, 1) - timedelta(days=1)
+    while current.weekday() != weekday:
+        current -= timedelta(days=1)
+    return current
+
+
+def _observed_date(day: date) -> date:
+    if day.weekday() == 5:
+        return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def _easter_sunday(year: int) -> date:
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+@lru_cache(maxsize=32)
+def _nyse_holidays(year: int) -> set[tuple[int, int, int]]:
+    holidays = {
+        _observed_date(date(year, 1, 1)),               # New Year's Day
+        _nth_weekday_of_month(year, 1, 0, 3),          # MLK Day
+        _nth_weekday_of_month(year, 2, 0, 3),          # Presidents Day
+        _easter_sunday(year) - timedelta(days=2),      # Good Friday
+        _last_weekday_of_month(year, 5, 0),            # Memorial Day
+        _observed_date(date(year, 6, 19)),             # Juneteenth
+        _observed_date(date(year, 7, 4)),              # Independence Day
+        _nth_weekday_of_month(year, 9, 0, 1),          # Labor Day
+        _nth_weekday_of_month(year, 11, 3, 4),         # Thanksgiving
+        _observed_date(date(year, 12, 25)),            # Christmas
+    }
+    return {(d.year, d.month, d.day) for d in holidays}
 
 
 def et_now() -> datetime:
@@ -50,7 +86,7 @@ def et_now() -> datetime:
 def is_holiday(dt: datetime | None = None) -> bool:
     """Return True if the date is a NYSE holiday."""
     d = (dt or et_now()).astimezone(_ET)
-    return (d.year, d.month, d.day) in _NYSE_HOLIDAYS
+    return (d.year, d.month, d.day) in _nyse_holidays(d.year)
 
 
 def is_market_open(dt: datetime | None = None) -> bool:

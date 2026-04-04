@@ -7,6 +7,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.analysis.taxonomy import normalize_source_name
+from app.core.utils import ensure_utc
 from app.db.models import Event, EventEvidence, RawItem
 
 # Map tickers to company name search terms for broader news matching.
@@ -137,7 +138,7 @@ def get_recent_events(
                When set, only events with event_time <= as_of are returned.
     """
     ref_time = as_of or datetime.now(timezone.utc)
-    since = ref_time - timedelta(hours=lookback_hours)
+    since = ensure_utc(since) if since is not None else (ref_time - timedelta(hours=lookback_hours))
     allowed_source_set = {
         normalize_source_name(str(source).strip().lower())
         for source in (allowed_sources or [])
@@ -243,7 +244,7 @@ def get_ticker_news_summary(
     for company name mentions.
     """
     ref_time = as_of or datetime.now(timezone.utc)
-    since = ref_time - timedelta(hours=lookback_hours)
+    since = ensure_utc(since) if since is not None else (ref_time - timedelta(hours=lookback_hours))
     ticker_upper = ticker.upper()
     allowed_source_set = {
         normalize_source_name(str(source).strip().lower())

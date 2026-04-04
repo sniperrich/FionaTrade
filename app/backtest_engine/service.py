@@ -10,7 +10,7 @@ from statistics import mean, pstdev
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.analysis.service import AnalysisService
 from app.analysis.rules_fallback import fallback_action
@@ -1099,13 +1099,27 @@ class BacktestEngineService:
             completed_count = 0
 
             supports_parallel_prefetch = session.get_bind().dialect.name != "sqlite" and llm_workers > 1
+            make_session = sessionmaker(
+                bind=session.get_bind(),
+                autoflush=False,
+                autocommit=False,
+                expire_on_commit=False,
+                future=True,
+            )
 
             def _fetch_signal(ev):
-                return ev.id, self.analysis.event_to_signal(
-                    ev,
-                    session=session,
-                    use_tradeability_filter=use_tradeability_filter,
-                )
+                thread_session = make_session()
+                try:
+                    thread_event = thread_session.get(Event, ev.id)
+                    if thread_event is None:
+                        return ev.id, None
+                    return ev.id, self.analysis.event_to_signal(
+                        thread_event,
+                        session=thread_session,
+                        use_tradeability_filter=use_tradeability_filter,
+                    )
+                finally:
+                    thread_session.close()
 
             if supports_parallel_prefetch:
                 with ThreadPoolExecutor(max_workers=llm_workers) as pool:

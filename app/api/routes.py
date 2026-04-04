@@ -9,7 +9,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy import and_, desc, distinct, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.deps import get_app_settings, get_db
+from app.api.deps import get_app_settings, get_db, require_api_access
 from app.core.config import Settings, get_settings
 from app.core.utils import ensure_utc, utc_now
 from app.backtest_engine.service import BacktestEngineService
@@ -30,7 +30,7 @@ from app.services.worker_runtime import (
     WorkerRuntimeService,
 )
 
-router = APIRouter(prefix="/api", tags=["api"])
+router = APIRouter(prefix="/api", tags=["api"], dependencies=[Depends(require_api_access)])
 _RUNTIME_CACHE: dict[str, tuple[float, Any]] = {}
 
 

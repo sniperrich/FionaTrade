@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+
 from app.core.utils import utc_now
 from app.db.models import Bar1m, IngestionCursor, Position, Signal
-from app.paper_engine.service import PaperEngineService
+from app.paper_engine.service import NoMarketDataError, PaperEngineService
 
 
 def test_paper_execute_and_mark_to_market(session, settings):
@@ -53,6 +55,8 @@ def test_paper_execute_and_mark_to_market(session, settings):
 
     assert result.executed == 1
     assert portfolio["nav"] > settings.initial_nav
+    assert portfolio["total_value"] == portfolio["nav"]
+    assert portfolio["cash"] > 0
 
 
 def test_daily_circuit_breaker(session, settings):
@@ -128,3 +132,32 @@ def test_paper_uses_signal_horizon_for_auto_exit(session, settings):
     assert result.executed == 1
     assert result.auto_closed == 1
     assert pos.qty == 0.0
+
+
+def test_paper_execute_rejects_when_no_market_data(session, settings):
+    now = utc_now()
+    signal = Signal(
+        event_id=3,
+        action="BUY",
+        ticker="NFLX",
+        confidence=90,
+        horizon_min=120,
+        reason="no_market_data_test",
+        expires_at=now + timedelta(hours=2),
+        fallback_used=True,
+        status="ACTIVE",
+        created_at=now,
+    )
+    session.add(signal)
+    session.flush()
+
+    result = PaperEngineService(settings).execute(session)
+    session.refresh(signal)
+
+    assert result.executed == 0
+    assert signal.status == "REJECTED_NO_MARKET_DATA"
+
+
+def test_latest_price_raises_without_market_data(session, settings):
+    with pytest.raises(NoMarketDataError):
+        PaperEngineService(settings)._latest_price(session, "NFLX")

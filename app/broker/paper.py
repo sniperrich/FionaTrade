@@ -105,11 +105,11 @@ class PaperBroker(AbstractBroker):
 
     def get_portfolio_value(self) -> float:
         portfolio = self._engine.portfolio(self._session)
-        return float(portfolio.get("total_value", self._settings.initial_nav))
+        return float(portfolio.get("nav", portfolio.get("total_value", self._settings.initial_nav)))
 
     def get_cash(self) -> float:
         portfolio = self._engine.portfolio(self._session)
-        return float(portfolio.get("cash", self._settings.initial_nav))
+        return float(portfolio.get("cash", portfolio.get("nav", self._settings.initial_nav)))
 
     def cancel_all_orders(self, ticker: str | None = None) -> int:
         # Paper engine doesn't have open orders; signals expire naturally

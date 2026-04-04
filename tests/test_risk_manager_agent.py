@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
 
 import pytest
 
 from app.agents.risk_manager import (
     RiskManagerAgent, _MAX_POSITION_PCT, _MIN_CONSENSUS_COUNT,
-    _MAX_SAME_DIRECTION, _TICKER_MAX_CONSECUTIVE_LOSSES,
+    _MAX_SAME_DIRECTION, _TICKER_MAX_CONSECUTIVE_LOSSES, _compute_realized_pnl_from_fills,
 )
-from app.db.models import Position
+from app.db.models import PaperFill, Position
 
 
 def _make_agent(settings):
@@ -26,6 +27,68 @@ def _build_signals(macro="BUY", news="BUY", fund="BUY", tech="BUY", conf=75):
 
 
 _LLM_APPROVE = '{"approved":true,"max_position_pct":0.10,"stop_loss_pct":0.05,"risk_level":"LOW","concerns":[],"reasoning":"OK"}'
+
+
+def test_compute_realized_pnl_from_fills_tracks_round_trip_gain() -> None:
+    fills = [
+        PaperFill(
+            id=1,
+            order_id=1,
+            side="BUY",
+            ticker="AAPL",
+            qty=10,
+            submitted_at=datetime(2026, 4, 4, 9, 30, tzinfo=timezone.utc),
+            filled_at=datetime(2026, 4, 4, 9, 31, tzinfo=timezone.utc),
+            fill_price=100.0,
+            fee=0.0,
+            notional=1000.0,
+        ),
+        PaperFill(
+            id=2,
+            order_id=2,
+            side="SELL",
+            ticker="AAPL",
+            qty=10,
+            submitted_at=datetime(2026, 4, 4, 10, 0, tzinfo=timezone.utc),
+            filled_at=datetime(2026, 4, 4, 10, 1, tzinfo=timezone.utc),
+            fill_price=108.0,
+            fee=0.0,
+            notional=1080.0,
+        ),
+    ]
+
+    assert _compute_realized_pnl_from_fills(fills) == pytest.approx(80.0)
+
+
+def test_compute_realized_pnl_from_fills_tracks_short_cover_gain() -> None:
+    fills = [
+        PaperFill(
+            id=1,
+            order_id=1,
+            side="SHORT",
+            ticker="AAPL",
+            qty=5,
+            submitted_at=datetime(2026, 4, 4, 9, 30, tzinfo=timezone.utc),
+            filled_at=datetime(2026, 4, 4, 9, 31, tzinfo=timezone.utc),
+            fill_price=100.0,
+            fee=0.0,
+            notional=500.0,
+        ),
+        PaperFill(
+            id=2,
+            order_id=2,
+            side="COVER",
+            ticker="AAPL",
+            qty=5,
+            submitted_at=datetime(2026, 4, 4, 10, 0, tzinfo=timezone.utc),
+            filled_at=datetime(2026, 4, 4, 10, 1, tzinfo=timezone.utc),
+            fill_price=90.0,
+            fee=0.0,
+            notional=450.0,
+        ),
+    ]
+
+    assert _compute_realized_pnl_from_fills(fills) == pytest.approx(50.0)
 
 
 class TestRiskManagerHardBlock:

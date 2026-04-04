@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     env: str = "dev"
     database_url: str = "sqlite:///./fionatrade.db"
     sqlite_busy_timeout_seconds: float = 30.0
+    control_api_key: str = ""
+    control_api_localhost_bypass: bool = True
 
     poll_interval_seconds: int = 60
     enable_scheduler: bool = True

@@ -12,7 +12,10 @@ from app.core.config import get_settings
 from app.services.market_data import MarketDataService
 
 _NY = ZoneInfo("America/New_York")
-_MARKET_DATA_SERVICE = MarketDataService(get_settings())
+
+
+def _market_data_service() -> MarketDataService:
+    return MarketDataService(get_settings())
 
 
 def get_bars(
@@ -34,7 +37,7 @@ def get_bars(
     # Use calendar days (not minutes) to ensure we bridge weekends/holidays
     # Fetch extra bars to compensate for RTH filtering (~62% of bars are RTH)
     fetch_bars = int(lookback_bars * 1.8) if regular_hours_only else lookback_bars
-    rows = _MARKET_DATA_SERVICE.load_analysis_rows(
+    rows = _market_data_service().load_analysis_rows(
         session,
         ticker=ticker,
         lookback_bars=fetch_bars,

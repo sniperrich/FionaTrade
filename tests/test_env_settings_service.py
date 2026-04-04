@@ -35,12 +35,12 @@ def test_env_settings_apply_updates_supports_extra_updates(tmp_path: Path):
     svc = EnvSettingsService(env_path=env_file)
     svc.apply_updates(
         updates={"POLL_INTERVAL_SECONDS": 120},
-        extra_updates_text="\n# keep this\nFINNHUB_API_KEY=abc123\nLLM_MODEL=claude-sonnet-4-5\n",
+        extra_updates_text="\n# keep this\nLIVE_ALLOW_PREMARKET=true\nLLM_MODEL=claude-sonnet-4-5\n",
     )
 
     rendered = env_file.read_text(encoding="utf-8")
     assert "POLL_INTERVAL_SECONDS=120" in rendered
-    assert "FINNHUB_API_KEY=abc123" in rendered
+    assert "LIVE_ALLOW_PREMARKET=true" in rendered
     assert "LLM_MODEL=claude-sonnet-4-5" in rendered
 
 
@@ -50,6 +50,17 @@ def test_env_settings_apply_updates_validates_extra_format(tmp_path: Path):
 
     with pytest.raises(ValueError, match="must be KEY=VALUE"):
         svc.apply_updates(updates={}, extra_updates_text="BROKEN_LINE")
+
+
+def test_env_settings_apply_updates_rejects_non_whitelisted_keys(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    svc = EnvSettingsService(env_path=env_file)
+
+    with pytest.raises(ValueError, match="DATABASE_URL is not editable"):
+        svc.apply_updates(updates={"DATABASE_URL": "sqlite:///./owned.db"})
+
+    with pytest.raises(ValueError, match="FINNHUB_API_KEY is not editable"):
+        svc.apply_updates(updates={}, extra_updates_text="FINNHUB_API_KEY=abc123")
 
 
 def test_env_settings_apply_updates_supports_event_driven_and_weights(tmp_path: Path):

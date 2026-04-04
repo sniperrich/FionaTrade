@@ -17,7 +17,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent_graph.graph import AgentGraph
 from app.core.config import Settings
@@ -215,7 +215,14 @@ class AgentBacktestEngine:
         all_trades: list[BTTrade] = []
         all_decisions: list[BTDecision] = []
         errors: list[str] = []
-        graph = AgentGraph(self.settings)
+        make_session = sessionmaker(
+            bind=session.get_bind(),
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+            future=True,
+        )
+        graph = AgentGraph(self.settings, session_factory=make_session)
 
         # Per-ticker consecutive loss tracking
         ticker_loss_streak: dict[str, int] = {t: 0 for t in tickers}
@@ -254,35 +261,39 @@ class AgentBacktestEngine:
                     """Run agent graph for a single ticker (thread-safe)."""
                     t0 = time.time()
                     _safe_print(f"  [{_ts()}] 🤖 Running agents for {ticker}...", end="")
+                    local_session = make_session()
+                    try:
+                        pos = portfolio.positions.get(ticker)
+                        pos_value = portfolio.position_value(ticker, close_prices.get(ticker, 0))
+                        pos_pct_current = pos_value / max(current_equity, 1)
+                        current_side = pos.side if pos else None
 
-                    pos = portfolio.positions.get(ticker)
-                    pos_value = portfolio.position_value(ticker, close_prices.get(ticker, 0))
-                    pos_pct_current = pos_value / max(current_equity, 1)
-                    current_side = pos.side if pos else None
+                        daily_pnl = sum(
+                            t.notional * (-1 if t.side in ("BUY", "COVER") else 1)
+                            for t in all_trades if str(t.date) == str(day) and t.ticker == ticker
+                        )
 
-                    daily_pnl = sum(
-                        t.notional * (-1 if t.side in ("BUY", "COVER") else 1)
-                        for t in all_trades if str(t.date) == str(day) and t.ticker == ticker
-                    )
+                        bt_context = {
+                            "portfolio_state": {
+                                "position_pct": pos_pct_current,
+                                "daily_pnl": daily_pnl,
+                                "equity": current_equity,
+                                "current_side": current_side,
+                                "drawdown_pct": dd_pct,
+                            },
+                            "current_position": {
+                                "side": current_side,
+                                "shares": pos.shares if pos else 0,
+                                "entry_price": pos.avg_entry if pos else 0,
+                                "entry_date": str(pos.entry_date) if pos else None,
+                            },
+                            "portfolio_positions": portfolio_positions,
+                            "ticker_loss_streak": ticker_loss_streak,
+                        }
+                        state = graph.run(local_session, ticker, context=bt_context, as_of=as_of)
+                    finally:
+                        local_session.close()
 
-                    bt_context = {
-                        "portfolio_state": {
-                            "position_pct": pos_pct_current,
-                            "daily_pnl": daily_pnl,
-                            "equity": current_equity,
-                            "current_side": current_side,
-                            "drawdown_pct": dd_pct,
-                        },
-                        "current_position": {
-                            "side": current_side,
-                            "shares": pos.shares if pos else 0,
-                            "entry_price": pos.avg_entry if pos else 0,
-                            "entry_date": str(pos.entry_date) if pos else None,
-                        },
-                        "portfolio_positions": portfolio_positions,
-                        "ticker_loss_streak": ticker_loss_streak,
-                    }
-                    state = graph.run(session, ticker, context=bt_context, as_of=as_of)
                     elapsed = time.time() - t0
 
                     action = state.get("final_action", "HOLD")

@@ -502,54 +502,53 @@ class FinnhubClient:
         ec: EarningsCalendar | None = session.execute(ec_stmt).scalar_one_or_none()
 
         try:
-            snap_stmt = select(FundamentalsSnapshot).where(
-                FundamentalsSnapshot.ticker == ticker,
-                FundamentalsSnapshot.period == period,
-                FundamentalsSnapshot.period_type == "quarterly",
-            )
-            snap = session.execute(snap_stmt).scalar_one_or_none()
-
-            fields: dict = {
-                "pe_ratio": metrics.get("peNormalizedAnnual"),
-                "pb_ratio": metrics.get("pbAnnual"),
-                "ps_ratio": metrics.get("psAnnual"),
-                "roe": metrics.get("roeAnnual"),
-                "roa": metrics.get("roaAnnual"),
-                "gross_margin": metrics.get("grossMarginAnnual"),
-                "operating_margin": metrics.get("operatingMarginAnnual"),
-                "debt_to_equity": metrics.get("totalDebt/totalEquityAnnual"),
-                "current_ratio": metrics.get("currentRatioAnnual"),
-                "market_cap": metrics.get("marketCapitalization"),
-                "beta": metrics.get("beta"),
-                "week_52_high": metrics.get("52WeekHigh"),
-                "week_52_low": metrics.get("52WeekLow"),
-                "eps_actual": ec.eps_actual if ec else None,
-                "eps_estimate": ec.eps_estimate if ec else None,
-                "revenue_actual": ec.revenue_actual if ec else None,
-                "revenue_estimate": ec.revenue_estimate if ec else None,
-                "source": "finnhub",
-                "fetched_at": now,
-                "updated_at": now,
-            }
-
-            if snap:
-                for k, v in fields.items():
-                    setattr(snap, k, v)
-            else:
-                snap = FundamentalsSnapshot(
-                    ticker=ticker,
-                    period=period,
-                    period_type="quarterly",
-                    **fields,
+            with session.begin_nested():
+                snap_stmt = select(FundamentalsSnapshot).where(
+                    FundamentalsSnapshot.ticker == ticker,
+                    FundamentalsSnapshot.period == period,
+                    FundamentalsSnapshot.period_type == "quarterly",
                 )
-                session.add(snap)
+                snap = session.execute(snap_stmt).scalar_one_or_none()
 
-            session.commit()
+                fields: dict = {
+                    "pe_ratio": metrics.get("peNormalizedAnnual"),
+                    "pb_ratio": metrics.get("pbAnnual"),
+                    "ps_ratio": metrics.get("psAnnual"),
+                    "roe": metrics.get("roeAnnual"),
+                    "roa": metrics.get("roaAnnual"),
+                    "gross_margin": metrics.get("grossMarginAnnual"),
+                    "operating_margin": metrics.get("operatingMarginAnnual"),
+                    "debt_to_equity": metrics.get("totalDebt/totalEquityAnnual"),
+                    "current_ratio": metrics.get("currentRatioAnnual"),
+                    "market_cap": metrics.get("marketCapitalization"),
+                    "beta": metrics.get("beta"),
+                    "week_52_high": metrics.get("52WeekHigh"),
+                    "week_52_low": metrics.get("52WeekLow"),
+                    "eps_actual": ec.eps_actual if ec else None,
+                    "eps_estimate": ec.eps_estimate if ec else None,
+                    "revenue_actual": ec.revenue_actual if ec else None,
+                    "revenue_estimate": ec.revenue_estimate if ec else None,
+                    "source": "finnhub",
+                    "fetched_at": now,
+                    "updated_at": now,
+                }
+
+                if snap:
+                    for k, v in fields.items():
+                        setattr(snap, k, v)
+                else:
+                    snap = FundamentalsSnapshot(
+                        ticker=ticker,
+                        period=period,
+                        period_type="quarterly",
+                        **fields,
+                    )
+                    session.add(snap)
+
             logger.debug("upsert_fundamentals_snapshot ticker=%s period=%s", ticker, period)
             return True
         except Exception as exc:
             logger.warning("upsert_fundamentals_snapshot ticker=%s error: %s", ticker, exc)
-            session.rollback()
             return False
 
     def upsert_analyst_ratings(self, session: Session, ticker: str) -> bool:
@@ -573,45 +572,44 @@ class FinnhubClient:
 
         now = utc_now()
         try:
-            stmt = select(AnalystRating).where(
-                AnalystRating.ticker == ticker,
-                AnalystRating.period == period,
-            )
-            rating = session.execute(stmt).scalar_one_or_none()
-
-            fields: dict = {
-                "strong_buy": rec.get("strongBuy", 0),
-                "buy": rec.get("buy", 0),
-                "hold": rec.get("hold", 0),
-                "sell": rec.get("sell", 0),
-                "strong_sell": rec.get("strongSell", 0),
-                "target_high": price_target.get("targetHigh") if price_target else None,
-                "target_low": price_target.get("targetLow") if price_target else None,
-                "target_mean": price_target.get("targetMean") if price_target else None,
-                "target_median": price_target.get("targetMedian") if price_target else None,
-                "last_price_at_fetch": None,
-                "source": "finnhub",
-                "fetched_at": now,
-                "updated_at": now,
-            }
-
-            if rating:
-                for k, v in fields.items():
-                    setattr(rating, k, v)
-            else:
-                rating = AnalystRating(
-                    ticker=ticker,
-                    period=period,
-                    **fields,
+            with session.begin_nested():
+                stmt = select(AnalystRating).where(
+                    AnalystRating.ticker == ticker,
+                    AnalystRating.period == period,
                 )
-                session.add(rating)
+                rating = session.execute(stmt).scalar_one_or_none()
 
-            session.commit()
+                fields: dict = {
+                    "strong_buy": rec.get("strongBuy", 0),
+                    "buy": rec.get("buy", 0),
+                    "hold": rec.get("hold", 0),
+                    "sell": rec.get("sell", 0),
+                    "strong_sell": rec.get("strongSell", 0),
+                    "target_high": price_target.get("targetHigh") if price_target else None,
+                    "target_low": price_target.get("targetLow") if price_target else None,
+                    "target_mean": price_target.get("targetMean") if price_target else None,
+                    "target_median": price_target.get("targetMedian") if price_target else None,
+                    "last_price_at_fetch": None,
+                    "source": "finnhub",
+                    "fetched_at": now,
+                    "updated_at": now,
+                }
+
+                if rating:
+                    for k, v in fields.items():
+                        setattr(rating, k, v)
+                else:
+                    rating = AnalystRating(
+                        ticker=ticker,
+                        period=period,
+                        **fields,
+                    )
+                    session.add(rating)
+
             logger.debug("upsert_analyst_ratings ticker=%s period=%s", ticker, period)
             return True
         except Exception as exc:
             logger.warning("upsert_analyst_ratings ticker=%s error: %s", ticker, exc)
-            session.rollback()
             return False
 
     # ── Batch refresh ─────────────────────────────────────────────────────────
