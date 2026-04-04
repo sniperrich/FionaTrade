@@ -10,6 +10,7 @@ from app.tools.news import (
     build_news_context_text,
     build_news_screening_text,
     get_articles_full_text,
+    get_finnhub_sentiment,
 )
 
 logger = get_app_logger()
@@ -256,9 +257,7 @@ class NewsSentimentAgent(BaseAgent):
     def _fetch_finnhub_sentiment(self, ticker: str) -> dict | None:
         """Fetch Finnhub aggregated news sentiment (live mode only)."""
         try:
-            from app.ingestion.finnhub_client import FinnhubNewsClient
-            client = FinnhubNewsClient(self.settings)
-            return client.fetch_news_sentiment(ticker)
+            return get_finnhub_sentiment(self.settings, ticker)
         except Exception as exc:
             logger.debug("[news_sentiment] Finnhub sentiment fetch failed for %s: %s", ticker, exc)
             return None

@@ -524,11 +524,26 @@ session: Session = Depends(get_db)
 - `get_recent_events()` / `get_ticker_news_summary()` 会尊重调用方传入的 `since`
 - `RiskManagerAgent` 的 daily loss gate 现在按当日已实现损益计算，不再把现金流误当损益
 - NYSE 假日判断已改成动态计算，不再硬编码截止到 2026 年
+- `live_cycle` 现在同时受进程内锁和数据库 lease 保护：
+  - 单个 worker 内仍用 `_LIVE_CYCLE_MUTEX`
+  - 多 worker / 多进程下则用 `runtime_controls.live_cycle_lease` 防止并发重叠执行
+- `WorkerRuntimeService.claim_next_command()` 在 PostgreSQL 下已改为 `SELECT ... FOR UPDATE SKIP LOCKED`，避免两个 worker 同时认领同一条命令
+- `/api/agent/run` 不再在 HTTP 请求里同步跑完整 AgentGraph：
+  - 现在只负责排队 `run_agent_graph`
+  - 由 worker 后台执行，避免前端长时间阻塞和 LLM 超时
+- `PaperEngineService` 的执行语义已收口：
+  - 仓位大小现在同时考虑 `confidence` 和 `horizon`
+  - `BUY` 遇到空头、`SHORT` 遇到多头时会先平旧方向，再完成反手到目标仓位
+  - 风控计算 `gross exposure` 时与实际成交使用同一基准价格，避免旧 `last_price` 和 `_next_open()` 不一致
+- `PortfolioManagerAgent` 不再把动态权重写进实例状态；同一实例并发复用时不会再污染 `_current_weights`
+- RSS 摄取已改成 `httpx(timeout=10s)` 先拉正文，再交给 `feedparser.parse()`，慢源不会无限阻塞整个周期
+- FRED upsert / reward price lookup / market-hours 日期格式 已全部收成跨 PostgreSQL / SQLite / Windows 兼容实现
 - 2026-04-04 本地额外做了一轮 PostgreSQL smoke：
   - `db_backend='postgresql'`
   - `db_connection_ok=True`
   - `GET /api/health` `200`
   - `GET /api/live/status` `200`
+  - `GET /api/agent/run` `200`（现在返回 queued）
   - `GET /api/news?limit=1` `200`
 
 ### News Feed 用途分层前端

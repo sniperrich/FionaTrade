@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -15,17 +16,18 @@ settings = get_settings()
 setup_logging(log_dir=settings.log_dir, log_level=settings.log_level)
 logger = get_app_logger()
 
-app = FastAPI(title=settings.app_name)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-app.include_router(api_router)
-app.include_router(web_router)
-
-
-@app.on_event("startup")
-def startup_event() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     init_db()
     host = os.getenv("FIONA_WEB_HOST", "127.0.0.1")
     port = os.getenv("FIONA_WEB_PORT", "6888")
     logger.info("Web startup complete")
     logger.info("中文提示：打开 WebUI http://%s:%s ，健康检查 http://%s:%s/api/health", host, port, host, port)
     logger.info("中文提示：后台任务已迁移到 worker 进程，推荐单独运行 python -m app.worker.supervisor")
+    yield
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+app.include_router(api_router)
+app.include_router(web_router)

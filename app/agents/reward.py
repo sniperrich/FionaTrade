@@ -18,7 +18,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_app_logger
@@ -344,16 +344,20 @@ def compute_dynamic_weights(
 
 def _get_price_near(session: Session, ticker: str, target_time: datetime) -> float | None:
     """Get the closest bar price to a target timestamp."""
-    bar = session.execute(
+    bars = session.execute(
         select(Bar1m)
         .where(
             Bar1m.ticker == ticker.upper(),
             Bar1m.ts >= target_time - timedelta(hours=12),
             Bar1m.ts <= target_time + timedelta(hours=12),
         )
-        .order_by(func.abs(func.julianday(Bar1m.ts) - func.julianday(target_time)))
-        .limit(1)
-    ).scalars().first()
+        .order_by(Bar1m.ts.asc())
+    ).scalars().all()
+    bar = min(
+        bars,
+        key=lambda row: abs((row.ts - target_time).total_seconds()),
+        default=None,
+    )
     return float(bar.close) if bar else None
 
 

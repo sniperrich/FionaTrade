@@ -3,11 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import httpx
-from sqlalchemy import insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.logging import get_app_logger
+from app.db.database import session_db_backend_name
 from app.db.models import MacroIndicator
 
 logger = get_app_logger()
@@ -136,6 +138,7 @@ class FREDClient:
         total_upserted = 0
         processed: list[str] = []
         now = datetime.now(timezone.utc)
+        backend = session_db_backend_name(session)
 
         with httpx.Client(timeout=15.0) as client:
             for series_id in target_series:
@@ -160,18 +163,34 @@ class FREDClient:
                             except (ValueError, TypeError):
                                 float_value = None
 
-                        stmt = (
-                            insert(MacroIndicator)
-                            .prefix_with("OR REPLACE")
-                            .values(
-                                series_id=series_id,
-                                indicator_name=indicator_name,
-                                observation_date=obs_date,
-                                value=float_value,
-                                unit=unit,
-                                fetched_at=now,
+                        payload = {
+                            "series_id": series_id,
+                            "indicator_name": indicator_name,
+                            "observation_date": obs_date,
+                            "value": float_value,
+                            "unit": unit,
+                            "fetched_at": now,
+                        }
+                        if backend.startswith("postgres"):
+                            stmt = pg_insert(MacroIndicator).values(payload).on_conflict_do_update(
+                                index_elements=["series_id", "observation_date"],
+                                set_={
+                                    "indicator_name": indicator_name,
+                                    "value": float_value,
+                                    "unit": unit,
+                                    "fetched_at": now,
+                                },
                             )
-                        )
+                        else:
+                            stmt = sqlite_insert(MacroIndicator).values(payload).on_conflict_do_update(
+                                index_elements=["series_id", "observation_date"],
+                                set_={
+                                    "indicator_name": indicator_name,
+                                    "value": float_value,
+                                    "unit": unit,
+                                    "fetched_at": now,
+                                },
+                            )
                         session.execute(stmt)
                         total_upserted += 1
 

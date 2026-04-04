@@ -237,7 +237,14 @@ class ModuleAttributionService:
 
     def _load_backtest_runs(self, session: Session, filters: AttributionFilters) -> list[BacktestRun]:
         stmt = select(BacktestRun).order_by(desc(BacktestRun.created_at), desc(BacktestRun.id))
-        runs = list(session.execute(stmt).scalars().all())
+        if filters.run_ids:
+            stmt = stmt.where(BacktestRun.id.in_(filters.run_ids))
+        if filters.start_date:
+            stmt = stmt.where(BacktestRun.created_at >= filters.start_date)
+        if filters.end_date:
+            stmt = stmt.where(BacktestRun.created_at <= filters.end_date)
+        limit_value = max(len(filters.run_ids), 500) if filters.run_ids else 500
+        runs = list(session.execute(stmt.limit(limit_value)).scalars().all())
 
         out: list[BacktestRun] = []
         for run in runs:

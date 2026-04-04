@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from abc import ABC, abstractmethod
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -62,18 +63,20 @@ class BaseAgent(ABC):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._http_client: httpx.Client | None = None
+        self._http_client_lock = Lock()
 
     # ── LLM helpers ───────────────────────────────────────────────────────────
 
     def _get_http_client(self) -> httpx.Client:
         if self._http_client is None:
-            # Use transport-level retries for SSL/connection errors
-            transport = httpx.HTTPTransport(retries=3)
-            self._http_client = httpx.Client(
-                timeout=self.settings.llm_timeout_seconds,
-                headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
-                transport=transport,
-            )
+            with self._http_client_lock:
+                if self._http_client is None:
+                    transport = httpx.HTTPTransport(retries=3)
+                    self._http_client = httpx.Client(
+                        timeout=self.settings.llm_timeout_seconds,
+                        headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
+                        transport=transport,
+                    )
         return self._http_client
 
     def _call_llm(

@@ -228,9 +228,19 @@ class NormalizationService:
 
     def build_clusters(self, session: Session, raw_ids: Iterable[int] | None = None) -> list[NormalizedCluster]:
         stmt = select(RawItem).where(RawItem.processed.is_(False))
+        rows: list[RawItem]
         if raw_ids:
-            stmt = stmt.where(RawItem.id.in_(list(raw_ids)))
-        rows = session.execute(stmt.order_by(RawItem.published_at.asc())).scalars().all()
+            resolved_ids = [int(raw_id) for raw_id in raw_ids]
+            rows = []
+            for offset in range(0, len(resolved_ids), 500):
+                chunk = resolved_ids[offset:offset + 500]
+                chunk_rows = session.execute(
+                    stmt.where(RawItem.id.in_(chunk)).order_by(RawItem.published_at.asc())
+                ).scalars().all()
+                rows.extend(chunk_rows)
+            rows.sort(key=lambda item: item.published_at)
+        else:
+            rows = session.execute(stmt.order_by(RawItem.published_at.asc())).scalars().all()
         merge_window_min = max(0, int(getattr(self.settings, "normalization_merge_window_min", 0)))
 
         grouped: dict[tuple[object, ...], NormalizedCluster] = {}

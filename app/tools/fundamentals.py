@@ -115,10 +115,7 @@ def build_fundamentals_context_text(
     """Build a compact text block of fundamentals data for LLM prompts."""
     lines: list[str] = [f"=== FUNDAMENTALS FOR {ticker} ==="]
 
-    # Snapshots and analyst ratings represent the last reported quarter.
-    # Don't filter by as_of since the underlying data (PE, margins, etc.)
-    # was publicly available well before our fetch date.
-    snap = get_latest_snapshot(session, ticker)
+    snap = get_latest_snapshot(session, ticker, as_of=as_of)
     if snap:
         lines.append(f"Period: {snap.period} ({snap.period_type})")
         if snap.pe_ratio is not None:
@@ -145,7 +142,7 @@ def build_fundamentals_context_text(
         lines.append("  No fundamentals snapshot available.")
 
     # Analyst ratings
-    rating = get_latest_analyst_rating(session, ticker)  # same reasoning as snapshot
+    rating = get_latest_analyst_rating(session, ticker, as_of=as_of)
     if rating:
         total = (rating.strong_buy + rating.buy + rating.hold + rating.sell + rating.strong_sell) or 1
         bullish = (rating.strong_buy + rating.buy) / total

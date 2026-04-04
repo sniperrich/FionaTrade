@@ -15,11 +15,13 @@ from app.services.runtime_control import RuntimeControlService
 COMMAND_RUN_INGESTION = "run_ingestion_validation"
 COMMAND_REFRESH_BARS = "refresh_bars"
 COMMAND_RUN_LIVE_CYCLE = "run_live_cycle"
+COMMAND_RUN_AGENT_GRAPH = "run_agent_graph"
 COMMAND_REFRESH_EARNINGS = "refresh_earnings_calendar"
 COMMAND_RUN_BACKTEST = "run_backtest"
 
 HIGH_PRIORITY_COMMAND_TYPES = [
     COMMAND_RUN_LIVE_CYCLE,
+    COMMAND_RUN_AGENT_GRAPH,
     COMMAND_REFRESH_BARS,
     COMMAND_RUN_INGESTION,
     COMMAND_REFRESH_EARNINGS,
@@ -28,9 +30,10 @@ LOW_PRIORITY_COMMAND_TYPES = [COMMAND_RUN_BACKTEST]
 
 COMMAND_PRIORITY = {
     COMMAND_RUN_LIVE_CYCLE: 0,
-    COMMAND_REFRESH_BARS: 1,
-    COMMAND_RUN_INGESTION: 2,
-    COMMAND_REFRESH_EARNINGS: 3,
+    COMMAND_RUN_AGENT_GRAPH: 1,
+    COMMAND_REFRESH_BARS: 2,
+    COMMAND_RUN_INGESTION: 3,
+    COMMAND_REFRESH_EARNINGS: 4,
     COMMAND_RUN_BACKTEST: 9,
 }
 
@@ -60,6 +63,7 @@ class WorkerRuntimeService:
         session: Session,
         command_types: list[str] | None = None,
     ) -> WorkerCommand | None:
+        backend = session_db_backend_name(session)
         priority_order = case(
             COMMAND_PRIORITY,
             value=WorkerCommand.command_type,
@@ -73,6 +77,8 @@ class WorkerRuntimeService:
         )
         if command_types:
             stmt = stmt.where(WorkerCommand.command_type.in_(command_types))
+        if backend.startswith("postgres"):
+            stmt = stmt.with_for_update(skip_locked=True)
         command = session.execute(stmt).scalar_one_or_none()
         if command is None:
             return None
@@ -383,13 +389,14 @@ class WorkerRuntimeService:
         event_limit: int = 20,
     ) -> dict[str, Any]:
         backend = session_db_backend_name(session)
-        runs = self.recent_runs(session, ["live_cycle", "bar_backfill", "backtest"], limit=run_limit)
+        tracked_run_types = ["live_cycle", "bar_backfill", "backtest", "agent_graph"]
+        runs = self.recent_runs(session, tracked_run_types, limit=run_limit)
         commands = session.execute(
             select(WorkerCommand)
             .order_by(desc(WorkerCommand.created_at), desc(WorkerCommand.id))
             .limit(command_limit)
         ).scalars().all()
-        events = self.recent_events(session, ["live_cycle", "bar_backfill", "backtest"], limit=event_limit)
+        events = self.recent_events(session, tracked_run_types, limit=event_limit)
         return {
             "runs": [self._serialize_run_summary(run, backend=backend) for run in runs],
             "commands": [self._serialize_command(command, backend=backend) for command in commands],
@@ -401,7 +408,9 @@ class WorkerRuntimeService:
         live_run = self.latest_run(session, "live_cycle")
         backfill_run = self.latest_run(session, "bar_backfill")
         backtest_run = self.latest_run(session, "backtest")
-        events = list(reversed(self.recent_events(session, ["live_cycle", "bar_backfill", "backtest"], limit=16)))
+        agent_graph_run = self.latest_run(session, "agent_graph")
+        tracked_run_types = ["live_cycle", "bar_backfill", "backtest", "agent_graph"]
+        events = list(reversed(self.recent_events(session, tracked_run_types, limit=16)))
         worker = RuntimeControlService().get_worker_status(session)
         supervisor = RuntimeControlService().get_supervisor_status(session)
         queue = self.command_queue_snapshot(session)
@@ -412,6 +421,7 @@ class WorkerRuntimeService:
                 self._ensure_utc_dt(live_run.updated_at if live_run else None, backend=backend),
                 self._ensure_utc_dt(backfill_run.updated_at if backfill_run else None, backend=backend),
                 self._ensure_utc_dt(backtest_run.updated_at if backtest_run else None, backend=backend),
+                self._ensure_utc_dt(agent_graph_run.updated_at if agent_graph_run else None, backend=backend),
                 self._ensure_utc_dt(events[-1].created_at if events else None, backend=backend),
                 self._parse_iso_dt(worker.get("last_seen_at")),
                 self._parse_iso_dt(supervisor.get("last_seen_at")),
@@ -427,6 +437,7 @@ class WorkerRuntimeService:
             "live_cycle": self._serialize_run(live_run, backend=backend),
             "bar_backfill": self._serialize_run(backfill_run, backend=backend),
             "backtest": self._serialize_run(backtest_run, backend=backend),
+            "agent_graph": self._serialize_run(agent_graph_run, backend=backend),
             "recent_events": [self._serialize_event(event, backend=backend) for event in events],
         }
 

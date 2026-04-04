@@ -161,3 +161,73 @@ def test_paper_execute_rejects_when_no_market_data(session, settings):
 def test_latest_price_raises_without_market_data(session, settings):
     with pytest.raises(NoMarketDataError):
         PaperEngineService(settings)._latest_price(session, "NFLX")
+
+
+def test_target_position_pct_scales_with_confidence_and_horizon(settings):
+    service = PaperEngineService(settings)
+
+    low = service._target_position_pct(confidence=50, horizon_min=settings.default_horizon_min)
+    high = service._target_position_pct(confidence=95, horizon_min=settings.default_horizon_min)
+    long_horizon = service._target_position_pct(confidence=95, horizon_min=settings.default_horizon_min * 2)
+
+    assert low < high <= settings.max_position_pct
+    assert long_horizon == high
+
+
+def test_buy_signal_reverses_short_into_long(session, settings):
+    now = utc_now()
+    session.add(
+        Position(
+            ticker="NVDA",
+            qty=-5.0,
+            avg_price=110.0,
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            last_price=110.0,
+        )
+    )
+    session.add(
+        Signal(
+            event_id=4,
+            action="BUY",
+            ticker="NVDA",
+            confidence=95,
+            horizon_min=settings.default_horizon_min,
+            reason="reverse_short",
+            expires_at=now + timedelta(hours=2),
+            fallback_used=True,
+            status="ACTIVE",
+            created_at=now,
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(
+                ticker="NVDA",
+                ts=now + timedelta(minutes=1),
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                volume=1000,
+                source="test",
+            ),
+            Bar1m(
+                ticker="NVDA",
+                ts=now + timedelta(minutes=2),
+                open=101.0,
+                high=102.0,
+                low=100.0,
+                close=101.0,
+                volume=1000,
+                source="test",
+            ),
+        ]
+    )
+    session.flush()
+
+    result = PaperEngineService(settings).execute(session)
+    pos = session.query(Position).filter(Position.ticker == "NVDA").one()
+
+    assert result.executed == 1
+    assert pos.qty > 0

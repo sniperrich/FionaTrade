@@ -132,7 +132,8 @@ class BTPortfolio:
         pos = self.positions.get(ticker)
         if not pos:
             return 0.0
-        return pos.shares * price
+        value = pos.shares * price
+        return value if pos.side == "LONG" else -value
 
 
 @dataclass

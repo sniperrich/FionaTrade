@@ -41,9 +41,12 @@ class EarningsReleaseClient:
 
     @staticmethod
     def _surprise_pct(actual: float | None, estimate: float | None) -> float | None:
-        if actual is None or estimate in (None, 0):
+        if actual is None or estimate is None:
             return None
-        return ((float(actual) - float(estimate)) / abs(float(estimate))) * 100.0
+        estimate_value = float(estimate)
+        if estimate_value == 0.0:
+            return None
+        return ((float(actual) - estimate_value) / abs(estimate_value)) * 100.0
 
     @staticmethod
     def _surprise_label(pct: float | None) -> str:

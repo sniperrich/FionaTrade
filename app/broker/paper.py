@@ -95,11 +95,12 @@ class PaperBroker(AbstractBroker):
             return None
         qty = float(row.qty)
         avg_price = float(row.avg_price or 0)
+        last_price = float(row.last_price or avg_price or 0)
         return PositionInfo(
             ticker=ticker.upper(),
             quantity=qty,
             avg_cost=avg_price,
-            market_value=qty * avg_price,
+            market_value=qty * last_price,
             unrealized_pnl=float(row.unrealized_pnl or 0),
         )
 

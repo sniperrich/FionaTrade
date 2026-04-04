@@ -26,16 +26,16 @@
     <div class="card-title">Agent Weights</div>
     <div style="font-size:12px;line-height:1.8">
       <div class="flex-center" style="justify-content:space-between">
-        <span class="text-muted">📰 News Sentiment</span><span class="bold">25%</span>
+        <span class="text-muted">📰 News Sentiment</span><span class="bold">{{ '%.0f'|format((agent_weights.news or 0) * 100) }}%</span>
       </div>
       <div class="flex-center" style="justify-content:space-between">
-        <span class="text-muted">📊 Technicals</span><span class="bold">30%</span>
+        <span class="text-muted">📊 Technicals</span><span class="bold">{{ '%.0f'|format((agent_weights.technicals or 0) * 100) }}%</span>
       </div>
       <div class="flex-center" style="justify-content:space-between">
-        <span class="text-muted">📈 Fundamentals</span><span class="bold">25%</span>
+        <span class="text-muted">📈 Fundamentals</span><span class="bold">{{ '%.0f'|format((agent_weights.fundamentals or 0) * 100) }}%</span>
       </div>
       <div class="flex-center" style="justify-content:space-between">
-        <span class="text-muted">🌐 Macro</span><span class="bold">20%</span>
+        <span class="text-muted">🌐 Macro</span><span class="bold">{{ '%.0f'|format((agent_weights.macro or 0) * 100) }}%</span>
       </div>
     </div>
   </div>
@@ -381,12 +381,12 @@ async function runAgents(){
   const raw=document.getElementById('run-tickers').value.trim();
   const tickers=raw?raw.split(',').map(t=>t.trim().toUpperCase()).filter(Boolean):[];
   if(!tickers.length){ toast('Enter at least one ticker','warn'); return; }
-  document.getElementById('run-status').textContent='Running…';
+  document.getElementById('run-status').textContent='Queueing…';
   try{
     const d=await apiFetch('/api/agent/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tickers})});
-    toast('Agent run complete for: '+tickers.join(', '),'success');
-    document.getElementById('run-status').textContent='Done!';
-    setTimeout(loadRuns,1000);
+    toast(`Queued agent run for ${tickers.join(', ')} (cmd ${d.command_id})`,'success');
+    document.getElementById('run-status').textContent=`Queued (cmd ${d.command_id})`;
+    setTimeout(loadRuns,3000);
   } catch(e){ toast('Error: '+e.message,'error'); document.getElementById('run-status').textContent=''; }
 }
 

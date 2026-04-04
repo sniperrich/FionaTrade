@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 import feedparser
+import httpx
 from dateutil import parser as dt_parser
 
 from app.analysis.taxonomy import SOURCE_TIER, is_secondary_confirmation_source, normalize_source_name
@@ -100,6 +101,13 @@ except Exception:  # pragma: no cover – graceful degradation if module unavail
 class RssClient:
     def __init__(self, settings: Settings):
         self.settings = settings
+
+    @staticmethod
+    def _load_feed(feed_url: str):
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            resp = client.get(feed_url)
+            resp.raise_for_status()
+            return feedparser.parse(resp.content)
 
     def _source_name(self, feed_url: str) -> str:
         host = urlparse(feed_url).netloc.lower()
@@ -206,7 +214,7 @@ class RssClient:
             tier = SOURCE_TIER.get(source_name, 2)
 
             try:
-                feed = feedparser.parse(feed_url)
+                feed = self._load_feed(feed_url)
             except Exception as exc:
                 logger.warning("RSS parse failed %s: %s", feed_url, exc)
                 checks.append(
@@ -326,7 +334,7 @@ class RssClient:
         for ticker in tickers:
             feed_url = f"https://finance.yahoo.com/rss/headline?s={ticker}"
             try:
-                feed = feedparser.parse(feed_url)
+                feed = self._load_feed(feed_url)
             except Exception as exc:
                 logger.warning("Yahoo Finance ticker RSS failed %s: %s", ticker, exc)
                 continue

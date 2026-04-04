@@ -24,6 +24,7 @@ from app.services.overnight_risk import OvernightRiskService
 from app.services.runtime_control import CONTROL_OVERNIGHT_RISK_STATE, RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
+    COMMAND_RUN_AGENT_GRAPH,
     COMMAND_RUN_BACKTEST,
     COMMAND_RUN_INGESTION,
     COMMAND_RUN_LIVE_CYCLE,
@@ -871,8 +872,6 @@ def run_agent_graph(
     Body (all optional):
         tickers: list[str]   — override configured tickers for this run
     """
-    from app.agent_graph.graph import AgentGraph
-
     tickers: list[str] = payload.get("tickers") or list(
         settings.agent_tickers_override
         or getattr(settings, "sp100_tickers", [])
@@ -880,21 +879,24 @@ def run_agent_graph(
     )
     if not tickers:
         raise HTTPException(status_code=400, detail="No tickers configured or provided")
-
-    graph = AgentGraph(settings)
-    runs = []
-    for ticker in tickers:
-        state = graph.run(session, ticker)
-        runs.append({
-            "ticker": ticker,
-            "action": state.get("final_action", "HOLD"),
-            "position_pct": state.get("final_position_pct", 0.0),
-            "reasoning": state.get("final_reasoning", ""),
-            "error": state.get("error"),
-        })
-
+    normalized_tickers = sorted({str(t).strip().upper() for t in tickers if str(t).strip()})
+    command = WorkerRuntimeService().queue_command(
+        session,
+        COMMAND_RUN_AGENT_GRAPH,
+        payload={
+            "tickers": normalized_tickers,
+            "trigger": "api_manual",
+        },
+        requested_by="api",
+    )
     session.commit()
-    return {"agent_mode": True, "runs": runs}
+    return {
+        "queued": True,
+        "command_id": command.id,
+        "command_type": command.command_type,
+        "tickers": normalized_tickers,
+        "message": "Agent graph run queued for worker",
+    }
 
 
 @router.get("/agent/runs")
@@ -910,11 +912,12 @@ def list_agent_runs(
     from app.db.models import AgentRun
     from sqlalchemy import select, desc
 
-    stmt = select(AgentRun).order_by(desc(AgentRun.created_at)).offset(offset).limit(limit)
+    stmt = select(AgentRun)
     if ticker:
         stmt = stmt.where(AgentRun.ticker == ticker.upper())
     if action:
         stmt = stmt.where(AgentRun.final_action == action.upper())
+    stmt = stmt.order_by(desc(AgentRun.created_at)).offset(offset).limit(limit)
 
     rows = session.execute(stmt).scalars().all()
     run_ids = [int(r.id) for r in rows]

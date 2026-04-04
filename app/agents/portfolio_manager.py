@@ -70,7 +70,7 @@ IMPORTANT RULES:
 3. HOLD is valid when: conviction=LOW, or fewer than 2 agents align on the same direction, or the signal is unclear/mixed
 4. BUY or SHORT requires: conviction=HIGH or MEDIUM, AND at least 2 agents clearly aligned in the same direction
 5. Use SELL to close an existing long position when outlook has turned negative or neutral
-6. Weight news (60%) highest for direction; technicals (20%) as timing confirmation; macro (10%) and fundamentals (10%) as low-weight filters
+6. Weight news ({news_weight_pct}%) highest for direction; technicals ({tech_weight_pct}%) as timing confirmation; macro ({macro_weight_pct}%) and fundamentals ({fund_weight_pct}%) as low-weight filters
 7. conviction=HIGH requires 3+ agents aligned; MEDIUM requires 2 agents aligned; LOW for 0-1 aligned or mixed signals
 8. When 2+ agents say SHORT/SELL, you SHOULD short or sell — do not override with BUY
 9. When agents disagree (e.g., fund=BUY, tech=SHORT, news=SHORT), side with the MAJORITY; if tie, return HOLD
@@ -109,7 +109,7 @@ class PortfolioManagerAgent(BaseAgent):
             dyn_weights = compute_dynamic_weights(session, as_of=as_of, base_weights=self._base_weights())
         except Exception:
             dyn_weights = None
-        self._current_weights = dyn_weights  # store for confidence calc
+        effective_weights = dyn_weights or self._base_weights()
 
         def _sig(agent: str) -> dict:
             return agent_signals.get(agent, {})
@@ -156,6 +156,10 @@ class PortfolioManagerAgent(BaseAgent):
                 risk_level=risk.get("metadata", {}).get("risk_level", "UNKNOWN") if risk else "UNKNOWN",
                 risk_reasoning=risk.get("reasoning", "No risk assessment")[:200],
                 position_context=position_context,
+                news_weight_pct=int(round(effective_weights.get("news_sentiment", 0.0) * 100)),
+                tech_weight_pct=int(round(effective_weights.get("technicals", 0.0) * 100)),
+                macro_weight_pct=int(round(effective_weights.get("macro_analyst", 0.0) * 100)),
+                fund_weight_pct=int(round(effective_weights.get("fundamentals", 0.0) * 100)),
             )
 
             # If risk hard-blocked, skip LLM to save tokens
@@ -250,7 +254,7 @@ class PortfolioManagerAgent(BaseAgent):
             return AgentSignal(
                 agent_name=self.name,
                 signal=action,
-                confidence=min(95, int(self._compute_weighted_confidence(agent_signals))),
+                confidence=min(95, int(self._compute_weighted_confidence(agent_signals, effective_weights))),
                 reasoning=parsed.get("reasoning", ""),
                 metadata={
                     "action": action,
@@ -274,12 +278,8 @@ class PortfolioManagerAgent(BaseAgent):
             logger.exception("[portfolio_manager] Unexpected error for %s: %s", ticker, exc)
             return AgentSignal.error_signal(self.name, str(exc))
 
-    def _compute_weighted_confidence(self, agent_signals: dict[str, dict]) -> float:
-        """Weighted average confidence — uses dynamic weights if available, else defaults."""
-        weights = (
-            getattr(self, "_current_weights", None)
-            or self._base_weights()
-        )
+    def _compute_weighted_confidence(self, agent_signals: dict[str, dict], weights: dict[str, float]) -> float:
+        """Weighted average confidence using the weights resolved for this run."""
         total, weight_sum = 0.0, 0.0
         for agent, weight in weights.items():
             sig = agent_signals.get(agent)

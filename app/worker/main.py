@@ -27,6 +27,7 @@ from app.services.runtime_control import RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
     COMMAND_REFRESH_EARNINGS,
+    COMMAND_RUN_AGENT_GRAPH,
     COMMAND_RUN_BACKTEST,
     COMMAND_RUN_INGESTION,
     COMMAND_RUN_LIVE_CYCLE,
@@ -425,6 +426,113 @@ def _execute_claimed_command(command_id: int) -> None:
                         session,
                         trigger=str(payload.get("trigger", "manual")),
                     )
+            elif command.command_type == COMMAND_RUN_AGENT_GRAPH:
+                from app.agent_graph.graph import AgentGraph
+
+                tickers = [
+                    str(t).strip().upper()
+                    for t in (payload.get("tickers") or [])
+                    if str(t).strip()
+                ]
+                if not tickers:
+                    result = {"skipped": True, "reason": "no_tickers"}
+                else:
+                    worker_run = runtime.start_run(
+                        session,
+                        run_type="agent_graph",
+                        trigger=str(payload.get("trigger", "manual")),
+                        stage="running",
+                        total_tickers=len(tickers),
+                        completed_tickers=0,
+                        summary_json={"tickers": tickers},
+                    )
+                    runtime.add_event(
+                        session,
+                        "agent_graph",
+                        "Manual agent graph run started",
+                        run=worker_run,
+                        stage="running",
+                        payload={"tickers": tickers},
+                    )
+                    try:
+                        graph = AgentGraph(settings)
+                        runs: list[dict[str, object]] = []
+                        for idx, ticker in enumerate(tickers, start=1):
+                            runtime.update_run(
+                                session,
+                                worker_run,
+                                stage="running",
+                                current_ticker=ticker,
+                                completed_tickers=idx - 1,
+                            )
+                            state = graph.run(
+                                session,
+                                ticker,
+                                context={"trigger": str(payload.get("trigger", "manual"))},
+                            )
+                            runs.append(
+                                {
+                                    "ticker": ticker,
+                                    "action": state.get("final_action", "HOLD"),
+                                    "position_pct": state.get("final_position_pct", 0.0),
+                                    "reasoning": state.get("final_reasoning", ""),
+                                    "error": state.get("error"),
+                                }
+                            )
+                            runtime.add_event(
+                                session,
+                                "agent_graph",
+                                f"{ticker} completed",
+                                run=worker_run,
+                                stage="ticker_completed",
+                                ticker=ticker,
+                                payload=runs[-1],
+                            )
+                            runtime.update_run(
+                                session,
+                                worker_run,
+                                completed_tickers=idx,
+                                current_ticker=None if idx == len(tickers) else tickers[idx],
+                            )
+                        result = {"agent_mode": True, "runs": runs}
+                        runtime.finish_run(
+                            session,
+                            worker_run,
+                            status="COMPLETED",
+                            stage="completed",
+                            summary=result,
+                            total_tickers=len(tickers),
+                            completed_tickers=len(tickers),
+                            current_ticker=None,
+                        )
+                        runtime.add_event(
+                            session,
+                            "agent_graph",
+                            "Manual agent graph run completed",
+                            run=worker_run,
+                            stage="completed",
+                            payload={"tickers": tickers, "count": len(runs)},
+                        )
+                    except Exception as exc:
+                        runtime.finish_run(
+                            session,
+                            worker_run,
+                            status="FAILED",
+                            stage="failed",
+                            error_message=str(exc),
+                            summary={"tickers": tickers},
+                            current_ticker=None,
+                        )
+                        runtime.add_event(
+                            session,
+                            "agent_graph",
+                            "Manual agent graph run failed",
+                            run=worker_run,
+                            level="error",
+                            stage="failed",
+                            payload={"tickers": tickers, "error": str(exc)},
+                        )
+                        raise
             elif command.command_type == COMMAND_RUN_BACKTEST:
                 worker_run = runtime.start_run(
                     session,

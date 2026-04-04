@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.broker.alpaca import AlpacaBroker
 from app.broker.base import PositionInfo
 from app.core.config import Settings
-from app.core.market_hours import et_now, market_session_info
+from app.core.market_hours import et_now, format_et_timestamp, market_session_info
 from app.core.utils import utc_now
 from app.db.models import LiveTrade
 from app.services.runtime_control import CONTROL_OVERNIGHT_RISK_STATE, RuntimeControlService
@@ -535,7 +535,7 @@ class OvernightRiskService:
                 target_pct=target_pct,
                 order_id=order_id,
                 status=status,
-                et_time=et_now().strftime("%H:%M ET %a %b %-d"),
+                et_time=format_et_timestamp(et_now(), include_year=False),
                 market_session=market_session,
                 reasoning=reasoning[:4000] if reasoning else None,
                 error=error[:4000] if error else None,

@@ -4,30 +4,35 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.utils import ensure_utc, utc_now
+from app.db.database import session_db_backend_name
 from app.db.models import RuntimeControl
 
 CONTROL_LIVE_ENABLED = "live_trading_enabled"
 CONTROL_OVERNIGHT_RISK_STATE = "overnight_risk_state"
 CONTROL_WORKER_HEARTBEAT = "worker_heartbeat"
 CONTROL_WORKER_SUPERVISOR = "worker_supervisor"
+CONTROL_LIVE_CYCLE_LEASE = "live_cycle_lease"
 DEFAULT_WORKER_STALE_SECONDS = 20
 
 
 class RuntimeControlService:
+    def _select_row(self, session: Session, key: str, *, for_update: bool = False) -> RuntimeControl | None:
+        stmt = select(RuntimeControl).where(RuntimeControl.control_key == key).limit(1)
+        if for_update and session_db_backend_name(session).startswith("postgres"):
+            stmt = stmt.with_for_update()
+        return session.execute(stmt).scalar_one_or_none()
+
     def get(self, session: Session, key: str) -> dict[str, Any] | None:
-        row = session.execute(
-            select(RuntimeControl).where(RuntimeControl.control_key == key).limit(1)
-        ).scalar_one_or_none()
+        row = self._select_row(session, key)
         return row.value_json if row else None
 
     def set(self, session: Session, key: str, value: dict[str, Any]) -> dict[str, Any]:
-        row = session.execute(
-            select(RuntimeControl).where(RuntimeControl.control_key == key).limit(1)
-        ).scalar_one_or_none()
+        row = self._select_row(session, key)
         if row is None:
             row = RuntimeControl(control_key=key, value_json=value)
             session.add(row)
@@ -35,6 +40,68 @@ class RuntimeControlService:
             row.value_json = value
         session.flush()
         return row.value_json
+
+    def try_acquire_lease(
+        self,
+        session: Session,
+        *,
+        key: str,
+        holder: str,
+        ttl_seconds: int,
+        payload_extra: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        now = utc_now()
+        expires_at = now + timedelta(seconds=max(1, int(ttl_seconds or 1)))
+        try:
+            row = self._select_row(session, key, for_update=True)
+            if row is None:
+                value = {
+                    "holder": holder,
+                    "acquired_at": now.isoformat(),
+                    "expires_at": expires_at.isoformat(),
+                }
+                if payload_extra:
+                    value.update(payload_extra)
+                session.add(RuntimeControl(control_key=key, value_json=value))
+                session.flush()
+                return True, value
+
+            current = dict(row.value_json or {})
+            held_by = str(current.get("holder") or "")
+            lease_expires = self._parse_dt(current.get("expires_at"))
+            if held_by and held_by != holder and lease_expires and lease_expires > now:
+                return False, current
+
+            current.update(
+                {
+                    "holder": holder,
+                    "acquired_at": now.isoformat(),
+                    "expires_at": expires_at.isoformat(),
+                }
+            )
+            if payload_extra:
+                current.update(payload_extra)
+            row.value_json = current
+            session.flush()
+            return True, current
+        except IntegrityError:
+            session.rollback()
+            current = self.get(session, key) or {}
+            return False, current
+
+    def release_lease(self, session: Session, *, key: str, holder: str) -> dict[str, Any] | None:
+        row = self._select_row(session, key, for_update=True)
+        if row is None:
+            return None
+        current = dict(row.value_json or {})
+        if str(current.get("holder") or "") != holder:
+            return current
+        current["holder"] = None
+        current["released_at"] = utc_now().isoformat()
+        current["expires_at"] = None
+        row.value_json = current
+        session.flush()
+        return current
 
     def get_live_enabled(self, session: Session, settings: Settings) -> bool:
         row = self.get(session, CONTROL_LIVE_ENABLED)

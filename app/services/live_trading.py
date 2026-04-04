@@ -17,6 +17,8 @@ to prepare reasoning for Monday's open, but no orders are placed.
 """
 from __future__ import annotations
 
+import os
+import socket
 import uuid
 from datetime import datetime, timedelta, timezone
 import threading
@@ -37,7 +39,7 @@ from app.db.models import AgentRun, Bar1m, EntryPlan, Event, EventEvidence, Live
 from app.ingestion.service import IngestionService
 from app.services.capital_confirmation import CapitalConfirmationService
 from app.services.market_data import MarketDataService
-from app.services.runtime_control import CONTROL_LIVE_ENABLED, RuntimeControlService
+from app.services.runtime_control import CONTROL_LIVE_CYCLE_LEASE, CONTROL_LIVE_ENABLED, RuntimeControlService
 from app.services.worker_runtime import WorkerRuntimeService
 from app.tools.news import count_new_raw_items
 
@@ -71,8 +73,29 @@ class LiveTradingService:
             }
 
         cycle_id = str(uuid.uuid4())[:8]
+        lease_holder = f"{socket.gethostname()}:{os.getpid()}:{cycle_id}"
         run: WorkerRun | None = None
         try:
+            lease_acquired, lease_payload = RuntimeControlService().try_acquire_lease(
+                session,
+                key=CONTROL_LIVE_CYCLE_LEASE,
+                holder=lease_holder,
+                ttl_seconds=max(900, int(getattr(self.settings, "live_cycle_stale_seconds", 900) or 900)),
+                payload_extra={"trigger": trigger, "cycle_id": cycle_id},
+            )
+            if not lease_acquired:
+                logger.info(
+                    "[live] Skipping cycle trigger=%s: live cycle lease held by %s",
+                    trigger,
+                    lease_payload.get("holder"),
+                )
+                return {
+                    "skipped": True,
+                    "reason": "live_cycle_in_progress",
+                    "trigger": trigger,
+                    "lease_holder": lease_payload.get("holder"),
+                }
+
             msi = market_session_info()
             tickers = self._get_tickers()
             tradeable = msi["tradeable"] or (
@@ -505,6 +528,15 @@ class LiveTradingService:
                 )
             raise
         finally:
+            try:
+                with db_session() as release_session:
+                    RuntimeControlService().release_lease(
+                        release_session,
+                        key=CONTROL_LIVE_CYCLE_LEASE,
+                        holder=lease_holder,
+                    )
+            except Exception as exc:
+                logger.warning("[live] Failed to release live cycle lease %s: %s", lease_holder, exc)
             _LIVE_CYCLE_MUTEX.release()
 
     def _update_run(self, session: Session, run: WorkerRun, **fields: Any) -> None:

@@ -189,6 +189,12 @@ def agents_page(
             "tickers": all_tickers,
             "selected_ticker": ticker,
             "agent_mode_enabled": settings.agent_mode_enabled,
+            "agent_weights": {
+                "news": float(getattr(settings, "agent_weight_news", 0.60)),
+                "technicals": float(getattr(settings, "agent_weight_technicals", 0.20)),
+                "fundamentals": float(getattr(settings, "agent_weight_fundamentals", 0.10)),
+                "macro": float(getattr(settings, "agent_weight_macro", 0.10)),
+            },
         },
     )
 

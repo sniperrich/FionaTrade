@@ -35,12 +35,14 @@ class MarketBackfillResult:
     bars_skipped_existing: int
     alpaca_fallback_tickers: int
     alpaca_bars_inserted: int
-    stooq_fallback_tickers: int
+    secondary_fallback_tickers: int
     stooq_bars_inserted: int
     errors: list[str]
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        payload = asdict(self)
+        payload["stooq_fallback_tickers"] = payload["secondary_fallback_tickers"]
+        return payload
 
 
 class MarketBackfillService:
@@ -335,7 +337,7 @@ class MarketBackfillService:
         req_fail = 0
         alpaca_fallback_tickers = 0
         alpaca_bars_inserted = 0
-        stooq_fallback_tickers = 0
+        secondary_fallback_tickers = 0
         stooq_bars_inserted = 0
         errors: list[str] = []
 
@@ -458,7 +460,7 @@ class MarketBackfillService:
                             existing_ts.add(ts)
                         inserted_now = self._insert_bars(session, yf_payload)
                         inserted += inserted_now
-                        stooq_fallback_tickers += 1
+                        secondary_fallback_tickers += 1
                         skipped_existing += max(len(yf_payload) - inserted_now, 0)
                     else:
                         if yf_err:
@@ -470,7 +472,7 @@ class MarketBackfillService:
                                 errors.append(f"{ticker} stooq fallback: {stooq_err}")
                         else:
                             if stooq_bars:
-                                stooq_fallback_tickers += 1
+                                secondary_fallback_tickers += 1
                             stooq_payload: list[dict[str, object]] = []
                             for bar in stooq_bars:
                                 ts = ensure_utc(bar["ts"])
@@ -518,7 +520,7 @@ class MarketBackfillService:
             bars_skipped_existing=skipped_existing,
             alpaca_fallback_tickers=alpaca_fallback_tickers,
             alpaca_bars_inserted=alpaca_bars_inserted,
-            stooq_fallback_tickers=stooq_fallback_tickers,
+            secondary_fallback_tickers=secondary_fallback_tickers,
             stooq_bars_inserted=stooq_bars_inserted,
             errors=errors,
         )

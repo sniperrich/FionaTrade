@@ -8,6 +8,8 @@ from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
+from app.core.utils import ensure_utc
+
 _ET = ZoneInfo("America/New_York")
 
 # Regular session: 09:30 – 16:00 ET
@@ -149,6 +151,14 @@ def minutes_until_close(dt: datetime | None = None) -> int | None:
     return max(0, int(delta.total_seconds() // 60))
 
 
+def format_et_timestamp(dt: datetime, *, include_year: bool = True) -> str:
+    et = ensure_utc(dt).astimezone(_ET)
+    day_str = f"{et.strftime('%a %b')} {et.day}"
+    if include_year:
+        day_str = f"{day_str} {et.year}"
+    return f"{et.strftime('%H:%M')} ET {day_str}"
+
+
 def market_session_info(dt: datetime | None = None) -> dict:
     """Return a comprehensive market session info dict.
 
@@ -164,9 +174,7 @@ def market_session_info(dt: datetime | None = None) -> dict:
     label = market_session_label(et)
     tradeable = label == "market_open"
 
-    day_str = et.strftime("%a %b %-d %Y")
-    time_str = et.strftime("%H:%M")
-    et_time_str = f"{time_str} ET {day_str}"
+    et_time_str = format_et_timestamp(et, include_year=True)
 
     min_open = minutes_until_open(et)
     min_close = minutes_until_close(et)

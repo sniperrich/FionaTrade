@@ -5,7 +5,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.api.routes import close_all_positions_endpoint, list_live_entry_plan_events, live_positions, set_live_enabled
+from app.api.routes import close_all_positions_endpoint, list_live_entry_plan_events, live_positions, run_agent_graph, set_live_enabled
 from app.broker.base import PositionInfo
 from app.core.utils import utc_now
 from app.db import database as db_database
@@ -15,9 +15,10 @@ from app.ingestion.types import SourceCheck
 from app.services import live_trading as live_trading_module
 from app.services.live_trading import LiveTradingService, _LIVE_CYCLE_MUTEX
 from app.services.market_data import MarketDataService
-from app.services.runtime_control import CONTROL_WORKER_HEARTBEAT, RuntimeControlService
+from app.services.runtime_control import CONTROL_LIVE_CYCLE_LEASE, CONTROL_WORKER_HEARTBEAT, RuntimeControlService
 from app.services.worker_runtime import (
     COMMAND_REFRESH_BARS,
+    COMMAND_RUN_AGENT_GRAPH,
     COMMAND_RUN_BACKTEST,
     COMMAND_RUN_INGESTION,
     COMMAND_RUN_LIVE_CYCLE,
@@ -395,6 +396,36 @@ def test_live_cycle_skips_when_another_cycle_is_running(session, settings) -> No
 
     assert result["skipped"] is True
     assert result["reason"] == "live_cycle_in_progress"
+
+
+def test_live_cycle_skips_when_cross_process_lease_is_held(session, settings) -> None:
+    service = LiveTradingService(settings)
+    control = RuntimeControlService()
+    acquired, _payload = control.try_acquire_lease(
+        session,
+        key=CONTROL_LIVE_CYCLE_LEASE,
+        holder="other-worker",
+        ttl_seconds=900,
+    )
+    assert acquired is True
+    session.commit()
+
+    result = service.run_cycle(session, trigger="pytest")
+
+    assert result["skipped"] is True
+    assert result["reason"] == "live_cycle_in_progress"
+    assert result["lease_holder"] == "other-worker"
+
+
+def test_run_agent_graph_endpoint_queues_worker_command(session, settings) -> None:
+    result = run_agent_graph(payload={"tickers": ["aapl", "msft"]}, session=session, settings=settings)
+
+    assert result["queued"] is True
+    assert result["command_type"] == COMMAND_RUN_AGENT_GRAPH
+    commands = session.query(WorkerCommand).order_by(WorkerCommand.id.asc()).all()
+    assert len(commands) == 1
+    assert commands[0].command_type == COMMAND_RUN_AGENT_GRAPH
+    assert commands[0].payload_json["tickers"] == ["AAPL", "MSFT"]
 
 
 def test_stale_market_data_suppresses_order_before_price_fetch(session, settings, monkeypatch) -> None:

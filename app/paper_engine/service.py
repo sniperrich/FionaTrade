@@ -283,43 +283,85 @@ class PaperEngineService:
             cash -= fee
         return cash
 
-    def _gross_exposure(self, session: Session) -> float:
+    def _gross_exposure(self, session: Session, *, price_overrides: dict[str, float] | None = None) -> float:
         gross = 0.0
+        overrides = {str(k).upper(): float(v) for k, v in (price_overrides or {}).items()}
         for pos in session.execute(select(Position)).scalars().all():
             if pos.qty == 0:
                 continue
-            px = pos.last_price or self._latest_price(session, pos.ticker)
+            px = overrides.get(pos.ticker.upper())
+            if px is None:
+                px = pos.last_price or self._latest_price(session, pos.ticker)
             gross += abs(pos.qty * px)
         return gross
 
-    def _risk_allowed(self, session: Session, ticker: str, side: str, qty: float, price: float, nav: float) -> bool:
+    def _risk_allowed(self, session: Session, ticker: str, projected_qty: float, price: float, nav: float) -> bool:
         if nav <= 0:
             return False
 
         pos = self._position(session, ticker)
         current_qty = pos.qty
-        delta = 0.0
-        if side == "BUY":
-            delta = qty
-        elif side == "SHORT":
-            delta = -qty
-        elif side == "SELL":
-            delta = -qty
-        elif side == "COVER":
-            delta = qty
-
-        new_qty = current_qty + delta
-        projected_notional = abs(new_qty * price)
+        projected_notional = abs(projected_qty * price)
         if projected_notional > nav * self.settings.max_position_pct + 1e-6:
             return False
 
-        current_gross = self._gross_exposure(session)
+        current_gross = self._gross_exposure(session, price_overrides={ticker.upper(): price})
         current_notional = abs(current_qty * price)
         projected_gross = current_gross - current_notional + projected_notional
         if projected_gross > nav * self.settings.max_gross_exposure_pct + 1e-6:
             return False
 
         return True
+
+    def _target_position_pct(self, confidence: int | None, horizon_min: int) -> float:
+        base_pct = float(self.settings.max_position_pct)
+        confidence_ratio = min(1.0, max(0.25, float(confidence or 0) / 100.0))
+        default_horizon = max(1, int(self.settings.default_horizon_min or 1))
+        horizon_ratio = min(1.0, max(0.5, float(horizon_min) / float(default_horizon)))
+        return min(base_pct, base_pct * confidence_ratio * horizon_ratio)
+
+    def _desired_position_qty(
+        self,
+        *,
+        action: str,
+        current_qty: float,
+        target_qty: float,
+    ) -> float | None:
+        action_upper = str(action or "").upper()
+        if action_upper == "BUY":
+            return target_qty
+        if action_upper == "SHORT":
+            return -target_qty
+        if action_upper == "SELL":
+            return 0.0 if current_qty > 0 else current_qty
+        if action_upper == "COVER":
+            return 0.0 if current_qty < 0 else current_qty
+        return None
+
+    def _execution_legs(self, current_qty: float, desired_qty: float) -> list[tuple[str, float]]:
+        delta = desired_qty - current_qty
+        if abs(delta) <= 1e-9:
+            return []
+
+        legs: list[tuple[str, float]] = []
+        if delta > 0:
+            if current_qty < 0:
+                cover_qty = min(abs(current_qty), delta)
+                if cover_qty > 1e-9:
+                    legs.append(("COVER", cover_qty))
+                delta -= cover_qty
+            if delta > 1e-9:
+                legs.append(("BUY", delta))
+        else:
+            remaining = abs(delta)
+            if current_qty > 0:
+                sell_qty = min(current_qty, remaining)
+                if sell_qty > 1e-9:
+                    legs.append(("SELL", sell_qty))
+                remaining -= sell_qty
+            if remaining > 1e-9:
+                legs.append(("SHORT", remaining))
+        return legs
 
     def _slipped_price(self, side: str, base_price: float) -> float:
         slip = self.settings.default_slippage_bps / 10_000.0
@@ -443,63 +485,65 @@ class PaperEngineService:
                 signal.status = "REJECTED_NO_MARKET_DATA"
                 continue
 
-            target_notional = nav * self.settings.max_position_pct
+            target_pct = self._target_position_pct(signal.confidence, signal_horizon_min)
+            target_notional = nav * target_pct
             qty = max(round(target_notional / max(base_price, 0.01), 4), 0.0)
             if qty <= 0:
                 signal.status = "REJECTED_SIZE"
                 continue
 
-            if signal.action == "BUY":
-                side = "COVER" if pos.qty < 0 else "BUY"
-                qty = min(abs(pos.qty), qty) if side == "COVER" else qty
-            elif signal.action in {"SHORT", "SELL"}:
-                side = "SELL" if pos.qty > 0 else "SHORT"
-                qty = min(pos.qty, qty) if side == "SELL" else qty
-            else:
+            desired_qty = self._desired_position_qty(
+                action=signal.action,
+                current_qty=pos.qty,
+                target_qty=qty,
+            )
+            if desired_qty is None:
                 signal.status = "SKIPPED"
                 continue
 
-            if qty <= 0:
+            legs = self._execution_legs(pos.qty, desired_qty)
+            if not legs:
                 signal.status = "SKIPPED"
                 continue
 
-            if not self._risk_allowed(session, ticker, side, qty, base_price, nav):
+            if not self._risk_allowed(session, ticker, desired_qty, base_price, nav):
                 signal.status = "REJECTED_RISK"
                 rejected += 1
                 continue
 
-            order = PaperOrder(
-                signal_id=signal.id,
-                side=side,
-                ticker=ticker,
-                qty=qty,
-                submitted_at=now,
-                status="SUBMITTED",
-            )
-            session.add(order)
-            session.flush()
-
-            fill_price = self._slipped_price(side, base_price)
-            self._apply_fill(pos, side, qty, fill_price, fill_ts)
-            if pos.qty == 0:
-                self._clear_position_horizon(session, ticker)
-            elif side in {"BUY", "SHORT"}:
-                self._set_position_horizon(session, ticker, signal_horizon_min)
-
-            session.add(
-                PaperFill(
-                    order_id=order.id,
+            for side, leg_qty in legs:
+                order = PaperOrder(
+                    signal_id=signal.id,
                     side=side,
                     ticker=ticker,
-                    qty=qty,
+                    qty=leg_qty,
                     submitted_at=now,
-                    filled_at=fill_ts,
-                    fill_price=fill_price,
-                    slippage_bps=self.settings.default_slippage_bps,
-                    fee=0.0,
-                    notional=qty * fill_price,
+                    status="SUBMITTED",
                 )
-            )
+                session.add(order)
+                session.flush()
+
+                fill_price = self._slipped_price(side, base_price)
+                self._apply_fill(pos, side, leg_qty, fill_price, fill_ts)
+                session.add(
+                    PaperFill(
+                        order_id=order.id,
+                        side=side,
+                        ticker=ticker,
+                        qty=leg_qty,
+                        submitted_at=now,
+                        filled_at=fill_ts,
+                        fill_price=fill_price,
+                        slippage_bps=self.settings.default_slippage_bps,
+                        fee=0.0,
+                        notional=leg_qty * fill_price,
+                    )
+                )
+
+            if pos.qty == 0:
+                self._clear_position_horizon(session, ticker)
+            elif signal.action in {"BUY", "SHORT"}:
+                self._set_position_horizon(session, ticker, signal_horizon_min)
 
             signal.status = "EXECUTED"
             signal.executed_at = now

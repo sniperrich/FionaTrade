@@ -7,6 +7,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.analysis.taxonomy import normalize_source_name
+from app.core.config import Settings
 from app.core.utils import ensure_utc
 from app.db.models import Event, EventEvidence, RawItem
 
@@ -323,6 +324,16 @@ def count_new_raw_items(session: Session, since: datetime) -> int:
     return session.execute(
         select(sa.func.count()).select_from(RawItem).where(RawItem.ingested_at >= since)
     ).scalar_one()
+
+
+def get_finnhub_sentiment(settings: Settings, ticker: str) -> dict | None:
+    """Fetch Finnhub aggregated sentiment via the tools layer."""
+    try:
+        from app.ingestion.finnhub_client import FinnhubNewsClient
+
+        return FinnhubNewsClient(settings).fetch_news_sentiment(ticker)
+    except Exception:
+        return None
 
 
 def get_articles_full_text(session: Session, item_ids: list[int]) -> dict[int, dict]:
