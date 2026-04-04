@@ -36,7 +36,7 @@ open http://localhost:6888
 - 如果当前没激活 conda 环境，它会自动尝试 `CONDA_ENV_NAME`，默认值是 `FionaTrade`
 - `run_local.sh` 现在会自动探测常见 Miniconda/Anaconda 安装路径，并把输出写到 `logs/web.local.log` / `logs/supervisor.local.log`
 - 当 `DATABASE_URL` 指向本机 PostgreSQL（`127.0.0.1/localhost`）时，`run_local.sh` 会自动检查数据库是否在线；若未启动，会自动尝试拉起本地 PostgreSQL，并在脚本退出时一起停止
-- 当 `DATABASE_URL` 指向远端 PostgreSQL，或仍然使用 SQLite 时，`run_local.sh` 不会接管数据库进程
+- 当 `DATABASE_URL` 指向远端 PostgreSQL 时，`run_local.sh` 不会接管数据库进程
 - 若 supervisor 在启动后几秒内退出，脚本会直接报错，不再出现“只有 web 起了、worker 没起来”的假成功
 - 已修复 Bash 变量展开坑：中文标点紧邻 `$WEB_PID` 这类变量时会被误判成更长变量名，当前脚本已统一改成 `${VAR}` 写法
 - 需要改端口时可这样运行：`PORT=6999 ./run_local.sh`
@@ -49,28 +49,6 @@ open http://localhost:6888
   - 保存了 `2026-03-30` live 战绩与 `2026-03-31` 单日 `-1648` 回撤的数据库复盘
   - 重点结论：`3/30` 是高集中度空头篮子驱动的盈利，`3/31` 则是这批仓位被隔夜和盘中反向行情打穿
 
-### SQLite -> Postgres 迁移
-
-```bash
-python scripts/migrate_sqlite_to_postgres.py \
-  --sqlite-url sqlite:///./fionatrade.db \
-  --postgres-url postgresql+psycopg://USER:PASS@HOST:5432/fionatrade \
-  --truncate-target
-```
-
-说明：
-- 脚本按表分批迁移（主键升序 chunk）
-- 默认会阻止“迁移期间仍有 live/backtest 正在写库”的情况
-- 如需强制跳过该保护，可加 `--allow-active-writes`（不推荐）
-- 迁移后会自动输出逐表 `source/target` 行数校验与抽样一致性结果
-- 迁移脚本现在使用 FionaTrade ORM metadata 创建 PostgreSQL 表，不再复用 SQLite 反射出来的 `DATETIME` 等类型
-- 迁移脚本会递归清洗 JSON 中的 `Infinity/NaN`，避免 PostgreSQL JSON 列拒收
-- 迁移脚本会按外键拓扑顺序复制表，并对源 SQLite 中已经损坏的 orphan FK 行做过滤与计数报告
-- 迁移完成后会自动把 PostgreSQL 自增序列回拨到 `max(id)`，避免 `worker_runs/raw_items/...` 新写入时从 `1` 开始撞主键
-- 本地实测：`fionatrade.db -> PostgreSQL 16` 已可完整迁移；其中 `event_evidence` 因源库存在坏外键，过滤了 `1708` 条 orphan 行
-
----
-
 ## 架构
 
 ### 三层拆分（当前默认）
@@ -78,7 +56,7 @@ python scripts/migrate_sqlite_to_postgres.py \
 ```text
 web    -> FastAPI + Jinja UI + command/control API
 worker -> APScheduler + ingestion + live cycle + backfill + command pump
-db     -> SQLite/Postgres，统一保存状态、结果、行情缓存、运行态
+db     -> PostgreSQL，统一保存状态、结果、行情缓存、运行态
 ```
 
 关键点：
@@ -96,9 +74,8 @@ db     -> SQLite/Postgres，统一保存状态、结果、行情缓存、运行�
 - live entry planning 已接入：`HOLD` 可附带 `WAIT_*` 计划（pullback / breakout / until_open），worker 在后续 cycle 自动触发
 - 同一 ticker 只保留一个 active entry plan（Replace Old），新计划会替换旧计划
 - 浏览器只是控制面板：关闭 UI 不会停止自动交易；真正执行取决于 worker 是否存活
-- SQLite 现在默认启用 `WAL + busy_timeout`，降低 worker/supervisor/backtest 并发写锁冲突
-- 已支持 PostgreSQL 单库运行（推荐 live/backtest 并发场景使用 Postgres）
-- `bars_1m` backfill 现在改为数据库级幂等插入（SQLite/PostgreSQL 都走 `ON CONFLICT DO NOTHING`），重复 K 线不会再把 worker 启动流程炸掉
+- 当前默认数据库是 PostgreSQL，生产和本地主环境都按 PostgreSQL 维护
+- `bars_1m` backfill 现在改为数据库级幂等插入，重复 K 线不会再把 worker 启动流程炸掉
 - worker 启动时会自动清算遗留的 `RUNNING` 命令/运行/回测，避免重启后旧任务永久显示运行中
 - `CNBC / Yahoo` 现在统一视为 **secondary confirmation sources**：可做 corroboration，但不会再作为单独 primary trigger 使用
 - 回测默认已打开 **同 ticker + 同有效事件类型 + 同日去重**（`backtest_dedup_same_day_event=true`）
@@ -533,14 +510,6 @@ with db_session() as session:
 session: Session = Depends(get_db)
 ```
 
-### SQLite 时区陷阱
-SQLite 存储的 datetime 不带时区，`utc_now()` 返回 tz-aware，相减前需：
-```python
-from datetime import timezone
-if dt.tzinfo is None:
-    dt = dt.replace(tzinfo=timezone.utc)
-```
-
 ### PostgreSQL 运行态时间注意事项
 - PostgreSQL 连接现在会强制 `SET TIME ZONE 'UTC'`，避免新的 `worker_runs / worker_commands` 把本地时区时钟写进 `timestamp without time zone`
 - 迁移到 PostgreSQL 之前写入的运行态行，可能已经混入“本地时区 naive 时间”；stale watchdog 现在会兼容这种旧行，不再把刚启动几分钟的 `live_cycle` 误判成超时
@@ -548,13 +517,19 @@ if dt.tzinfo is None:
 - `live_cycle` 的 run stage / worker event / finish_run 现在都不再复用主交易事务；每个 ticker 成功后会显式 `commit` 业务写入，失败时会先 `rollback` 再继续下一票，避免某一票的事务污染把整轮 `agent_runs/live_trades` 一起回滚
 - `AgentGraph` 中 `batch_score_runs / build_performance_context / persist_run` 这些“非主路径”失败后现在会主动 `rollback` 当前 session，避免吞错后把后续 live 决策链留在 PostgreSQL aborted transaction 状态
 - `app/tools/news.py::get_ticker_news_summary()` 里对 `RawItem.metadata_json` 的 ticker 匹配现在显式 `CAST(... AS TEXT)`；PostgreSQL 不再因为对 JSON 列直接做 `ILIKE` 而把 `news_sentiment` 阶段炸掉
-- `app/db/database.py` 只会在 PostgreSQL 下传入 `pool_size / max_overflow`；SQLite（尤其是内存库和测试环境）不再因为收到不兼容的连接池参数而在 `create_engine()` 阶段直接报错
+- `app/db/database.py` 现在只按当前实际 `DATABASE_URL` 动态构建引擎和 session factory，不再把旧连接状态固化在 import 时
 - `app/db/database.py` 和 `app/tools/market_data.py` 已去掉 import-time 绑定生产配置的全局单例；测试和临时切库现在能真正隔离
 - `PaperEngineService` 在没有可信行情时不再用硬编码 `$100` 成交；现在会拒单并标记 `REJECTED_NO_MARKET_DATA`
 - `PaperBroker` 的资金查询现在和 `PaperEngineService.portfolio()` 返回字段一致，不再永远回退到默认值
 - `get_recent_events()` / `get_ticker_news_summary()` 会尊重调用方传入的 `since`
 - `RiskManagerAgent` 的 daily loss gate 现在按当日已实现损益计算，不再把现金流误当损益
 - NYSE 假日判断已改成动态计算，不再硬编码截止到 2026 年
+- 2026-04-04 本地额外做了一轮 PostgreSQL smoke：
+  - `db_backend='postgresql'`
+  - `db_connection_ok=True`
+  - `GET /api/health` `200`
+  - `GET /api/live/status` `200`
+  - `GET /api/news?limit=1` `200`
 
 ### News Feed 用途分层前端
 - `News Feed` 现在按 `Raw Intake / Event Evidence / Agent Input / Live Input` 四个分层直接展示内容，不再只显示摘要 badge
