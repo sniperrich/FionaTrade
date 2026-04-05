@@ -186,6 +186,14 @@ class PaperEngineService:
         session.flush()
         return row
 
+    @staticmethod
+    def _direct_order_executable_qty(current_qty: float, side: str, requested_qty: float) -> float:
+        if side == "SELL":
+            return min(max(current_qty, 0.0), requested_qty)
+        if side == "COVER":
+            return min(abs(min(current_qty, 0.0)), requested_qty)
+        return requested_qty
+
     def _apply_fill(self, pos: Position, side: str, qty: float, price: float, fill_ts) -> float:
         realized = 0.0
 
@@ -474,31 +482,34 @@ class PaperEngineService:
         base_price = self._latest_price(session, ticker.upper())
         fill_price = self._slipped_price(side, base_price)
         pos = self._position(session, ticker.upper())
+        fill_qty = self._direct_order_executable_qty(pos.qty, side, qty)
+        if fill_qty <= 0:
+            raise ValueError(f"no position available to {side.lower()} for {ticker.upper()}")
 
         order = PaperOrder(
             signal_id=None,
             side=side,
             ticker=ticker.upper(),
-            qty=qty,
+            qty=fill_qty,
             submitted_at=now,
-            status="SUBMITTED",
+            status="FILLED",
         )
         session.add(order)
         session.flush()
 
-        self._apply_fill(pos, side, qty, fill_price, now)
+        self._apply_fill(pos, side, fill_qty, fill_price, now)
         session.add(
             PaperFill(
                 order_id=order.id,
                 side=side,
                 ticker=ticker.upper(),
-                qty=qty,
+                qty=fill_qty,
                 submitted_at=now,
                 filled_at=now,
                 fill_price=fill_price,
                 slippage_bps=self.settings.default_slippage_bps,
                 fee=0.0,
-                notional=qty * fill_price,
+                notional=fill_qty * fill_price,
             )
         )
         if pos.qty == 0:

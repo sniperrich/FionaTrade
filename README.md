@@ -157,7 +157,7 @@ LiveTradingService → AlpacaBroker（bracket orders + ATR stops）
 | `/live` | 实盘：持仓、手动下单（market/limit/bracket）、Enable/Disable Live 停机模式、`Flatten All` 一键平仓、持仓风险摘要（gross/net exposure、position risk P&L、today total P&L、overnight guard）、runtime activity、worker heartbeat、command queue、worker history、local bar cache、ticker K-line、entry plan 面板、entry plan trigger log、成交历史翻页（策略参数改在 `/settings`） |
 | `/agents` | AI Agent：LLM 状态、市场时钟、触发运行、推理展开、运行记录翻页、**Trigger Event 证据链可视化 + 关联 Live Trade 明细** |
 | `/news` | 新闻流：全文展开、来源/ticker 过滤、**用途分层（RAW/Event/Agent/Live）**、按 published_at 排序 + 历史补录标识 + 30s 自动拉新 + 源状态/报错 + 历史翻页 |
-| `/backtests` | Backtest 控制台：默认走 **Agent live-like** 模式（ticker、decision frequency、initial capital、max position %），也保留 legacy Event + LLM / Event + Rules 研究模式 |
+| `/backtests` | Backtest 控制台：默认走 **Agent live-like** 模式（ticker、decision frequency、initial capital、max position %）；Event 模式现在也会真实应用 `ticker / initial capital / max position %`，`decision frequency` 仅对 Agent 模式生效 |
 | `/backtests/{run_id}` | Backtest 详情页：大图模式（收益率曲线 + 回撤曲线）+ Sharpe/回撤/PF + 全量交易明细 |
 | `/attribution` | 模块归因面板：Agent 边际贡献、事件类型/source/source tier/flow bucket 分桶、过滤器价值排行、评分回填 |
 | `/settings` | 统一配置中心：LLM 网关、采集周期、数据源开关 + Live 策略参数（ticker/source 白名单、节奏、flow gate、agent 权重、执行内核、收盘前是否平仓），并回显当前值（已选 ticker/source 等） |

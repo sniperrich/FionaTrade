@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+from fastapi import HTTPException
+
 from app.api.routes import backtest_options, queue_backtest
 from app.backtest_engine.agent_backtest import AgentBacktestResult, BTDecision, BTTrade
 from app.backtest_engine.service import BacktestEngineService
@@ -79,6 +82,37 @@ def test_queue_backtest_defaults_to_agent_mode(session, settings) -> None:
     assert command is not None
     assert command.payload_json["engine_mode"] == "agent"
     assert command.payload_json["tickers"] == list(settings.live_trading_tickers)
+
+
+def test_queue_backtest_parses_boolean_strings_and_rejects_bad_numeric_payload(session, settings) -> None:
+    response = queue_backtest(
+        payload={
+            "start_date": "2026-01-01",
+            "end_date": "2026-02-01",
+            "use_signal_validation": "false",
+            "flow_confirmation_enabled": "true",
+        },
+        session=session,
+        settings=settings,
+    )
+
+    command = session.query(WorkerCommand).filter(WorkerCommand.id == response["command_id"]).one()
+    assert command.payload_json["use_signal_validation"] is False
+    assert command.payload_json["flow_confirmation_enabled"] is True
+
+    with pytest.raises(HTTPException) as excinfo:
+        queue_backtest(
+            payload={
+                "start_date": "2026-01-01",
+                "end_date": "2026-02-01",
+                "initial_capital": "abc",
+            },
+            session=session,
+            settings=settings,
+        )
+
+    assert excinfo.value.status_code == 400
+    assert "initial_capital must be a number" in str(excinfo.value.detail)
 
 
 def test_backtest_service_agent_mode_persists_live_like_run(session, settings, monkeypatch) -> None:

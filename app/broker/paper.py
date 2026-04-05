@@ -45,7 +45,7 @@ class PaperBroker(AbstractBroker):
                 order_id=str(order.id),
                 ticker=ticker,
                 action=action.upper(),
-                quantity=quantity,
+                quantity=float(order.qty),
                 fill_price=fill_price,
             )
         except Exception as exc:

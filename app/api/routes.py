@@ -155,6 +155,73 @@ def _normalize_upper_list(value: Any) -> list[str]:
     return sorted({chunk.upper() for chunk in chunks if chunk and str(chunk).strip()})
 
 
+def _payload_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise HTTPException(status_code=400, detail=f"{key} must be a boolean")
+
+
+def _payload_int(
+    payload: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    if key not in payload:
+        value = default
+    else:
+        raw = payload.get(key)
+        if isinstance(raw, bool):
+            raise HTTPException(status_code=400, detail=f"{key} must be an integer")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
+    if minimum is not None and value < minimum:
+        raise HTTPException(status_code=400, detail=f"{key} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise HTTPException(status_code=400, detail=f"{key} must be <= {maximum}")
+    return value
+
+
+def _payload_float(
+    payload: dict[str, Any],
+    key: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    if key not in payload:
+        value = float(default)
+    else:
+        raw = payload.get(key)
+        if isinstance(raw, bool):
+            raise HTTPException(status_code=400, detail=f"{key} must be a number")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"{key} must be a number") from exc
+    if minimum is not None and value < minimum:
+        raise HTTPException(status_code=400, detail=f"{key} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise HTTPException(status_code=400, detail=f"{key} must be <= {maximum}")
+    return value
+
+
 def _parse_query_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -691,29 +758,61 @@ def queue_backtest(
     engine_mode = str(payload.get("engine_mode") or "agent").strip().lower()
     if engine_mode not in {"agent", "event"}:
         raise HTTPException(status_code=400, detail="engine_mode must be one of: agent, event")
+    tickers = sorted(
+        {
+            str(t).strip().upper()
+            for t in _normalize_upper_list(payload.get("tickers"))
+            if str(t).strip()
+        }
+    ) or list(settings.live_trading_tickers)
 
     params = {
         "start_date": str(start_date),
         "end_date": str(end_date),
         "engine_mode": engine_mode,
-        "use_llm": bool(payload.get("use_llm", False)),
+        "use_llm": _payload_bool(payload, "use_llm", False),
         "event_profile": str(payload.get("event_profile") or "").strip().lower(),
         "sources": _normalize_source_list(payload.get("sources")),
-        "tickers": sorted({str(t).strip().upper() for t in _normalize_upper_list(payload.get("tickers")) if str(t).strip()}) or list(settings.live_trading_tickers),
-        "decision_frequency": max(1, int(payload.get("decision_frequency", 1))),
-        "initial_capital": float(payload.get("initial_capital", settings.initial_nav)),
-        "max_position_pct": float(payload.get("max_position_pct", getattr(settings, "live_max_position_pct", settings.max_position_pct))),
-        "min_confidence": int(payload.get("min_confidence", settings.min_trade_confidence)),
-        "min_severity": int(payload.get("min_severity", 0)),
-        "use_signal_validation": bool(payload.get("use_signal_validation", getattr(settings, "validation_enabled", True))),
-        "use_tradeability_filter": bool(payload.get("use_tradeability_filter", settings.event_tradeability_filter_enabled)),
-        "use_event_quality_filter": bool(payload.get("use_event_quality_filter", settings.backtest_use_event_quality_filter)),
-        "flow_confirmation_enabled": bool(payload.get("flow_confirmation_enabled", getattr(settings, "flow_confirmation_enabled", True))),
-        "flow_confirmation_soft_gate": bool(payload.get("flow_confirmation_soft_gate", getattr(settings, "flow_confirmation_soft_gate", True))),
-        "flow_breakout_lookback_min": int(payload.get("flow_breakout_lookback_min", getattr(settings, "live_entry_plan_breakout_lookback_min", 15))),
-        "flow_wait_valid_minutes": int(payload.get("flow_wait_valid_minutes", getattr(settings, "live_entry_plan_default_valid_minutes", 180))),
+        "tickers": tickers,
+        "initial_capital": _payload_float(payload, "initial_capital", settings.initial_nav, minimum=1000.0),
+        "max_position_pct": _payload_float(
+            payload,
+            "max_position_pct",
+            getattr(settings, "live_max_position_pct", settings.max_position_pct),
+            minimum=0.01,
+            maximum=1.0,
+        ),
+        "min_confidence": _payload_int(payload, "min_confidence", settings.min_trade_confidence, minimum=0, maximum=100),
+        "min_severity": _payload_int(payload, "min_severity", 0, minimum=0, maximum=100),
+        "use_signal_validation": _payload_bool(payload, "use_signal_validation", getattr(settings, "validation_enabled", True)),
+        "use_tradeability_filter": _payload_bool(payload, "use_tradeability_filter", settings.event_tradeability_filter_enabled),
+        "use_event_quality_filter": _payload_bool(payload, "use_event_quality_filter", settings.backtest_use_event_quality_filter),
+        "flow_confirmation_enabled": _payload_bool(
+            payload,
+            "flow_confirmation_enabled",
+            getattr(settings, "flow_confirmation_enabled", True),
+        ),
+        "flow_confirmation_soft_gate": _payload_bool(
+            payload,
+            "flow_confirmation_soft_gate",
+            getattr(settings, "flow_confirmation_soft_gate", True),
+        ),
+        "flow_breakout_lookback_min": _payload_int(
+            payload,
+            "flow_breakout_lookback_min",
+            int(getattr(settings, "live_entry_plan_breakout_lookback_min", 15)),
+            minimum=5,
+        ),
+        "flow_wait_valid_minutes": _payload_int(
+            payload,
+            "flow_wait_valid_minutes",
+            int(getattr(settings, "live_entry_plan_default_valid_minutes", 180)),
+            minimum=5,
+        ),
         "trigger": "api",
     }
+    if engine_mode == "agent":
+        params["decision_frequency"] = _payload_int(payload, "decision_frequency", 1, minimum=1, maximum=20)
 
     run = BacktestRun(
         params=params,

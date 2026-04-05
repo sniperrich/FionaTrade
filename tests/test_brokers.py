@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from app.broker.alpaca import AlpacaBroker
 from app.broker.paper import PaperBroker
-from app.db.models import Bar1m, Position
+from app.db.models import Bar1m, PaperFill, Position
 from app.core.utils import utc_now
 
 
@@ -39,6 +41,72 @@ def test_paper_broker_rejects_non_market_orders(session, settings) -> None:
 
     assert result.success is False
     assert "market orders" in str(result.error)
+
+
+def test_paper_broker_sell_only_fills_available_long_quantity(session, settings) -> None:
+    now = utc_now()
+    session.add(
+        Bar1m(
+            ticker="AAPL",
+            ts=now,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1_000.0,
+            source="test",
+        )
+    )
+    session.flush()
+
+    broker = PaperBroker(settings, session)
+    buy = broker.place_order("AAPL", "BUY", 3.0)
+    sell = broker.place_order("AAPL", "SELL", 10.0)
+    position = session.query(Position).filter(Position.ticker == "AAPL").one()
+    fills = session.query(PaperFill).filter(PaperFill.ticker == "AAPL").order_by(PaperFill.id.asc()).all()
+
+    assert buy.success is True
+    assert sell.success is True
+    assert sell.quantity == 3.0
+    assert position.qty == 0.0
+    assert [float(fill.qty) for fill in fills] == [3.0, 3.0]
+    expected_cash = settings.initial_nav
+    expected_cash -= float(fills[0].notional)
+    expected_cash += float(fills[1].notional)
+    assert broker.get_cash() == pytest.approx(expected_cash)
+
+
+def test_paper_broker_cover_only_fills_available_short_quantity(session, settings) -> None:
+    now = utc_now()
+    session.add(
+        Bar1m(
+            ticker="NVDA",
+            ts=now,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1_000.0,
+            source="test",
+        )
+    )
+    session.flush()
+
+    broker = PaperBroker(settings, session)
+    short = broker.place_order("NVDA", "SHORT", 4.0)
+    cover = broker.place_order("NVDA", "COVER", 10.0)
+    position = session.query(Position).filter(Position.ticker == "NVDA").one()
+    fills = session.query(PaperFill).filter(PaperFill.ticker == "NVDA").order_by(PaperFill.id.asc()).all()
+
+    assert short.success is True
+    assert cover.success is True
+    assert cover.quantity == 4.0
+    assert position.qty == 0.0
+    assert [float(fill.qty) for fill in fills] == [4.0, 4.0]
+    expected_cash = settings.initial_nav
+    expected_cash += float(fills[0].notional)
+    expected_cash -= float(fills[1].notional)
+    assert broker.get_cash() == pytest.approx(expected_cash)
 
 
 def test_alpaca_broker_place_order_posts_expected_payload(settings, monkeypatch) -> None:

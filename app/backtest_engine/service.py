@@ -495,11 +495,13 @@ class BacktestEngineService:
         risk_per_trade_pct: float,
         risk_sizing: bool,
         position_pct_suggestion: float | None = None,
+        max_position_pct: float | None = None,
     ) -> float:
         if nav <= 0:
             return 0.0
 
-        cap_notional = nav * self.settings.max_position_pct
+        cap_ratio = float(max_position_pct if max_position_pct is not None else self.settings.max_position_pct)
+        cap_notional = nav * max(0.0, cap_ratio)
         qty_cap = cap_notional / max(entry_px, 0.01)
         qty_limits = [qty_cap]
 
@@ -985,6 +987,16 @@ class BacktestEngineService:
             for source in self._as_list(params.get("sources"))
             if source and source.strip()
         })
+        selected_tickers = sorted(
+            {
+                str(ticker).strip().upper()
+                for ticker in self._as_list(params.get("tickers"))
+                if str(ticker).strip()
+            }
+        )
+        selected_ticker_set = set(selected_tickers)
+        initial_capital = float(params.get("initial_capital", self.settings.initial_nav))
+        max_position_pct = float(params.get("max_position_pct", self.settings.max_position_pct))
 
         if run_id is not None:
             run = session.get(BacktestRun, run_id)
@@ -1019,6 +1031,12 @@ class BacktestEngineService:
             stmt = stmt.where(Event.event_time < end_dt)
 
         events = session.execute(stmt.order_by(Event.event_time.asc())).scalars().all()
+        if selected_ticker_set:
+            events = [
+                event
+                for event in events
+                if any(str(ticker).strip().upper() in selected_ticker_set for ticker in (event.tickers or []))
+            ]
         if selected_sources:
             source_filtered_events: list[Event] = []
             selected_source_set = set(selected_sources)
@@ -1044,7 +1062,7 @@ class BacktestEngineService:
         dedup_dropped = same_day_dedup_dropped + earnings_window_dedup_dropped
         started = time.perf_counter()
         total_events = len(events)
-        equity = self.settings.initial_nav
+        equity = initial_capital
         equity_curve = [{"ts": utc_now().isoformat(), "equity": equity}]
         pnl_list: list[float] = []
         trade_log: list[dict] = []
@@ -1714,13 +1732,14 @@ class BacktestEngineService:
                 risk_per_trade_pct=effective_risk_per_trade_pct,
                 risk_sizing=risk_sizing,
                 position_pct_suggestion=effective_position_pct_suggestion,
+                max_position_pct=max_position_pct,
             )
             if flow_confirmation_enabled and flow_confirmation_soft_gate and qty > 0:
                 multiplier = max(0.0, float(flow_position_multiplier or 1.0))
                 if abs(multiplier - 1.0) > 1e-9:
                     qty *= multiplier
                     # Hard clamp after flow scaling so add-on logic never exceeds single-name cap.
-                    max_cap_qty = (equity * self.settings.max_position_pct) / max(entry_px, 0.01)
+                    max_cap_qty = (equity * max_position_pct) / max(entry_px, 0.01)
                     qty = min(qty, max_cap_qty)
                     flow_scaled_trades += 1
                     if multiplier > 1.0:
@@ -1831,10 +1850,13 @@ class BacktestEngineService:
 
         set_phase("finalizing", current=1, total=1, detail="Computing metrics and writing results")
 
-        metrics = self._compute_metrics(self.settings.initial_nav, equity_curve, pnl_list)
+        metrics = self._compute_metrics(initial_capital, equity_curve, pnl_list)
         metrics["events_considered"] = len(events)
         metrics["event_profile"] = event_profile
         metrics["selected_sources"] = selected_sources
+        metrics["selected_tickers"] = selected_tickers
+        metrics["initial_capital"] = initial_capital
+        metrics["max_position_pct"] = max_position_pct
         metrics["profile_filtered"] = profile_filtered
         metrics["event_type_attribution"] = event_type_attr
         metrics["source_attribution"] = source_attr

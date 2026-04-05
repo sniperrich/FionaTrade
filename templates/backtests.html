@@ -82,7 +82,7 @@
           <input type="text" id="bt-tickers" value="{{ backtest_defaults.tickers|join(',') }}" placeholder="AAPL,NVDA,MSFT" />
         </div>
         <div class="form-group">
-          <label>Decision Frequency (trading days)</label>
+          <label>Decision Frequency (Agent mode)</label>
           <input type="number" id="bt-decision-frequency" min="1" max="20" step="1" value="{{ backtest_defaults.decision_frequency }}" />
         </div>
       </div>
@@ -346,7 +346,7 @@ function selectedTickers(){
 
 function currentBacktestPayload(){
   const mode = document.querySelector('input[name="bt-mode"]:checked')?.value || 'agent';
-  return {
+  const payload = {
     start_date: document.getElementById('bt-start-date').value,
     end_date: document.getElementById('bt-end-date').value,
     engine_mode: mode === 'agent' ? 'agent' : 'event',
@@ -367,6 +367,20 @@ function currentBacktestPayload(){
     flow_wait_valid_minutes: Number(document.getElementById('bt-flow-wait-valid-minutes').value || 180),
     sources: selectedSources(),
   };
+  if(mode !== 'agent'){
+    delete payload.decision_frequency;
+  }
+  return payload;
+}
+
+function updateBacktestModeControls(){
+  const mode = document.querySelector('input[name="bt-mode"]:checked')?.value || 'agent';
+  const decisionFrequency = document.getElementById('bt-decision-frequency');
+  if(decisionFrequency){
+    const disabled = mode !== 'agent';
+    decisionFrequency.disabled = disabled;
+    decisionFrequency.title = disabled ? 'Decision frequency only applies to Agent mode.' : '';
+  }
 }
 
 function updateBacktestPager(totalCount, count){
@@ -577,6 +591,10 @@ function setBacktestPage(nextPage){
 }
 
 document.getElementById('backtest-form').addEventListener('submit', queueBacktest);
+document.querySelectorAll('input[name="bt-mode"]').forEach(node => {
+  node.addEventListener('change', updateBacktestModeControls);
+});
+updateBacktestModeControls();
 refreshBacktests();
 </script>
 {% endblock %}
