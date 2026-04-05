@@ -43,6 +43,28 @@ open http://localhost:6888
 - `run_local.sh` 现在会把真实 `HOST/PORT` 传给 web 进程，应用启动日志不再写死 `6888`
 - 停止时直接 `Ctrl+C`
 
+## 轻量 Harness
+
+当前仓库已经按轻量 harness engineering 方式整理了一层“可复现、可排障、可交接”的运行外壳：
+
+- `memory.md`
+  - 运行记忆与排障摘要，统一按 `Asia/Shanghai (UTC+8)` 记录
+- `handoff.md`
+  - 交接日志与关键实现背景
+- `AGENTS.md`
+  - 给 agent/协作者的仓库工作契约与验证要求
+- `scripts/preflight_live.py`
+  - live 前置检查：DB、worker、supervisor、LLM、source freshness、control key、broker
+- `scripts/replay_live_cycle.py`
+  - 安全诊断重放工具；默认只做 preview，不触发完整 LLM 决策
+- `scripts/run_golden_eval.py`
+  - 从 `tests/golden/manifest.json` 运行固定研究样本
+
+这套东西不是重型 agent platform，但足够覆盖 FionaTrade 当前最需要的 3 件事：
+- 先判断系统是否真的可交易
+- 再复现单次 cycle 为什么下单/没下单
+- 最后用固定样本防止回测和 live 越改越偏
+
 ## 最近复盘
 
 - `reports/live_postmortem_2026-03-30_2026-03-31.md`

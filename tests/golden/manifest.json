@@ -1,0 +1,31 @@
+{
+  "description": "Minimal golden evaluation set for FionaTrade. These are not immutable benchmarks yet; they are stable operator reference cases for regression checking.",
+  "cases": [
+    {
+      "id": "agent-30d-default",
+      "label": "Agent live-like 30d default window",
+      "params": {
+        "engine_mode": "agent",
+        "start_date": "2026-03-01",
+        "end_date": "2026-03-31",
+        "tickers": ["AAPL", "NVDA", "MSFT", "JPM", "XOM"],
+        "decision_frequency": 1,
+        "initial_capital": 100000,
+        "max_position_pct": 0.1,
+        "use_llm": true
+      }
+    },
+    {
+      "id": "event-earnings-llm",
+      "label": "Legacy event earnings profile with LLM",
+      "params": {
+        "engine_mode": "event",
+        "start_date": "2026-03-01",
+        "end_date": "2026-03-31",
+        "event_profile": "earnings_only",
+        "use_llm": true,
+        "min_confidence": 50
+      }
+    }
+  ]
+}
