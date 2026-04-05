@@ -143,6 +143,7 @@ class LiveTradingService:
             if not tickers:
                 summary = {"cycle_id": cycle_id, "error": "No tickers configured for live trading"}
                 self._finish_run_record(
+                    session=session,
                     run_id=run.id,
                     status="COMPLETED",
                     stage="no_tickers",
@@ -235,6 +236,7 @@ class LiveTradingService:
                     "live_allowed_sources": sorted(allowed_sources),
                 }
                 self._finish_run_record(
+                    session=session,
                     run_id=run.id,
                     status="COMPLETED",
                     stage="warmup",
@@ -277,6 +279,7 @@ class LiveTradingService:
                         "live_allowed_sources": sorted(allowed_sources),
                     }
                     self._finish_run_record(
+                        session=session,
                         run_id=run.id,
                         status="COMPLETED",
                         stage="skipped_no_tradeable_event",
@@ -325,6 +328,7 @@ class LiveTradingService:
                 if not dry_run:
                     summary = {"cycle_id": cycle_id, "error": f"Broker error: {exc}", "run_key": run.run_key}
                     self._finish_run_record(
+                        session=session,
                         run_id=run.id,
                         status="ERROR",
                         stage="broker_error",
@@ -484,6 +488,7 @@ class LiveTradingService:
             )
             session.commit()
             self._finish_run_record(
+                session=session,
                 run_id=run.id,
                 status="COMPLETED",
                 stage="completed",
@@ -511,6 +516,7 @@ class LiveTradingService:
             if run is not None:
                 failure_summary = {"cycle_id": cycle_id, "error": str(exc), "run_key": run.run_key}
                 self._finish_run_record(
+                    session=session,
                     run_id=run.id,
                     status="FAILED",
                     stage="failed",
@@ -520,6 +526,7 @@ class LiveTradingService:
                     current_agent=None,
                 )
                 self._persist_runtime_event(
+                    session=session,
                     run_id=run.id,
                     message=f"Cycle {cycle_id} failed: {exc}",
                     level="error",
@@ -540,7 +547,7 @@ class LiveTradingService:
             _LIVE_CYCLE_MUTEX.release()
 
     def _update_run(self, session: Session, run: WorkerRun, **fields: Any) -> None:
-        self._persist_run_update(run_id=run.id, **fields)
+        self._persist_run_update(session=session, run_id=run.id, **fields)
 
     def _emit_event(
         self,
@@ -555,6 +562,7 @@ class LiveTradingService:
         payload: dict[str, Any] | None = None,
     ) -> None:
         self._persist_runtime_event(
+            session=session,
             run_id=run.id,
             message=message,
             level=level,
@@ -580,6 +588,7 @@ class LiveTradingService:
         normalized_payload = dict(payload or {})
         normalized_payload.setdefault("event", stage)
         self._persist_runtime_event(
+            session=session,
             run_id=run.id,
             message=message,
             level=level,
@@ -589,26 +598,39 @@ class LiveTradingService:
             payload=normalized_payload,
         )
 
-    def _persist_run_update(self, *, run_id: int | None, **fields: Any) -> None:
-        if not run_id:
-            return
+    def _runtime_write(self, *, session: Session | None, operation, on_error: str) -> None:
+        if session is not None:
+            try:
+                with session.begin_nested():
+                    operation(session)
+                return
+            except Exception as exc:
+                logger.warning("%s (same-session): %s", on_error, exc)
         try:
             with db_session() as runtime_session:
-                db_run = runtime_session.get(WorkerRun, run_id)
-                if db_run is None:
-                    return
-                self.runtime.update_run(runtime_session, db_run, **fields)
+                operation(runtime_session)
         except Exception as exc:
-            logger.warning(
-                "[live] runtime run update failed for run_id=%s stage=%s: %s",
-                run_id,
-                fields.get("stage"),
-                exc,
-            )
+            logger.warning("%s: %s", on_error, exc)
+
+    def _persist_run_update(self, *, session: Session | None = None, run_id: int | None, **fields: Any) -> None:
+        if not run_id:
+            return
+        def _write(runtime_session: Session) -> None:
+            db_run = runtime_session.get(WorkerRun, run_id)
+            if db_run is None:
+                return
+            self.runtime.update_run(runtime_session, db_run, **fields)
+
+        self._runtime_write(
+            session=session,
+            operation=_write,
+            on_error=f"[live] runtime run update failed for run_id={run_id} stage={fields.get('stage')}",
+        )
 
     def _finish_run_record(
         self,
         *,
+        session: Session | None = None,
         run_id: int | None,
         status: str,
         summary: dict[str, Any] | None = None,
@@ -617,30 +639,29 @@ class LiveTradingService:
     ) -> None:
         if not run_id:
             return
-        try:
-            with db_session() as runtime_session:
-                db_run = runtime_session.get(WorkerRun, run_id)
-                if db_run is None:
-                    return
-                self.runtime.finish_run(
-                    runtime_session,
-                    db_run,
-                    status=status,
-                    summary=summary,
-                    error_message=error_message,
-                    **fields,
-                )
-        except Exception as exc:
-            logger.warning(
-                "[live] runtime finish_run failed for run_id=%s status=%s: %s",
-                run_id,
-                status,
-                exc,
+        def _write(runtime_session: Session) -> None:
+            db_run = runtime_session.get(WorkerRun, run_id)
+            if db_run is None:
+                return
+            self.runtime.finish_run(
+                runtime_session,
+                db_run,
+                status=status,
+                summary=summary,
+                error_message=error_message,
+                **fields,
             )
+
+        self._runtime_write(
+            session=session,
+            operation=_write,
+            on_error=f"[live] runtime finish_run failed for run_id={run_id} status={status}",
+        )
 
     def _persist_runtime_event(
         self,
         *,
+        session: Session | None = None,
         run_id: int | None,
         message: str,
         level: str = "info",
@@ -651,30 +672,27 @@ class LiveTradingService:
     ) -> None:
         if not run_id:
             return
-        try:
-            with db_session() as runtime_session:
-                db_run = runtime_session.get(WorkerRun, run_id)
-                if db_run is None:
-                    return
-                self.runtime.add_event(
-                    runtime_session,
-                    "live_cycle",
-                    message,
-                    run=db_run,
-                    level=level,
-                    stage=stage,
-                    ticker=ticker,
-                    agent=agent,
-                    payload=payload,
-                )
-        except Exception as exc:
-            logger.warning(
-                "[live] runtime event write failed for run_id=%s stage=%s ticker=%s: %s",
-                run_id,
-                stage,
-                ticker,
-                exc,
+        def _write(runtime_session: Session) -> None:
+            db_run = runtime_session.get(WorkerRun, run_id)
+            if db_run is None:
+                return
+            self.runtime.add_event(
+                runtime_session,
+                "live_cycle",
+                message,
+                run=db_run,
+                level=level,
+                stage=stage,
+                ticker=ticker,
+                agent=agent,
+                payload=payload,
             )
+
+        self._runtime_write(
+            session=session,
+            operation=_write,
+            on_error=f"[live] runtime event write failed for run_id={run_id} stage={stage} ticker={ticker}",
+        )
 
     def _get_tickers(self) -> list[str]:
         tickers = list(self.settings.live_trading_tickers)
@@ -685,6 +703,7 @@ class LiveTradingService:
     def _persist_progress_update(
         self,
         *,
+        session: Session | None = None,
         run_id: int | None,
         ticker: str,
         cycle_id: str,
@@ -693,6 +712,7 @@ class LiveTradingService:
         if not run_id:
             return
         self._persist_run_update(
+            session=session,
             run_id=run_id,
             stage=update.get("stage", "agent_graph"),
             current_ticker=ticker,
@@ -700,6 +720,7 @@ class LiveTradingService:
         )
         if update.get("message"):
             self._persist_runtime_event(
+                session=session,
                 run_id=run_id,
                 message=str(update["message"]),
                 ticker=ticker,
@@ -1458,6 +1479,7 @@ class LiveTradingService:
             if run is None:
                 return
             self._persist_progress_update(
+                session=session,
                 run_id=run.id,
                 ticker=ticker,
                 cycle_id=cycle_id,
@@ -1521,6 +1543,7 @@ class LiveTradingService:
         used_cached_fund = bool(state.get("used_cached_fundamentals", graph_context.get("used_cached_fundamentals", False)))
         if run is not None:
             self._persist_progress_update(
+                session=session,
                 run_id=run.id,
                 ticker=ticker,
                 cycle_id=cycle_id,
@@ -1540,6 +1563,7 @@ class LiveTradingService:
             )[:1000]
             if run is not None:
                 self._persist_runtime_event(
+                    session=session,
                     run_id=run.id,
                     message=(
                         f"{ticker}: confidence gate blocked {prior_action} "
@@ -1568,6 +1592,7 @@ class LiveTradingService:
             )[:1000]
             if run is not None:
                 self._persist_runtime_event(
+                    session=session,
                     run_id=run.id,
                     message=f"{ticker}: event gate blocked {prior_action} (missing trigger_event_id)",
                     level="info",
@@ -1594,6 +1619,7 @@ class LiveTradingService:
             )[:1000]
             if run is not None:
                 self._persist_runtime_event(
+                    session=session,
                     run_id=run.id,
                     message=f"{ticker}: news conflict blocked {prior_action} (tier0/1 corroboration insufficient)",
                     level="info",
@@ -2095,6 +2121,7 @@ class LiveTradingService:
     ) -> dict[str, Any]:
         if run is not None:
             self._persist_progress_update(
+                session=session,
                 run_id=run.id,
                 ticker=ticker,
                 cycle_id=cycle_id,
@@ -2157,6 +2184,7 @@ class LiveTradingService:
 
         if run is not None:
             self._persist_progress_update(
+                session=session,
                 run_id=run.id,
                 ticker=ticker,
                 cycle_id=cycle_id,
@@ -2429,6 +2457,7 @@ class LiveTradingService:
 
         if run is not None:
             self._persist_progress_update(
+                session=session,
                 run_id=run.id,
                 ticker=ticker,
                 cycle_id=cycle_id,
