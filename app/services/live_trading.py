@@ -797,17 +797,19 @@ class LiveTradingService:
         since: datetime | None,
         allowed_sources: set[str],
     ) -> dict[str, Any] | None:
+        use_quality_filter = bool(getattr(self.settings, "live_use_event_quality_filter", True))
         stmt = (
             select(Event)
             .where(
-                Event.validation_status == "VALID",
                 Event.confidence >= max(0, self._effective_live_min_confidence()),
                 Event.event_type.notin_(tuple(EXCLUDED_FROM_TRADING)),
                 Event.tickers.cast(sa.Text).ilike(f'%"{ticker.upper()}"%'),
             )
             .order_by(desc(Event.event_time), desc(Event.created_at), desc(Event.id))
-            .limit(20)
+            .limit(40 if use_quality_filter else 20)
         )
+        if not use_quality_filter:
+            stmt = stmt.where(Event.validation_status == "VALID")
         if since is not None:
             stmt = stmt.where(sa.or_(Event.event_time >= since, Event.created_at >= since))
 
@@ -818,10 +820,17 @@ class LiveTradingService:
                 .where(EventEvidence.event_id == event.id)
                 .order_by(EventEvidence.source_tier.asc(), EventEvidence.captured_at.asc(), EventEvidence.id.asc())
             ).scalars().all()
-            tradeability = self.analysis.assess_tradeability(event, session=session)
             payload = self._event_payload(event, evidences, allowed_sources=allowed_sources)
-            if payload is not None and self._is_strong_tradeable_event(event, tradeability):
-                return payload
+            if payload is None:
+                continue
+            if use_quality_filter:
+                if not self._passes_event_quality_gate(session, event):
+                    continue
+            else:
+                tradeability = self.analysis.assess_tradeability(event, session=session)
+                if not self._is_strong_tradeable_event(event, tradeability):
+                    continue
+            return payload
         return None
 
     def _event_payload(
@@ -1415,6 +1424,15 @@ class LiveTradingService:
         if int(tradeability.get("ticker_specific_hits", 0) or 0) >= 1:
             return True
         return False
+
+    def _passes_event_quality_gate(self, session: Session, event: Event) -> bool:
+        if not bool(getattr(self.settings, "live_use_event_quality_filter", True)):
+            return True
+        quality = self.analysis.assess_event_quality(event, session=session)
+        if quality.get("error"):
+            return bool(getattr(self.settings, "live_event_quality_fail_open", False))
+        score = int(quality.get("quality_score", 0) or 0)
+        return score >= int(getattr(self.settings, "live_event_quality_min_score", 55))
 
     def _get_agent_graph(self) -> AgentGraph:
         if self._agent_graph is None:

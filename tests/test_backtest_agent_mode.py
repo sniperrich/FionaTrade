@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.routes import backtest_options, queue_backtest
-from app.backtest_engine.agent_backtest import AgentBacktestEngine, AgentBacktestResult, BTDecision, BTTrade
+from app.backtest_engine.agent_backtest import AgentBacktestEngine, AgentBacktestResult, BTCandidateEvent, BTDecision, BTTrade
 from app.backtest_engine.service import BacktestEngineService
 from app.core.config import DEFAULT_LIVE_ALLOWED_SOURCES
 from app.db.models import BacktestTrade, Bar1m, Event, EventEvidence, RawItem, WorkerCommand
@@ -120,6 +120,7 @@ def test_backtest_options_default_to_agent_mode(session, settings) -> None:
 
     assert payload["defaults"]["engine_mode"] == "agent"
     assert payload["defaults"]["decision_frequency"] == 1
+    assert payload["defaults"]["agent_entry_timing"] == "event_time"
     assert payload["defaults"]["tickers"] == list(settings.live_trading_tickers)
     assert payload["defaults"]["intraday_flatten"] is False
     assert payload["defaults"]["sources"] == [source for source in DEFAULT_LIVE_ALLOWED_SOURCES if source not in {"yahoo", "yahoo_finance"}]
@@ -136,6 +137,7 @@ def test_queue_backtest_defaults_to_agent_mode(session, settings) -> None:
     command = session.query(WorkerCommand).order_by(WorkerCommand.id.desc()).first()
     assert command is not None
     assert command.payload_json["engine_mode"] == "agent"
+    assert command.payload_json["agent_entry_timing"] == "event_time"
     assert command.payload_json["tickers"] == list(settings.live_trading_tickers)
     assert command.payload_json["intraday_flatten"] is False
     assert command.payload_json["sources"] == [source for source in DEFAULT_LIVE_ALLOWED_SOURCES if source not in {"yahoo", "yahoo_finance"}]
@@ -148,6 +150,8 @@ def test_queue_backtest_parses_boolean_strings_and_rejects_bad_numeric_payload(s
             "end_date": "2026-02-01",
             "use_signal_validation": "false",
             "flow_confirmation_enabled": "true",
+            "event_quality_min_score": "65",
+            "event_quality_fail_open": "false",
         },
         session=session,
         settings=settings,
@@ -156,6 +160,8 @@ def test_queue_backtest_parses_boolean_strings_and_rejects_bad_numeric_payload(s
     command = session.query(WorkerCommand).filter(WorkerCommand.id == response["command_id"]).one()
     assert command.payload_json["use_signal_validation"] is False
     assert command.payload_json["flow_confirmation_enabled"] is True
+    assert command.payload_json["event_quality_min_score"] == 65
+    assert command.payload_json["event_quality_fail_open"] is False
 
     with pytest.raises(HTTPException) as excinfo:
         queue_backtest(
@@ -282,6 +288,7 @@ def test_agent_backtest_intraday_flatten_closes_same_day(session, settings, monk
             "max_position_pct": 0.1,
             "slippage_pct": 0.0,
             "intraday_flatten": True,
+            "agent_entry_timing": "daily_next_open",
         },
     )
 
@@ -292,6 +299,114 @@ def test_agent_backtest_intraday_flatten_closes_same_day(session, settings, monk
     sell_trade = next(trade for trade in result.trades if trade.side == "SELL")
     assert buy_trade.date == date(2026, 1, 6)
     assert sell_trade.date == date(2026, 1, 6)
+
+
+def test_agent_backtest_event_time_enters_same_session_after_news(session, settings, monkeypatch) -> None:
+    market_event_ts = datetime(2026, 1, 5, 15, 15, tzinfo=timezone.utc)  # 10:15 ET
+
+    def _fake_graph_run(_self, _session, _ticker, **_kwargs):
+        return {
+            "final_action": "BUY",
+            "final_position_pct": 0.1,
+            "final_reasoning": "ticker-specific catalyst",
+            "agent_signals": {
+                "news": {"signal": "BUY"},
+                "risk_manager": {"signal": "BUY", "metadata": {"approved": True, "max_position_pct": 0.1}},
+            },
+        }
+
+    monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+
+    raw = _raw_item(
+        now=market_event_ts + timedelta(minutes=5),
+        source="reuters",
+        ticker="AAPL",
+        title="AAPL wins intraday contract and raises guidance",
+        item_hash="hash-aapl-event-time",
+    )
+    raw.published_at = market_event_ts
+    raw.ingested_at = market_event_ts + timedelta(minutes=1)
+    session.add(raw)
+    session.flush()
+    event = Event(
+        event_type="contract_award",
+        entities=["AAPL"],
+        tickers=["AAPL"],
+        severity=90,
+        event_time=market_event_ts,
+        confidence=95,
+        validation_status="WATCH",
+        summary="AAPL wins intraday contract and raises guidance",
+    )
+    session.add(event)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source="reuters",
+            source_tier=1,
+            captured_at=market_event_ts + timedelta(minutes=1),
+            summary=raw.title,
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(ticker="SPY", ts=datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc), open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="SPY", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=datetime(2026, 1, 5, 15, 16, tzinfo=timezone.utc), open=101, high=102, low=100, close=101.5, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=103, high=104, low=102, close=103.5, volume=1000, source="test"),
+        ]
+    )
+    session.flush()
+    monkeypatch.setattr(
+        "app.backtest_engine.agent_backtest.AgentBacktestEngine._load_event_time_candidates",
+        lambda *_args, **_kwargs: [
+            BTCandidateEvent(
+                ticker="AAPL",
+                as_of=market_event_ts,
+                event=event,
+                trigger_event={
+                    "id": int(event.id),
+                    "event_type": "contract_award",
+                    "confidence": 95,
+                    "summary": "AAPL wins intraday contract and raises guidance",
+                    "high_quality_source_count": 1,
+                    "source_count": 1,
+                    "sources": ["reuters"],
+                    "quality": "HIGH",
+                    "quality_score": 85,
+                    "quality_reason": "ticker-specific, fresh, and actionable",
+                },
+            )
+        ],
+    )
+
+    result = AgentBacktestEngine(settings).run(
+        session,
+        params={
+            "tickers": ["AAPL"],
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-05",
+            "initial_capital": 100_000,
+            "max_position_pct": 0.1,
+            "slippage_pct": 0.0,
+            "intraday_flatten": True,
+            "agent_entry_timing": "event_time",
+            "sources": ["reuters"],
+            "use_event_quality_filter": True,
+            "event_quality_min_score": 55,
+            "event_quality_fail_open": False,
+        },
+    )
+
+    buy_trade = next(trade for trade in result.trades if trade.side == "BUY")
+    sell_trade = next(trade for trade in result.trades if trade.side == "SELL")
+    assert buy_trade.date == date(2026, 1, 5)
+    assert sell_trade.date == date(2026, 1, 5)
+    assert buy_trade.ts == datetime(2026, 1, 5, 15, 16, tzinfo=timezone.utc)
+    assert sell_trade.ts == datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc)
 
 
 def test_agent_backtest_passes_high_quality_sources_to_graph(session, settings, monkeypatch) -> None:
@@ -339,6 +454,7 @@ def test_agent_backtest_passes_high_quality_sources_to_graph(session, settings, 
             "end_date": "2026-01-05",
             "decision_frequency": 1,
             "sources": ["benzinga", "reuters", "yahoo_finance"],
+            "agent_entry_timing": "daily_next_open",
         },
     )
 
@@ -384,6 +500,7 @@ def test_agent_backtest_skips_graph_without_strong_tradeable_event(session, sett
             "end_date": "2026-01-05",
             "decision_frequency": 1,
             "sources": ["reuters"],
+            "agent_entry_timing": "daily_next_open",
         },
     )
 
@@ -391,6 +508,146 @@ def test_agent_backtest_skips_graph_without_strong_tradeable_event(session, sett
     assert result.total_trades == 0
     assert result.decisions[0].action == "HOLD"
     assert "strong_news_gate" in result.decisions[0].reasoning
+
+
+def test_agent_backtest_skips_graph_when_llm_quality_gate_rejects_event(session, settings, monkeypatch) -> None:
+    now = datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc)
+    graph_called = False
+
+    def _fake_graph_run(*_args, **_kwargs):
+        nonlocal graph_called
+        graph_called = True
+        raise AssertionError("graph should not run when event quality gate rejects the trigger")
+
+    monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+    monkeypatch.setattr(
+        "app.backtest_engine.agent_backtest.AnalysisService.assess_tradeability",
+        lambda *_args, **_kwargs: {
+            "tradeable": True,
+            "strong_sources": 1,
+            "hard_event_hits": 1,
+            "ticker_specific_hits": 1,
+        },
+    )
+    monkeypatch.setattr(
+        "app.backtest_engine.agent_backtest.AnalysisService.assess_event_quality",
+        lambda *_args, **_kwargs: {
+            "quality": "LOW",
+            "quality_score": 25,
+            "reason": "mixed or weak evidence",
+        },
+    )
+
+    session.add_all(
+        [
+            Bar1m(ticker="SPY", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=100, high=101, low=99, close=100, volume=1000, source="test"),
+        ]
+    )
+    session.flush()
+    _strong_event(session, now=now, ticker="AAPL")
+
+    result = AgentBacktestEngine(settings).run(
+        session,
+        params={
+            "tickers": ["AAPL"],
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-05",
+            "decision_frequency": 1,
+            "sources": ["reuters"],
+            "use_event_quality_filter": True,
+            "event_quality_min_score": 55,
+            "event_quality_fail_open": False,
+            "agent_entry_timing": "daily_next_open",
+        },
+    )
+
+    assert graph_called is False
+    assert result.total_trades == 0
+    assert result.decisions[0].action == "HOLD"
+    assert "strong_news_gate" in result.decisions[0].reasoning
+
+
+def test_agent_backtest_llm_quality_gate_allows_watch_event_without_tradeability_rule(session, settings, monkeypatch) -> None:
+    now = datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc)
+
+    def _fake_graph_run(*_args, **_kwargs):
+        return {
+            "final_action": "BUY",
+            "final_position_pct": 0.1,
+            "final_reasoning": "high quality catalyst",
+            "agent_signals": {
+                "news": {"signal": "BUY"},
+                "risk_manager": {"signal": "BUY", "metadata": {"approved": True, "max_position_pct": 0.1}},
+            },
+        }
+
+    monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+
+    raw = _raw_item(
+        now=now,
+        source="reuters",
+        ticker="AAPL",
+        title="AAPL wins major contract and raises guidance",
+        item_hash="hash-aapl-watch",
+    )
+    session.add(raw)
+    session.flush()
+    event = Event(
+        event_type="contract_award",
+        entities=["AAPL"],
+        tickers=["AAPL"],
+        severity=85,
+        event_time=now - timedelta(minutes=5),
+        confidence=90,
+        validation_status="WATCH",
+        summary="AAPL wins major contract and raises guidance",
+    )
+    session.add(event)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source="reuters",
+            source_tier=1,
+            captured_at=now - timedelta(minutes=4),
+            summary=raw.title,
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(ticker="SPY", ts=now, open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=now, open=100, high=101, low=99, close=100, volume=1000, source="test"),
+        ]
+    )
+    session.flush()
+
+    monkeypatch.setattr(
+        "app.backtest_engine.agent_backtest.AnalysisService.assess_event_quality",
+        lambda *_args, **_kwargs: {
+            "quality": "HIGH",
+            "quality_score": 85,
+            "reason": "ticker-specific, fresh, and actionable",
+        },
+    )
+
+    result = AgentBacktestEngine(settings).run(
+        session,
+        params={
+            "tickers": ["AAPL"],
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-05",
+            "decision_frequency": 1,
+            "sources": ["reuters"],
+            "use_event_quality_filter": True,
+            "event_quality_min_score": 55,
+            "event_quality_fail_open": False,
+        },
+    )
+
+    assert result.decisions[0].action == "BUY"
 
 
 def test_daily_realized_pnl_uses_closed_trade_pnl_not_cash_flow(settings) -> None:

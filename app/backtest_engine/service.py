@@ -278,6 +278,20 @@ class BacktestEngineService:
             intraday_time = dt_time(16, 0)
         return datetime.combine(day, intraday_time)
 
+    @staticmethod
+    def _trade_ts(trade: object, *, is_exit: bool) -> datetime:
+        if isinstance(trade, dict):
+            raw_ts = trade.get("ts")
+            trade_day = trade.get("date")
+            reason = str(trade.get("reason", "") or "")
+        else:
+            raw_ts = getattr(trade, "ts", None)
+            trade_day = getattr(trade, "date", None)
+            reason = str(getattr(trade, "reason", "") or "")
+        if raw_ts is not None:
+            return ensure_utc(raw_ts)
+        return ensure_utc(BacktestEngineService._build_run_ts(trade_day, is_exit=is_exit, reason=reason))
+
     @classmethod
     def _pair_agent_trade_legs(cls, trades: list[object]) -> list[dict[str, Any]]:
         open_legs: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
@@ -300,6 +314,7 @@ class BacktestEngineService:
                         "shares": shares,
                         "price": price,
                         "date": trade_day,
+                        "ts": getattr(trade, "ts", None),
                         "reason": reason,
                     }
                 )
@@ -329,9 +344,9 @@ class BacktestEngineService:
                         "ticker": ticker,
                         "side": entry_side,
                         "qty": round(matched, 4),
-                        "entry_ts": cls._build_run_ts(entry["date"], is_exit=False).isoformat(),
+                        "entry_ts": cls._trade_ts(entry, is_exit=False).isoformat(),
                         "entry_price": entry_price,
-                        "exit_ts": cls._build_run_ts(trade_day, is_exit=True, reason=reason).isoformat(),
+                        "exit_ts": cls._trade_ts(trade, is_exit=True).isoformat(),
                         "exit_price": price,
                         "pnl": round(pnl, 2),
                         "event_type": "",
@@ -374,6 +389,9 @@ class BacktestEngineService:
         )
         normalized_params = dict(params)
         normalized_params["engine_mode"] = "agent"
+        normalized_params["agent_entry_timing"] = str(params.get("agent_entry_timing") or "event_time").strip().lower() or "event_time"
+        if normalized_params["agent_entry_timing"] not in {"event_time", "daily_next_open"}:
+            normalized_params["agent_entry_timing"] = "event_time"
         normalized_params["tickers"] = tickers
         normalized_params["decision_frequency"] = max(1, int(params.get("decision_frequency", 1) or 1))
         normalized_params["initial_capital"] = float(params.get("initial_capital", self.settings.initial_nav))
@@ -433,8 +451,12 @@ class BacktestEngineService:
             "phase_total": total_decision_steps,
             "phase_pct": 0.0,
             "phase_detail": (
-                f"Running full agent graph for {len(tickers)} tickers "
-                f"across {max(1, len(trading_days[::decision_frequency]))} decision days"
+                (
+                    f"Running event-time agent graph for {len(tickers)} tickers"
+                    if normalized_params["agent_entry_timing"] == "event_time"
+                    else f"Running full agent graph for {len(tickers)} tickers "
+                    f"across {max(1, len(trading_days[::decision_frequency]))} decision days"
+                )
             ),
             "progress_current": 0,
             "progress_total": total_decision_steps,
@@ -480,11 +502,16 @@ class BacktestEngineService:
         equity_curve = []
         for point in result.equity_curve or []:
             point_date = point.get("date")
-            if not point_date:
+            point_ts = point.get("ts")
+            if not point_date and not point_ts:
                 continue
+            if point_ts:
+                ts_iso = ensure_utc(datetime.fromisoformat(str(point_ts))).isoformat()
+            else:
+                ts_iso = self._build_run_ts(point_date, is_exit=True).isoformat()
             equity_curve.append(
                 {
-                    "ts": self._build_run_ts(point_date, is_exit=True).isoformat(),
+                    "ts": ts_iso,
                     "equity": float(point.get("equity", 0.0) or 0.0),
                 }
             )
@@ -493,6 +520,12 @@ class BacktestEngineService:
 
         pnl_list = [float(row.get("pnl", 0.0) or 0.0) for row in trade_log]
         metrics = self._compute_metrics(result.initial_capital, equity_curve, pnl_list)
+        prior_metrics = dict(run.metrics or {})
+        completed_steps = max(
+            1,
+            int(prior_metrics.get("progress_total", 0) or 0),
+            len(result.decisions) if result.decisions else 0,
+        )
         metrics.update(
             {
                 "engine_mode": "agent",
@@ -502,6 +535,7 @@ class BacktestEngineService:
                 "events_considered": len(result.decisions),
                 "agent_decisions": len(result.decisions),
                 "decision_frequency": normalized_params["decision_frequency"],
+                "agent_entry_timing": normalized_params["agent_entry_timing"],
                 "intraday_flatten": normalized_params["intraday_flatten"],
                 "tickers": tickers,
                 "selected_sources": normalized_params["sources"],
@@ -510,13 +544,13 @@ class BacktestEngineService:
                 "winning_trades": result.winning_trades,
                 "losing_trades": result.losing_trades,
                 "stop_losses": result.stop_losses,
-                "progress_current": total_decision_steps,
-                "progress_total": total_decision_steps,
+                "progress_current": completed_steps,
+                "progress_total": completed_steps,
                 "progress_pct": 100.0,
                 "phase": "completed",
                 "phase_label": self._BACKTEST_PHASE_LABELS["completed"],
-                "phase_current": total_decision_steps,
-                "phase_total": total_decision_steps,
+                "phase_current": completed_steps,
+                "phase_total": completed_steps,
                 "phase_pct": 100.0,
                 "phase_detail": "Agent backtest completed",
                 "last_progress_at": utc_now().isoformat(),

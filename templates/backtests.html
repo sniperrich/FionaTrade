@@ -88,6 +88,19 @@
       </div>
       <div class="form-row mb8">
         <div class="form-group">
+          <label>Agent Entry Timing</label>
+          <select id="bt-agent-entry-timing">
+            <option value="event_time" {% if backtest_defaults.agent_entry_timing == 'event_time' %}selected{% endif %}>Event Time (news -> next tradable minute)</option>
+            <option value="daily_next_open" {% if backtest_defaults.agent_entry_timing == 'daily_next_open' %}selected{% endif %}>Daily Next Open (legacy)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="text-muted">Timing Note</label>
+          <div class="text-sm text-muted mt8">`Event Time` is the correct mode for intraday news-reaction research. `Daily Next Open` is retained only for comparison with the old daily aggregation path.</div>
+        </div>
+      </div>
+      <div class="form-row mb8">
+        <div class="form-group">
           <label>Initial Capital</label>
           <input type="number" id="bt-initial-capital" min="1000" step="1000" value="{{ backtest_defaults.initial_capital }}" />
         </div>
@@ -112,7 +125,7 @@
           <label class="text-sm"><input type="checkbox" id="bt-intraday-flatten" {% if backtest_defaults.intraday_flatten %}checked{% endif %} /> Flatten at same-day close</label>
           <label class="text-sm"><input type="checkbox" id="bt-use-validation" checked /> Use signal validation</label>
           <label class="text-sm"><input type="checkbox" id="bt-use-tradeability" checked /> Use tradeability filter</label>
-          <label class="text-sm"><input type="checkbox" id="bt-use-quality-filter" /> Use event quality filter</label>
+          <label class="text-sm"><input type="checkbox" id="bt-use-quality-filter" {% if backtest_defaults.use_event_quality_filter %}checked{% endif %} /> Use event quality filter</label>
           <label class="text-sm"><input type="checkbox" id="bt-flow-enabled" {% if backtest_defaults.flow_confirmation_enabled %}checked{% endif %} /> Flow confirmation enabled</label>
           <label class="text-sm"><input type="checkbox" id="bt-flow-soft-gate" {% if backtest_defaults.flow_confirmation_soft_gate %}checked{% endif %} /> Flow soft gate + weak-flow breakout wait</label>
         </div>
@@ -355,6 +368,7 @@ function currentBacktestPayload(){
     use_llm: mode === 'llm',
     tickers: selectedTickers(),
     decision_frequency: Number(document.getElementById('bt-decision-frequency').value || 1),
+    agent_entry_timing: document.getElementById('bt-agent-entry-timing').value || 'event_time',
     initial_capital: Number(document.getElementById('bt-initial-capital').value || 100000),
     max_position_pct: Number(document.getElementById('bt-max-position-pct').value || 0.1),
     intraday_flatten: document.getElementById('bt-intraday-flatten').checked,
@@ -378,10 +392,16 @@ function currentBacktestPayload(){
 function updateBacktestModeControls(){
   const mode = document.querySelector('input[name="bt-mode"]:checked')?.value || 'agent';
   const decisionFrequency = document.getElementById('bt-decision-frequency');
+  const agentEntryTiming = document.getElementById('bt-agent-entry-timing');
   if(decisionFrequency){
     const disabled = mode !== 'agent';
     decisionFrequency.disabled = disabled;
     decisionFrequency.title = disabled ? 'Decision frequency only applies to Agent mode.' : '';
+  }
+  if(agentEntryTiming){
+    const disabled = mode !== 'agent';
+    agentEntryTiming.disabled = disabled;
+    agentEntryTiming.title = disabled ? 'Agent entry timing only applies to Agent mode.' : '';
   }
 }
 

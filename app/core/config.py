@@ -218,6 +218,11 @@ class Settings(BaseSettings):
     live_max_position_pct: float = 0.10
     # Live execution confidence gate; BUY/SHORT/SELL below this are downgraded to HOLD.
     live_min_confidence: int = 50
+    # After source whitelist and rule-based tradeability, use the LLM event-quality
+    # classifier as the final news-entry gate for live trading.
+    live_use_event_quality_filter: bool = True
+    live_event_quality_min_score: int = 55
+    live_event_quality_fail_open: bool = False
     # Allow order placement during pre-market session (default: False)
     live_allow_premarket: bool = False
     # Default action when disabling live trading from control plane.

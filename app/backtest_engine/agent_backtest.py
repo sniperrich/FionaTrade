@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta, timezone
+from heapq import heappop, heappush
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -25,6 +26,7 @@ from app.analysis.service import AnalysisService
 from app.analysis.taxonomy import normalize_source_name
 from app.core.config import Settings
 from app.core.logging import get_app_logger
+from app.core.utils import ensure_utc
 from app.db.models import Bar1m, Event, EventEvidence
 
 logger = get_app_logger()
@@ -90,6 +92,7 @@ class BTPosition:
     avg_entry: float
     side: str  # LONG or SHORT
     entry_date: date
+    entry_ts: datetime | None = None
     stop_loss_pct: float = 0.03
 
 
@@ -102,6 +105,7 @@ class BTTrade:
     price: float
     notional: float
     reason: str
+    ts: datetime | None = None
 
 
 @dataclass
@@ -112,6 +116,36 @@ class BTDecision:
     position_pct: float
     reasoning: str
     agent_signals: dict
+    ts: datetime | None = None
+
+
+@dataclass
+class BTCandidateEvent:
+    ticker: str
+    as_of: datetime
+    event: Event
+    trigger_event: dict[str, Any]
+
+
+@dataclass
+class BTScheduledEntry:
+    ticker: str
+    action: str
+    pos_pct: float
+    exec_ts: datetime
+    exec_price: float
+    decision_ts: datetime
+    trigger_event_id: int
+    decision: BTDecision
+    stop_loss_pct: float
+
+
+@dataclass
+class BTScheduledExit:
+    ticker: str
+    exec_ts: datetime
+    price: float
+    reason: str
 
 
 @dataclass
@@ -182,6 +216,7 @@ class AgentBacktestEngine:
             end_date: "YYYY-MM-DD" (default: "2026-02-27")
             initial_capital: float (default: 100000)
             decision_frequency: int trading days between decisions (default: 3)
+            agent_entry_timing: "event_time" or "daily_next_open" (default: "event_time")
             max_position_pct: float max per-ticker position (default: 0.15)
             slippage_pct: float slippage per trade (default: 0.0005 = 0.05%)
             stop_loss_pct: float default stop-loss (default: 0.07 = 7%)
@@ -196,6 +231,18 @@ class AgentBacktestEngine:
         slippage_pct = float(p.get("slippage_pct", 0.0005))
         stop_loss_pct = float(p.get("stop_loss_pct", 0.07))
         intraday_flatten = bool(p.get("intraday_flatten", getattr(self.settings, "backtest_intraday_flatten", False)))
+        use_event_quality_filter = bool(
+            p.get("use_event_quality_filter", getattr(self.settings, "backtest_use_event_quality_filter", True))
+        )
+        event_quality_min_score = int(
+            p.get("event_quality_min_score", getattr(self.settings, "backtest_event_quality_min_score", 55))
+        )
+        event_quality_fail_open = bool(
+            p.get("event_quality_fail_open", getattr(self.settings, "backtest_event_quality_fail_open", False))
+        )
+        agent_entry_timing = str(p.get("agent_entry_timing") or "event_time").strip().lower()
+        if agent_entry_timing not in {"event_time", "daily_next_open"}:
+            agent_entry_timing = "event_time"
         allowed_sources = sorted(
             {
                 normalize_source_name(str(source).strip().lower())
@@ -204,6 +251,23 @@ class AgentBacktestEngine:
             }
             - {"yahoo", "yahoo_finance"}
         )
+
+        if agent_entry_timing == "event_time":
+            return self._run_event_time_mode(
+                session,
+                tickers=tickers,
+                start=start,
+                end=end,
+                initial_capital=initial_capital,
+                max_pos_pct=max_pos_pct,
+                slippage_pct=slippage_pct,
+                stop_loss_pct=stop_loss_pct,
+                intraday_flatten=intraday_flatten,
+                use_event_quality_filter=use_event_quality_filter,
+                event_quality_min_score=event_quality_min_score,
+                event_quality_fail_open=event_quality_fail_open,
+                allowed_sources=allowed_sources,
+            )
 
         # Build list of trading days from bar data
         trading_days = self._get_trading_days(session, start, end, tickers[0])
@@ -337,6 +401,9 @@ class AgentBacktestEngine:
                             ticker=ticker,
                             as_of=as_of,
                             allowed_sources=allowed_sources,
+                            use_event_quality_filter=use_event_quality_filter,
+                            event_quality_min_score=event_quality_min_score,
+                            event_quality_fail_open=event_quality_fail_open,
                         )
                         if trigger_event is None:
                             _safe_print(" → HOLD 0% (strong_news_gate)")
@@ -656,6 +723,513 @@ class AgentBacktestEngine:
             decisions=all_decisions, errors=errors,
         )
 
+    def _run_event_time_mode(
+        self,
+        session: Session,
+        *,
+        tickers: list[str],
+        start: date,
+        end: date,
+        initial_capital: float,
+        max_pos_pct: float,
+        slippage_pct: float,
+        stop_loss_pct: float,
+        intraday_flatten: bool,
+        use_event_quality_filter: bool,
+        event_quality_min_score: int,
+        event_quality_fail_open: bool,
+        allowed_sources: list[str],
+    ) -> AgentBacktestResult:
+        trading_days = self._get_trading_days(session, start, end, tickers[0])
+        if not trading_days:
+            return AgentBacktestResult(
+                start_date=start, end_date=end, tickers=tickers,
+                initial_capital=initial_capital, final_equity=initial_capital,
+                total_return_pct=0.0, max_drawdown_pct=0.0,
+                total_trades=0, winning_trades=0, losing_trades=0,
+                stop_losses=0,
+                equity_curve=[],
+                trades=[],
+                decisions=[],
+                errors=["No trading days found"],
+            )
+
+        candidates = self._load_event_time_candidates(
+            session,
+            tickers=tickers,
+            start=start,
+            end=end,
+            allowed_sources=allowed_sources,
+            use_event_quality_filter=use_event_quality_filter,
+            event_quality_min_score=event_quality_min_score,
+            event_quality_fail_open=event_quality_fail_open,
+        )
+        total_decisions = max(1, len(candidates))
+        logger.info(
+            "[agent_backtest] event-time mode %d candidate events, %d tickers",
+            len(candidates),
+            len(tickers),
+        )
+        print(f"\n{'='*60}")
+        print(f"[{_ts()}] 🚀 AGENT BACKTEST START")
+        print(f"  Mode: event_time")
+        print(f"  Tickers: {', '.join(tickers)}")
+        print(f"  Period: {start} → {end} ({len(trading_days)} trading days)")
+        print(f"  Candidate events: {len(candidates)}")
+        print(f"  Capital: ${initial_capital:,.0f}")
+        print(f"{'='*60}")
+        sys.stdout.flush()
+
+        portfolio = BTPortfolio(cash=initial_capital)
+        all_trades: list[BTTrade] = []
+        all_decisions: list[BTDecision] = []
+        equity_curve: list[dict[str, Any]] = []
+        errors: list[str] = []
+        make_session = sessionmaker(
+            bind=session.get_bind(),
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+            future=True,
+        )
+        graph = AgentGraph(self.settings, session_factory=make_session)
+
+        ticker_loss_streak: dict[str, int] = {t: 0 for t in tickers}
+        processed_decisions = 0
+        peak_equity = initial_capital
+        max_drawdown = 0.0
+        pending_entries: list[tuple[datetime, int, BTScheduledEntry]] = []
+        pending_exits: list[tuple[datetime, int, BTScheduledExit]] = []
+        schedule_order = 0
+        used_session_keys: set[tuple[str, date]] = set()
+
+        start_ts = datetime.combine(start, _MARKET_OPEN, tzinfo=_NY).astimezone(timezone.utc)
+        equity_curve.append(
+            {
+                "date": str(start),
+                "ts": start_ts.isoformat(),
+                "equity": round(initial_capital, 2),
+                "cash": round(initial_capital, 2),
+                "positions": {},
+            }
+        )
+
+        def _publish_progress(detail: str) -> None:
+            if not self.progress_callback:
+                return
+            self.progress_callback(processed_decisions, total_decisions, detail)
+
+        def _append_equity_point(ts: datetime) -> None:
+            nonlocal peak_equity, max_drawdown
+            equity_now = self._portfolio_equity_at(session, portfolio, ts)
+            equity_curve.append(
+                {
+                    "date": str(ensure_utc(ts).astimezone(_NY).date()),
+                    "ts": ensure_utc(ts).isoformat(),
+                    "equity": round(equity_now, 2),
+                    "cash": round(portfolio.cash, 2),
+                    "positions": {
+                        t: {"shares": p.shares, "side": p.side, "entry": p.avg_entry}
+                        for t, p in portfolio.positions.items()
+                    },
+                }
+            )
+            peak_equity = max(peak_equity, equity_now)
+            if peak_equity > 0:
+                dd = (peak_equity - equity_now) / peak_equity
+                max_drawdown = max(max_drawdown, dd)
+
+        def _schedule_entry(entry: BTScheduledEntry) -> None:
+            nonlocal schedule_order
+            heappush(pending_entries, (entry.exec_ts, schedule_order, entry))
+            schedule_order += 1
+
+        def _schedule_exit(exit_plan: BTScheduledExit) -> None:
+            nonlocal schedule_order
+            heappush(pending_exits, (exit_plan.exec_ts, schedule_order, exit_plan))
+            schedule_order += 1
+
+        def _next_ready_ts() -> datetime | None:
+            entry_ts = pending_entries[0][0] if pending_entries else None
+            exit_ts = pending_exits[0][0] if pending_exits else None
+            if entry_ts is None:
+                return exit_ts
+            if exit_ts is None:
+                return entry_ts
+            return exit_ts if exit_ts <= entry_ts else entry_ts
+
+        def _flush_until(target_ts: datetime) -> None:
+            while True:
+                next_ts = _next_ready_ts()
+                if next_ts is None or next_ts > target_ts:
+                    break
+                entry_ts = pending_entries[0][0] if pending_entries else None
+                exit_ts = pending_exits[0][0] if pending_exits else None
+                if exit_ts is not None and (entry_ts is None or exit_ts <= entry_ts):
+                    _, _, exit_plan = heappop(pending_exits)
+                    pos = portfolio.positions.get(exit_plan.ticker)
+                    if not pos:
+                        continue
+                    pnl = (
+                        (exit_plan.price - pos.avg_entry) * pos.shares
+                        if pos.side == "LONG"
+                        else (pos.avg_entry - exit_plan.price) * pos.shares
+                    )
+                    self._close_position(
+                        portfolio,
+                        exit_plan.ticker,
+                        exit_plan.price,
+                        ensure_utc(exit_plan.exec_ts).astimezone(_NY).date(),
+                        all_trades,
+                        exit_plan.reason,
+                        exec_ts=exit_plan.exec_ts,
+                    )
+                    self._update_loss_streak(ticker_loss_streak, exit_plan.ticker, pnl)
+                    _append_equity_point(exit_plan.exec_ts)
+                    continue
+
+                _, _, entry_plan = heappop(pending_entries)
+                if entry_plan.ticker in portfolio.positions:
+                    continue
+                equity_now = self._portfolio_equity_at(session, portfolio, entry_plan.exec_ts)
+                target_pct = min(entry_plan.pos_pct, max_pos_pct)
+                trades_before = len(all_trades)
+                self._execute_decision(
+                    portfolio,
+                    entry_plan.ticker,
+                    entry_plan.action,
+                    target_pct,
+                    equity_now,
+                    entry_plan.exec_price,
+                    ensure_utc(entry_plan.exec_ts).astimezone(_NY).date(),
+                    all_trades,
+                    stop_loss_pct=entry_plan.stop_loss_pct,
+                    exec_ts=entry_plan.exec_ts,
+                )
+                if len(all_trades) == trades_before:
+                    continue
+
+                if intraday_flatten:
+                    close_bar = self._regular_close_bar_for_session_day(session, entry_plan.ticker, entry_plan.exec_ts)
+                    if close_bar is not None and ensure_utc(close_bar.ts) > ensure_utc(entry_plan.exec_ts):
+                        exit_px = float(close_bar.close)
+                        pos = portfolio.positions.get(entry_plan.ticker)
+                        if pos is not None and pos.side == "LONG":
+                            exit_px *= 1 - slippage_pct
+                        elif pos is not None and pos.side == "SHORT":
+                            exit_px *= 1 + slippage_pct
+                        _schedule_exit(
+                            BTScheduledExit(
+                                ticker=entry_plan.ticker,
+                                exec_ts=ensure_utc(close_bar.ts),
+                                price=exit_px,
+                                reason="intraday_flatten",
+                            )
+                        )
+
+        for idx, candidate in enumerate(candidates, start=1):
+            event_ts = ensure_utc(candidate.as_of)
+            _flush_until(event_ts)
+
+            detail_prefix = (
+                f"Processed {processed_decisions}/{total_decisions} agent triggers "
+                f"({idx}/{len(candidates)} · {candidate.ticker} @ {event_ts.astimezone(_NY):%Y-%m-%d %H:%M})"
+            )
+
+            entry_bar = self._bar_at_or_after(
+                session,
+                candidate.ticker,
+                event_ts + timedelta(minutes=1),
+                regular_session_only=True,
+            )
+            if entry_bar is None:
+                processed_decisions += 1
+                _publish_progress(f"{detail_prefix} · no entry bar")
+                continue
+
+            entry_ts = ensure_utc(entry_bar.ts)
+            entry_session_day = entry_ts.astimezone(_NY).date()
+            if entry_session_day < start or entry_session_day > end:
+                processed_decisions += 1
+                _publish_progress(f"{detail_prefix} · entry outside backtest window")
+                continue
+
+            session_key = (candidate.ticker, entry_session_day)
+            if session_key in used_session_keys:
+                processed_decisions += 1
+                _publish_progress(f"{detail_prefix} · duplicate ticker/session")
+                continue
+            if candidate.ticker in portfolio.positions:
+                processed_decisions += 1
+                _publish_progress(f"{detail_prefix} · existing open position")
+                continue
+
+            ticker_sector = _TICKER_SECTOR.get(candidate.ticker, "other")
+            sector_positions = [
+                t for t, p in portfolio.positions.items()
+                if t != candidate.ticker and _TICKER_SECTOR.get(t, "other") == ticker_sector
+            ]
+            if len(sector_positions) >= _MAX_SECTOR_POSITIONS:
+                processed_decisions += 1
+                _publish_progress(f"{detail_prefix} · sector limit")
+                continue
+
+            equity_now = self._portfolio_equity_at(session, portfolio, event_ts)
+            current_price = self._latest_price_at_or_before(session, candidate.ticker, event_ts, regular_session_only=True) or float(entry_bar.open)
+            pos_value = portfolio.position_value(candidate.ticker, current_price)
+            current_side = portfolio.positions[candidate.ticker].side if candidate.ticker in portfolio.positions else None
+
+            local_session = make_session()
+            try:
+                bt_context = {
+                    "portfolio_state": {
+                        "position_pct": pos_value / max(equity_now, 1.0),
+                        "daily_pnl": self._compute_daily_realized_pnl(
+                            all_trades,
+                            target_day=event_ts.astimezone(_NY).date(),
+                            ticker=candidate.ticker,
+                        ),
+                        "equity": equity_now,
+                        "current_side": current_side,
+                        "drawdown_pct": max_drawdown,
+                    },
+                    "current_position": {
+                        "side": current_side,
+                        "shares": portfolio.positions[candidate.ticker].shares if candidate.ticker in portfolio.positions else 0,
+                        "entry_price": portfolio.positions[candidate.ticker].avg_entry if candidate.ticker in portfolio.positions else 0,
+                        "entry_date": str(portfolio.positions[candidate.ticker].entry_date) if candidate.ticker in portfolio.positions else None,
+                    },
+                    "portfolio_positions": {
+                        t: {"side": p.side, "shares": p.shares, "entry": p.avg_entry}
+                        for t, p in portfolio.positions.items()
+                    },
+                    "ticker_loss_streak": ticker_loss_streak,
+                    "trigger_event_id": candidate.trigger_event["id"],
+                    "trigger_event": candidate.trigger_event,
+                    "allowed_sources": allowed_sources,
+                }
+                state = graph.run(local_session, candidate.ticker, context=bt_context, as_of=event_ts)
+            except Exception as exc:
+                errors.append(f"{candidate.ticker} {event_ts.isoformat()}: {exc}")
+                processed_decisions += 1
+                _publish_progress(f"{detail_prefix} · graph error")
+                continue
+            finally:
+                local_session.close()
+
+            action = state.get("final_action", "HOLD")
+            pos_pct = float(state.get("final_position_pct", 0.0) or 0.0)
+            reasoning = str(state.get("final_reasoning", "") or "")[:300]
+            signals = {
+                k: v.get("signal", "?") if isinstance(v, dict) else "?"
+                for k, v in state.get("agent_signals", {}).items()
+            }
+            if action == "NO_SIGNAL":
+                risk_sig = state.get("agent_signals", {}).get("risk_manager", {})
+                if isinstance(risk_sig, dict) and risk_sig.get("metadata", {}).get("approved"):
+                    rm_dir = risk_sig.get("signal", "HOLD")
+                    rm_pct = risk_sig.get("metadata", {}).get("max_position_pct", 0.07)
+                    if rm_dir in ("BUY", "SHORT"):
+                        action = rm_dir
+                        pos_pct = rm_pct
+                        reasoning = f"[fallback from risk_manager] {risk_sig.get('reasoning', '')}"
+                    else:
+                        action = "HOLD"
+                        pos_pct = 0.0
+                else:
+                    action = "HOLD"
+                    pos_pct = 0.0
+
+            decision = BTDecision(
+                date=event_ts.astimezone(_NY).date(),
+                ticker=candidate.ticker,
+                action=action,
+                position_pct=pos_pct,
+                reasoning=reasoning,
+                agent_signals=signals,
+                ts=event_ts,
+            )
+            all_decisions.append(decision)
+
+            if action in {"BUY", "SHORT"} and pos_pct > 0:
+                entry_px = float(entry_bar.open)
+                if action == "BUY":
+                    entry_px *= 1 + slippage_pct
+                else:
+                    entry_px *= 1 - slippage_pct
+                atr_stop = self._compute_atr_stop(
+                    session,
+                    candidate.ticker,
+                    entry_session_day,
+                    default_stop=stop_loss_pct,
+                )
+                _schedule_entry(
+                    BTScheduledEntry(
+                        ticker=candidate.ticker,
+                        action=action,
+                        pos_pct=pos_pct,
+                        exec_ts=entry_ts,
+                        exec_price=entry_px,
+                        decision_ts=event_ts,
+                        trigger_event_id=candidate.trigger_event["id"],
+                        decision=decision,
+                        stop_loss_pct=atr_stop,
+                    )
+                )
+                used_session_keys.add(session_key)
+
+            processed_decisions += 1
+            _publish_progress(detail_prefix)
+
+        final_flush_ts = datetime.combine(end + timedelta(days=1), _MARKET_CLOSE, tzinfo=_NY).astimezone(timezone.utc)
+        _flush_until(final_flush_ts)
+
+        final_day = trading_days[-1]
+        final_close_ts = datetime.combine(final_day, _MARKET_CLOSE, tzinfo=_NY).astimezone(timezone.utc)
+        for ticker in list(portfolio.positions.keys()):
+            close_bar = self._regular_close_bar_for_session_day(session, ticker, final_close_ts)
+            if close_bar is None:
+                continue
+            exit_px = float(close_bar.close)
+            pos = portfolio.positions.get(ticker)
+            if pos is not None and pos.side == "LONG":
+                exit_px *= 1 - slippage_pct
+            elif pos is not None and pos.side == "SHORT":
+                exit_px *= 1 + slippage_pct
+            pnl = (
+                (exit_px - pos.avg_entry) * pos.shares
+                if pos and pos.side == "LONG"
+                else (pos.avg_entry - exit_px) * pos.shares if pos else 0.0
+            )
+            self._close_position(
+                portfolio,
+                ticker,
+                exit_px,
+                final_day,
+                all_trades,
+                "backtest_end",
+                exec_ts=ensure_utc(close_bar.ts),
+            )
+            self._update_loss_streak(ticker_loss_streak, ticker, pnl)
+            _append_equity_point(ensure_utc(close_bar.ts))
+
+        final_equity = portfolio.cash
+        total_return = (final_equity / initial_capital - 1) * 100
+        trade_pnls = self._compute_trade_pnls(all_trades)
+        winning = sum(1 for pnl in trade_pnls if pnl > 0)
+        losing = sum(1 for pnl in trade_pnls if pnl < 0)
+        stop_loss_count = sum(1 for t in all_trades if t.reason == "stop_loss")
+
+        print(f"\n{'='*60}")
+        print(f"[{_ts()}] ✅ BACKTEST COMPLETE")
+        print(f"  Return: {total_return:+.2f}%  (${initial_capital:,.0f} → ${final_equity:,.0f})")
+        print(f"  Max Drawdown: {max_drawdown * 100:.2f}%")
+        print(f"  Trades: {len(all_trades)} ({winning}W / {losing}L)")
+        print(f"  Trigger events processed: {len(candidates)}")
+        print(f"{'='*60}\n")
+        sys.stdout.flush()
+
+        return AgentBacktestResult(
+            start_date=start,
+            end_date=end,
+            tickers=tickers,
+            initial_capital=initial_capital,
+            final_equity=round(final_equity, 2),
+            total_return_pct=round(total_return, 2),
+            max_drawdown_pct=round(max_drawdown * 100, 2),
+            total_trades=len(all_trades),
+            winning_trades=winning,
+            losing_trades=losing,
+            stop_losses=stop_loss_count,
+            equity_curve=equity_curve,
+            trades=all_trades,
+            decisions=all_decisions,
+            errors=errors,
+        )
+
+    def _load_event_time_candidates(
+        self,
+        session: Session,
+        *,
+        tickers: list[str],
+        start: date,
+        end: date,
+        allowed_sources: list[str] | None,
+        use_event_quality_filter: bool,
+        event_quality_min_score: int,
+        event_quality_fail_open: bool,
+    ) -> list[BTCandidateEvent]:
+        start_ts = datetime.combine(start, dt_time(0, 0), tzinfo=_NY).astimezone(timezone.utc)
+        end_ts = datetime.combine(end + timedelta(days=1), dt_time(0, 0), tzinfo=_NY).astimezone(timezone.utc)
+        ticker_filters = [Event.tickers.cast(sa.Text).ilike(f'%"{ticker.upper()}"%') for ticker in tickers]
+        conditions = [
+            Event.confidence >= max(0, int(getattr(self.settings, "live_min_confidence", 50) or 0)),
+            Event.event_time >= start_ts,
+            Event.event_time < end_ts,
+            sa.or_(*ticker_filters) if ticker_filters else sa.true(),
+        ]
+        if not use_event_quality_filter:
+            conditions.append(Event.validation_status == "VALID")
+
+        events = (
+            session.execute(
+                select(Event)
+                .where(*conditions)
+                .order_by(Event.event_time.asc(), Event.created_at.asc(), Event.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+        selected_tickers = {ticker.upper() for ticker in tickers}
+        candidates: list[BTCandidateEvent] = []
+        for event in events:
+            ticker = self._primary_ticker_for_event(event, selected_tickers)
+            if not ticker:
+                continue
+            evidences = session.execute(
+                select(EventEvidence)
+                .where(EventEvidence.event_id == event.id)
+                .order_by(EventEvidence.source_tier.asc(), EventEvidence.captured_at.asc(), EventEvidence.id.asc())
+            ).scalars().all()
+            payload = self._event_payload(event, evidences, allowed_sources=allowed_sources)
+            if payload is None:
+                continue
+            if use_event_quality_filter:
+                quality = self.analysis.assess_event_quality(event, session=session)
+                if quality.get("error") and not event_quality_fail_open:
+                    continue
+                if not quality.get("error"):
+                    quality_score = int(quality.get("quality_score", 0) or 0)
+                    if quality_score < event_quality_min_score:
+                        continue
+                payload = {
+                    **payload,
+                    "quality": str(quality.get("quality") or "UNKNOWN"),
+                    "quality_score": int(quality.get("quality_score", 0) or 0),
+                    "quality_reason": str(quality.get("reason") or ""),
+                }
+            else:
+                tradeability = self.analysis.assess_tradeability(event, session=session)
+                if not self._is_strong_tradeable_event(tradeability):
+                    continue
+            candidates.append(
+                BTCandidateEvent(
+                    ticker=ticker,
+                    as_of=ensure_utc(event.event_time),
+                    event=event,
+                    trigger_event=payload,
+                )
+            )
+        return candidates
+
+    @staticmethod
+    def _primary_ticker_for_event(event: Event, selected_tickers: set[str]) -> str | None:
+        for ticker in event.tickers or []:
+            normalized = str(ticker or "").strip().upper()
+            if normalized and normalized in selected_tickers:
+                return normalized
+        return None
+
     def _find_trigger_event(
         self,
         session: Session,
@@ -663,19 +1237,24 @@ class AgentBacktestEngine:
         ticker: str,
         as_of: datetime,
         allowed_sources: list[str] | None,
+        use_event_quality_filter: bool,
+        event_quality_min_score: int,
+        event_quality_fail_open: bool,
     ) -> dict[str, Any] | None:
         since = as_of - timedelta(hours=48)
+        conditions = [
+            Event.confidence >= max(0, int(getattr(self.settings, "live_min_confidence", 50) or 0)),
+            Event.event_time >= since,
+            Event.event_time <= as_of,
+            Event.tickers.cast(sa.Text).ilike(f'%"{ticker.upper()}"%'),
+        ]
+        if not use_event_quality_filter:
+            conditions.append(Event.validation_status == "VALID")
         stmt = (
             select(Event)
-            .where(
-                Event.validation_status == "VALID",
-                Event.confidence >= max(0, int(getattr(self.settings, "live_min_confidence", 50) or 0)),
-                Event.event_time >= since,
-                Event.event_time <= as_of,
-                Event.tickers.cast(sa.Text).ilike(f'%"{ticker.upper()}"%'),
-            )
+            .where(*conditions)
             .order_by(Event.event_time.desc(), Event.created_at.desc(), Event.id.desc())
-            .limit(20)
+            .limit(40 if use_event_quality_filter else 20)
         )
         events = session.execute(stmt).scalars().all()
         for event in events:
@@ -687,9 +1266,25 @@ class AgentBacktestEngine:
             payload = self._event_payload(event, evidences, allowed_sources=allowed_sources)
             if payload is None:
                 continue
-            tradeability = self.analysis.assess_tradeability(event, session=session)
-            if self._is_strong_tradeable_event(tradeability):
-                return payload
+            if use_event_quality_filter:
+                quality = self.analysis.assess_event_quality(event, session=session)
+                if quality.get("error") and not event_quality_fail_open:
+                    continue
+                if not quality.get("error"):
+                    quality_score = int(quality.get("quality_score", 0) or 0)
+                    if quality_score < event_quality_min_score:
+                        continue
+                payload = {
+                    **payload,
+                    "quality": str(quality.get("quality") or "UNKNOWN"),
+                    "quality_score": int(quality.get("quality_score", 0) or 0),
+                    "quality_reason": str(quality.get("reason") or ""),
+                }
+            else:
+                tradeability = self.analysis.assess_tradeability(event, session=session)
+                if not self._is_strong_tradeable_event(tradeability):
+                    continue
+            return payload
         return None
 
     @staticmethod
@@ -739,6 +1334,97 @@ class AgentBacktestEngine:
         if int(tradeability.get("ticker_specific_hits", 0) or 0) >= 1:
             return True
         return False
+
+    def _bar_at_or_after(
+        self,
+        session: Session,
+        ticker: str,
+        ts: datetime,
+        *,
+        regular_session_only: bool = False,
+    ) -> Bar1m | None:
+        stmt = (
+            select(Bar1m)
+            .where(Bar1m.ticker == ticker.upper(), Bar1m.ts >= ensure_utc(ts))
+            .order_by(Bar1m.ts.asc())
+        )
+        if not regular_session_only:
+            return session.execute(stmt.limit(1)).scalars().first()
+
+        search_end = ensure_utc(ts) + timedelta(days=5)
+        bars = (
+            session.execute(stmt.where(Bar1m.ts < search_end).limit(5000))
+            .scalars()
+            .all()
+        )
+        for bar in bars:
+            if self._is_regular_session_bar(bar.ts):
+                return bar
+        return None
+
+    def _latest_price_at_or_before(
+        self,
+        session: Session,
+        ticker: str,
+        ts: datetime,
+        *,
+        regular_session_only: bool = False,
+    ) -> float | None:
+        stmt = (
+            select(Bar1m)
+            .where(Bar1m.ticker == ticker.upper(), Bar1m.ts <= ensure_utc(ts))
+            .order_by(Bar1m.ts.desc())
+        )
+        if not regular_session_only:
+            bar = session.execute(stmt.limit(1)).scalars().first()
+            return float(bar.close) if bar else None
+
+        search_start = ensure_utc(ts) - timedelta(days=5)
+        bars = (
+            session.execute(stmt.where(Bar1m.ts >= search_start).limit(5000))
+            .scalars()
+            .all()
+        )
+        for bar in bars:
+            if self._is_regular_session_bar(bar.ts):
+                return float(bar.close)
+        return None
+
+    @staticmethod
+    def _is_regular_session_bar(ts: datetime) -> bool:
+        local = ensure_utc(ts).astimezone(_NY)
+        if local.weekday() >= 5:
+            return False
+        local_clock = local.timetz().replace(tzinfo=None)
+        return _MARKET_OPEN <= local_clock < _MARKET_CLOSE
+
+    def _regular_close_bar_for_session_day(self, session: Session, ticker: str, ts: datetime) -> Bar1m | None:
+        session_day = ensure_utc(ts).astimezone(_NY).date()
+        ny_start = datetime.combine(session_day, _MARKET_OPEN, tzinfo=_NY)
+        ny_end = datetime.combine(session_day, _MARKET_CLOSE, tzinfo=_NY)
+        rth_start = ny_start.astimezone(timezone.utc)
+        rth_end = ny_end.astimezone(timezone.utc)
+        return (
+            session.execute(
+                select(Bar1m)
+                .where(
+                    Bar1m.ticker == ticker.upper(),
+                    Bar1m.ts >= rth_start,
+                    Bar1m.ts < rth_end,
+                )
+                .order_by(Bar1m.ts.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+
+    def _portfolio_equity_at(self, session: Session, portfolio: BTPortfolio, ts: datetime) -> float:
+        prices: dict[str, float] = {}
+        for ticker, pos in portfolio.positions.items():
+            price = self._latest_price_at_or_before(session, ticker, ts, regular_session_only=True)
+            prices[ticker] = float(price or pos.avg_entry)
+        return portfolio.equity(prices)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -879,6 +1565,7 @@ class AgentBacktestEngine:
         exec_date: date,
         trades: list[BTTrade],
         stop_loss_pct: float = 0.03,
+        exec_ts: datetime | None = None,
     ) -> None:
         """Execute a BUY or SHORT decision, adjusting position to target."""
         target_notional = equity * target_pct
@@ -909,12 +1596,14 @@ class AgentBacktestEngine:
                         portfolio.positions[ticker] = BTPosition(
                             ticker=ticker, shares=shares_to_buy,
                             avg_entry=price, side="LONG", entry_date=exec_date,
+                            entry_ts=exec_ts,
                             stop_loss_pct=stop_loss_pct,
                         )
                     trades.append(BTTrade(
                         date=exec_date, ticker=ticker, side="BUY",
                         shares=round(shares_to_buy, 4), price=price,
                         notional=round(cost, 2), reason=f"agent_buy_{target_pct:.0%}",
+                        ts=exec_ts,
                     ))
 
         elif action == "SHORT":
@@ -933,12 +1622,14 @@ class AgentBacktestEngine:
                     portfolio.positions[ticker] = BTPosition(
                         ticker=ticker, shares=shares_to_short,
                         avg_entry=price, side="SHORT", entry_date=exec_date,
+                        entry_ts=exec_ts,
                         stop_loss_pct=stop_loss_pct,
                     )
                 trades.append(BTTrade(
                     date=exec_date, ticker=ticker, side="SHORT",
                     shares=round(shares_to_short, 4), price=price,
                     notional=round(proceeds, 2), reason=f"agent_short_{target_pct:.0%}",
+                    ts=exec_ts,
                 ))
 
     def _close_position(
@@ -949,6 +1640,7 @@ class AgentBacktestEngine:
         close_date: date,
         trades: list[BTTrade],
         reason: str,
+        exec_ts: datetime | None = None,
     ) -> None:
         pos = portfolio.positions.pop(ticker, None)
         if not pos:
@@ -961,6 +1653,7 @@ class AgentBacktestEngine:
                 date=close_date, ticker=ticker, side="SELL",
                 shares=round(pos.shares, 4), price=price,
                 notional=round(proceeds, 2), reason=reason,
+                ts=exec_ts,
             ))
         else:
             # Short close: buy back shares at current price.
@@ -971,6 +1664,7 @@ class AgentBacktestEngine:
                 date=close_date, ticker=ticker, side="COVER",
                 shares=round(pos.shares, 4), price=price,
                 notional=round(cost, 2), reason=reason,
+                ts=exec_ts,
             ))
 
     @staticmethod

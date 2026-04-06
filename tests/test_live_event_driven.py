@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from app.db.models import AgentRun, WorkerRun
+from app.db.models import AgentRun, Event, EventEvidence, RawItem, WorkerRun
 from app.services.live_trading import LiveTradingService
 
 
@@ -22,6 +22,48 @@ def _market_closed() -> dict:
         "et_time_str": "18:05 ET",
         "context_string": "US market closed",
     }
+
+
+def _strong_event(session, *, now: datetime, ticker: str, source: str = "reuters") -> Event:
+    raw = RawItem(
+        source=source,
+        source_tier=1,
+        url=f"https://example.com/{ticker.lower()}-{source}",
+        title=f"{ticker} wins major contract and raises guidance",
+        body=f"{ticker} wins major contract and raises guidance. Detailed evidence text." * 6,
+        published_at=now - timedelta(minutes=5),
+        ingested_at=now - timedelta(minutes=4),
+        item_hash=f"hash-{ticker.lower()}-{source}",
+        metadata_json={"ticker": ticker, "structured_ticker": True, "matched_tickers": [ticker]},
+        processed=False,
+    )
+    session.add(raw)
+    session.flush()
+    event = Event(
+        event_type="contract_award",
+        entities=[ticker],
+        tickers=[ticker],
+        severity=85,
+        event_time=now - timedelta(minutes=5),
+        confidence=90,
+        validation_status="VALID",
+        summary=f"{ticker} wins major contract and raises guidance",
+    )
+    session.add(event)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=source,
+            source_tier=1,
+            captured_at=now - timedelta(minutes=4),
+            summary=raw.title,
+        )
+    )
+    session.flush()
+    return event
 
 
 def test_event_driven_cycle_skips_without_new_tradeable_event(session, settings, monkeypatch) -> None:
@@ -279,3 +321,116 @@ def test_cached_agent_output_respects_ttl(session, settings) -> None:
     )
     assert miss is False
     assert val_miss is None
+
+
+def test_live_trigger_event_respects_llm_quality_gate(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_use_event_quality_filter": True,
+            "live_event_quality_min_score": 55,
+            "live_event_quality_fail_open": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    now = datetime.now(timezone.utc)
+    _strong_event(session, now=now, ticker="AAPL")
+
+    monkeypatch.setattr(
+        service.analysis,
+        "assess_tradeability",
+        lambda *_args, **_kwargs: {
+            "tradeable": True,
+            "strong_sources": 1,
+            "hard_event_hits": 1,
+            "ticker_specific_hits": 1,
+        },
+    )
+    monkeypatch.setattr(
+        service.analysis,
+        "assess_event_quality",
+        lambda *_args, **_kwargs: {
+            "quality": "LOW",
+            "quality_score": 25,
+            "reason": "weak or mixed evidence",
+        },
+    )
+
+    payload = service._find_trigger_event(
+        session,
+        ticker="AAPL",
+        since=now - timedelta(hours=1),
+        allowed_sources={"reuters"},
+    )
+
+    assert payload is None
+
+
+def test_live_trigger_event_llm_quality_gate_can_accept_watch_event(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_use_event_quality_filter": True,
+            "live_event_quality_min_score": 55,
+            "live_event_quality_fail_open": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    now = datetime.now(timezone.utc)
+
+    raw = RawItem(
+        source="reuters",
+        source_tier=1,
+        url="https://example.com/aapl-watch",
+        title="AAPL wins major contract and raises guidance",
+        body="AAPL wins major contract and raises guidance. Detailed evidence text." * 6,
+        published_at=now - timedelta(minutes=5),
+        ingested_at=now - timedelta(minutes=4),
+        item_hash="hash-aapl-watch",
+        metadata_json={"ticker": "AAPL", "structured_ticker": True, "matched_tickers": ["AAPL"]},
+        processed=False,
+    )
+    session.add(raw)
+    session.flush()
+    event = Event(
+        event_type="contract_award",
+        entities=["AAPL"],
+        tickers=["AAPL"],
+        severity=85,
+        event_time=now - timedelta(minutes=5),
+        confidence=90,
+        validation_status="WATCH",
+        summary="AAPL wins major contract and raises guidance",
+    )
+    session.add(event)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source="reuters",
+            source_tier=1,
+            captured_at=now - timedelta(minutes=4),
+            summary=raw.title,
+        )
+    )
+    session.flush()
+
+    monkeypatch.setattr(
+        service.analysis,
+        "assess_event_quality",
+        lambda *_args, **_kwargs: {
+            "quality": "HIGH",
+            "quality_score": 85,
+            "reason": "ticker-specific, fresh, and actionable",
+        },
+    )
+
+    payload = service._find_trigger_event(
+        session,
+        ticker="AAPL",
+        since=now - timedelta(hours=1),
+        allowed_sources={"reuters"},
+    )
+
+    assert payload is not None
+    assert payload["id"] == event.id

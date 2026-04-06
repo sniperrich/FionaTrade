@@ -233,6 +233,7 @@ def backtests_page(
                 "event_profile": "",
                 "tickers": list(settings.live_trading_tickers or settings.agent_tickers_override or settings.sp100_tickers[:5]),
                 "decision_frequency": 1,
+                "agent_entry_timing": "event_time",
                 "initial_capital": settings.initial_nav,
                 "max_position_pct": getattr(settings, "live_max_position_pct", settings.max_position_pct),
                 "intraday_flatten": bool(getattr(settings, "backtest_intraday_flatten", False)),

@@ -699,6 +699,7 @@ def backtest_options(
             "sources": [source for source in DEFAULT_LIVE_ALLOWED_SOURCES if source not in {"yahoo", "yahoo_finance"}],
             "tickers": list(settings.live_trading_tickers or settings.agent_tickers_override or settings.sp100_tickers[:5]),
             "decision_frequency": 1,
+            "agent_entry_timing": "event_time",
             "initial_capital": settings.initial_nav,
             "max_position_pct": getattr(settings, "live_max_position_pct", settings.max_position_pct),
             "intraday_flatten": bool(getattr(settings, "backtest_intraday_flatten", False)),
@@ -706,7 +707,9 @@ def backtest_options(
             "min_severity": 0,
             "use_signal_validation": bool(getattr(settings, "validation_enabled", True)),
             "use_tradeability_filter": settings.event_tradeability_filter_enabled,
-            "use_event_quality_filter": settings.backtest_use_event_quality_filter,
+            "use_event_quality_filter": True,
+            "event_quality_min_score": int(getattr(settings, "live_event_quality_min_score", 55)),
+            "event_quality_fail_open": bool(getattr(settings, "live_event_quality_fail_open", False)),
             "flow_confirmation_enabled": bool(getattr(settings, "flow_confirmation_enabled", True)),
             "flow_confirmation_soft_gate": bool(getattr(settings, "flow_confirmation_soft_gate", True)),
             "flow_breakout_lookback_min": int(getattr(settings, "live_entry_plan_breakout_lookback_min", 15)),
@@ -774,6 +777,10 @@ def queue_backtest(
     if engine_mode == "agent":
         selected_sources = [source for source in selected_sources if source not in {"yahoo", "yahoo_finance"}]
 
+    agent_entry_timing = str(payload.get("agent_entry_timing") or "event_time").strip().lower()
+    if engine_mode == "agent" and agent_entry_timing not in {"event_time", "daily_next_open"}:
+        raise HTTPException(status_code=400, detail="agent_entry_timing must be one of: event_time, daily_next_open")
+
     params = {
         "start_date": str(start_date),
         "end_date": str(end_date),
@@ -782,6 +789,7 @@ def queue_backtest(
         "event_profile": str(payload.get("event_profile") or "").strip().lower(),
         "sources": selected_sources,
         "tickers": tickers,
+        "agent_entry_timing": agent_entry_timing if engine_mode == "agent" else "event_time",
         "initial_capital": _payload_float(payload, "initial_capital", settings.initial_nav, minimum=1000.0),
         "max_position_pct": _payload_float(
             payload,
@@ -800,6 +808,18 @@ def queue_backtest(
         "use_signal_validation": _payload_bool(payload, "use_signal_validation", getattr(settings, "validation_enabled", True)),
         "use_tradeability_filter": _payload_bool(payload, "use_tradeability_filter", settings.event_tradeability_filter_enabled),
         "use_event_quality_filter": _payload_bool(payload, "use_event_quality_filter", settings.backtest_use_event_quality_filter),
+        "event_quality_min_score": _payload_int(
+            payload,
+            "event_quality_min_score",
+            int(getattr(settings, "live_event_quality_min_score", 55)),
+            minimum=0,
+            maximum=100,
+        ),
+        "event_quality_fail_open": _payload_bool(
+            payload,
+            "event_quality_fail_open",
+            bool(getattr(settings, "live_event_quality_fail_open", False)),
+        ),
         "flow_confirmation_enabled": _payload_bool(
             payload,
             "flow_confirmation_enabled",
