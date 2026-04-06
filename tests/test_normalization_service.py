@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.db.models import RawItem
-from app.normalization.service import NormalizationService
+from app.normalization.service import NormalizationLLMRefinement, NormalizationService
 
 
 def test_routine_sec_filing_forced_to_sec_filing(session, settings):
@@ -244,3 +244,138 @@ def test_sec_earnings_release_uses_independent_event_type_and_summary_override(s
     assert clusters[0].canonical.event_type == "sec_earnings_release"
     assert clusters[0].canonical.tickers == ["AAPL"]
     assert "$124.3 billion" in clusters[0].canonical.summary
+
+
+def test_llm_refinement_can_override_primary_ticker_event_type_and_summary(session, settings, monkeypatch):
+    now = datetime(2026, 3, 31, 14, 30, tzinfo=timezone.utc)
+    session.add(
+        RawItem(
+            source="reuters",
+            source_tier=1,
+            url="https://example.com/perplexity-google-lawsuit",
+            title="Perplexity sued over privacy claims tied to Google search data",
+            body="Google faces scrutiny after Perplexity privacy lawsuit expands.",
+            published_at=now,
+            ingested_at=now,
+            item_hash="hash-googl-llm-refine",
+            metadata_json={"ticker": "META"},
+            processed=False,
+        )
+    )
+    session.flush()
+
+    svc = NormalizationService(settings)
+
+    def fake_refine(item, text, tickers, event_type):
+        return NormalizationLLMRefinement(
+            primary_ticker="GOOGL",
+            related_tickers=["META"],
+            event_type="major_litigation",
+            is_ticker_specific=True,
+            is_material_new_information=True,
+            summary="Perplexity privacy lawsuit broadens scrutiny around Google search data usage.",
+            merge_key="googl_perplexity_privacy_lawsuit",
+        )
+
+    monkeypatch.setattr(svc, "_maybe_refine_with_llm", fake_refine)
+    clusters = svc.build_clusters(session)
+
+    assert len(clusters) == 1
+    assert clusters[0].canonical.tickers == ["GOOGL", "META"]
+    assert clusters[0].canonical.event_type == "major_litigation"
+    assert "privacy lawsuit" in clusters[0].canonical.summary.lower()
+
+
+def test_llm_refinement_can_downgrade_follow_up_price_action_recap(session, settings, monkeypatch):
+    now = datetime(2026, 4, 1, 17, 5, tzinfo=timezone.utc)
+    session.add(
+        RawItem(
+            source="benzinga",
+            source_tier=2,
+            url="https://example.com/pg-why-stock-is-falling",
+            title="Why Procter & Gamble Stock Is Falling Tuesday Afternoon",
+            body="Shares were lower in afternoon trading as traders reviewed recent market action.",
+            published_at=now,
+            ingested_at=now,
+            item_hash="hash-pg-price-recap",
+            metadata_json={"ticker": "PG"},
+            processed=False,
+        )
+    )
+    session.flush()
+
+    svc = NormalizationService(settings)
+
+    def fake_refine(item, text, tickers, event_type):
+        return NormalizationLLMRefinement(
+            primary_ticker="PG",
+            event_type="major_litigation",
+            is_ticker_specific=False,
+            is_material_new_information=False,
+            is_follow_up_commentary=True,
+            is_price_action_explanation=True,
+            summary="Price-action recap without a new company-specific catalyst.",
+        )
+
+    monkeypatch.setattr(svc, "_maybe_refine_with_llm", fake_refine)
+    clusters = svc.build_clusters(session)
+
+    assert len(clusters) == 1
+    assert clusters[0].canonical.event_type == "unknown"
+    assert clusters[0].canonical.tickers == []
+
+
+def test_llm_refinement_merge_key_can_merge_same_event_cluster(session, settings, monkeypatch):
+    merge_settings = settings.model_copy(update={"normalization_merge_window_min": 30})
+    first = datetime(2026, 4, 2, 13, 10, tzinfo=timezone.utc)
+    second = datetime(2026, 4, 2, 13, 24, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            RawItem(
+                source="reuters",
+                source_tier=1,
+                url="https://example.com/tsla-deliveries-1",
+                title="Tesla deliveries miss expectations in first quarter",
+                body="Tesla reported disappointing vehicle deliveries for the quarter.",
+                published_at=first,
+                ingested_at=first,
+                item_hash="hash-tsla-deliveries-1",
+                metadata_json={"ticker": "TSLA"},
+                processed=False,
+            ),
+            RawItem(
+                source="cnbc",
+                source_tier=2,
+                url="https://example.com/tsla-deliveries-2",
+                title="Tesla shares fall after disappointing deliveries report",
+                body="Tesla stock declined after the company posted a weak deliveries update.",
+                published_at=second,
+                ingested_at=second,
+                item_hash="hash-tsla-deliveries-2",
+                metadata_json={"ticker": "TSLA"},
+                processed=False,
+            ),
+        ]
+    )
+    session.flush()
+
+    svc = NormalizationService(merge_settings)
+
+    def fake_refine(item, text, tickers, event_type):
+        return NormalizationLLMRefinement(
+            primary_ticker="TSLA",
+            event_type="earnings_miss",
+            is_ticker_specific=True,
+            is_material_new_information=True,
+            summary="Tesla reported weaker-than-expected quarterly deliveries.",
+            merge_key="tsla_q1_2026_deliveries_miss",
+        )
+
+    monkeypatch.setattr(svc, "_maybe_refine_with_llm", fake_refine)
+    clusters = svc.build_clusters(session)
+
+    assert len(clusters) == 1
+    assert clusters[0].canonical.tickers == ["TSLA"]
+    assert clusters[0].canonical.event_type == "earnings_miss"
+    assert clusters[0].canonical.event_time == second
+    assert len(clusters[0].raw_items) == 2

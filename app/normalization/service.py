@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.analysis.taxonomy import EVENT_KEYWORDS, resolve_event_type_for_text
+from app.analysis.taxonomy import EVENT_KEYWORDS, normalize_source_name, resolve_event_type_for_text
 from app.core.company_names import COMPANY_NAME_TO_TICKER, TICKER_TO_COMPANY_ALIASES
 from app.core.config import Settings
 from app.core.utils import ensure_utc, minute_bucket
@@ -71,11 +72,43 @@ Event types:
 
 Reply with ONLY the event type label, nothing else."""
 
+_NORMALIZER_PROMPT = """You are refining normalized financial news for an event-driven trading system.
+
+Return strict JSON with these keys:
+- primary_ticker: uppercase ticker string or ""
+- related_tickers: list of uppercase ticker strings
+- event_type: one of financial_fraud, audit_issue, earnings_miss, sec_earnings_release, guidance_cut, regulatory_penalty, major_litigation, merger_acquisition, buyback, layoff, supply_chain_disruption, accident_disaster, policy_shock, sec_filing, unknown
+- is_ticker_specific: boolean
+- is_material_new_information: boolean
+- is_follow_up_commentary: boolean
+- is_price_action_explanation: boolean
+- merge_key: short snake_case event key or ""
+- summary: <= 240 chars, concrete factual summary
+
+Rules:
+- Prefer the primary ticker actually impacted by the article, not every company mentioned.
+- Mark follow-up commentary, roundup, analyst chatter, and "why stock is moving/falling" explainers as not material new information unless they contain new ticker-specific facts.
+- Use unknown when the article is not a clear company-specific tradable catalyst.
+- merge_key should group different source phrasings of the same underlying event."""
+
 
 @dataclass
 class NormalizedCluster:
     canonical: CanonicalEvent
     raw_items: list[RawItem]
+
+
+@dataclass
+class NormalizationLLMRefinement:
+    primary_ticker: str | None = None
+    related_tickers: list[str] | None = None
+    event_type: str | None = None
+    is_ticker_specific: bool = True
+    is_material_new_information: bool = True
+    is_follow_up_commentary: bool = False
+    is_price_action_explanation: bool = False
+    merge_key: str | None = None
+    summary: str | None = None
 
 
 class NormalizationService:
@@ -88,6 +121,7 @@ class NormalizationService:
             ticker: aliases for ticker, aliases in TICKER_TO_COMPANY_ALIASES.items() if ticker in self.universe
         }
         self._llm_client = None
+        self._refinement_cache: dict[str, NormalizationLLMRefinement | None] = {}
         if OpenAI is not None and settings.llm_base_url and settings.llm_api_key:
             base = settings.llm_base_url.rstrip("/")
             if not base.endswith("/v1"):
@@ -226,6 +260,170 @@ class NormalizationService:
             return 70
         return 55
 
+    @staticmethod
+    def _sanitize_merge_key(value: str | None) -> str | None:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return None
+        cleaned = re.sub(r"[^a-z0-9]+", "_", raw)
+        cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+        if not cleaned:
+            return None
+        return cleaned[:96]
+
+    def _should_refine_with_llm(self, item: RawItem) -> bool:
+        if not getattr(self.settings, "normalization_llm_enabled", False):
+            return False
+        if self._llm_client is None:
+            return False
+        allowed_sources = {
+            normalize_source_name(source)
+            for source in getattr(self.settings, "normalization_llm_sources", [])
+        }
+        if not allowed_sources:
+            return False
+        if normalize_source_name(item.source) not in allowed_sources:
+            return False
+        return bool((item.title or "").strip() or (item.body or "").strip())
+
+    def _parse_llm_json(self, content: str | None) -> dict | None:
+        if not content:
+            return None
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            stripped = "\n".join(lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:])
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            logger.warning("Normalization LLM returned invalid JSON: %r", stripped[:240])
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _maybe_refine_with_llm(
+        self,
+        item: RawItem,
+        text: str,
+        tickers: list[str],
+        event_type: str,
+    ) -> NormalizationLLMRefinement | None:
+        if not self._should_refine_with_llm(item):
+            return None
+
+        cache_key = (
+            f"{getattr(self.settings, 'normalization_llm_prompt_version', 'v1')}"
+            f"|{item.item_hash}|{event_type}|{','.join(tickers)}"
+        )
+        if cache_key in self._refinement_cache:
+            return self._refinement_cache[cache_key]
+
+        snippet = {
+            "source": item.source,
+            "source_tier": int(item.source_tier or 9),
+            "initial_tickers": tickers,
+            "initial_event_type": event_type,
+            "metadata_ticker": str((item.metadata_json or {}).get("ticker") or "").upper().strip(),
+            "title": item.title or "",
+            "body": (item.body or "")[: int(getattr(self.settings, "normalization_llm_max_chars", 2400))],
+        }
+        if getattr(self.settings, "llm_merge_system_prompt", True):
+            messages = [
+                {
+                    "role": "user",
+                    "content": f"{_NORMALIZER_PROMPT}\n\n---\n\n{json.dumps(snippet, ensure_ascii=True)}",
+                }
+            ]
+        else:
+            messages = [
+                {"role": "system", "content": _NORMALIZER_PROMPT},
+                {"role": "user", "content": json.dumps(snippet, ensure_ascii=True)},
+            ]
+        try:
+            resp = self._llm_client.chat.completions.create(
+                model=getattr(self.settings, "llm_normalization_model", self.settings.llm_classifier_model),
+                messages=messages,
+                temperature=0.0,
+                max_tokens=300,
+                response_format={"type": "json_object"},
+            )
+            payload = self._parse_llm_json(resp.choices[0].message.content)
+        except Exception as exc:
+            logger.warning("Normalization LLM refinement failed for raw_item=%s: %s", item.id, exc)
+            self._refinement_cache[cache_key] = None
+            return None
+
+        if not payload:
+            self._refinement_cache[cache_key] = None
+            return None
+
+        primary_ticker = str(payload.get("primary_ticker") or "").upper().strip()
+        if primary_ticker and primary_ticker not in self.universe:
+            primary_ticker = ""
+
+        related: list[str] = []
+        for raw_ticker in payload.get("related_tickers") or []:
+            ticker = str(raw_ticker or "").upper().strip()
+            if ticker and ticker in self.universe and ticker not in related and ticker != primary_ticker:
+                related.append(ticker)
+
+        refined_event_type = str(payload.get("event_type") or "").strip().lower().replace("-", "_")
+        if refined_event_type not in _VALID_EVENT_TYPES:
+            refined_event_type = None
+
+        refinement = NormalizationLLMRefinement(
+            primary_ticker=primary_ticker or None,
+            related_tickers=related,
+            event_type=refined_event_type,
+            is_ticker_specific=bool(payload.get("is_ticker_specific", True)),
+            is_material_new_information=bool(payload.get("is_material_new_information", True)),
+            is_follow_up_commentary=bool(payload.get("is_follow_up_commentary", False)),
+            is_price_action_explanation=bool(payload.get("is_price_action_explanation", False)),
+            merge_key=self._sanitize_merge_key(payload.get("merge_key")),
+            summary=str(payload.get("summary") or "").strip()[:240] or None,
+        )
+        self._refinement_cache[cache_key] = refinement
+        return refinement
+
+    def _apply_llm_refinement(
+        self,
+        item: RawItem,
+        tickers: list[str],
+        event_type: str,
+        summary: str,
+        refinement: NormalizationLLMRefinement | None,
+    ) -> tuple[list[str], str, str, str | None]:
+        if refinement is None:
+            return tickers, event_type, summary, None
+
+        is_structured = self._is_structured_ticker_source(item.source, item.metadata_json)
+        refined_tickers = list(tickers)
+        refined_event_type = event_type
+        refined_summary = refinement.summary or summary
+
+        if not refinement.is_ticker_specific and not is_structured:
+            refined_tickers = []
+        elif refinement.primary_ticker:
+            ordered = [refinement.primary_ticker]
+            for ticker in refinement.related_tickers or []:
+                if ticker not in ordered:
+                    ordered.append(ticker)
+            if is_structured:
+                for ticker in tickers:
+                    if ticker not in ordered:
+                        ordered.append(ticker)
+            refined_tickers = ordered
+
+        if refinement.event_type:
+            refined_event_type = resolve_event_type_for_text(refinement.event_type, f"{item.title} {item.body}")
+        if (
+            refinement.is_follow_up_commentary
+            or refinement.is_price_action_explanation
+            or not refinement.is_material_new_information
+        ) and refined_event_type not in {"sec_filing", "sec_earnings_release"}:
+            refined_event_type = "unknown"
+
+        return refined_tickers, refined_event_type, refined_summary, refinement.merge_key
+
     def build_clusters(self, session: Session, raw_ids: Iterable[int] | None = None) -> list[NormalizedCluster]:
         stmt = select(RawItem).where(RawItem.processed.is_(False))
         rows: list[RawItem]
@@ -238,7 +436,7 @@ class NormalizationService:
                     stmt.where(RawItem.id.in_(chunk)).order_by(RawItem.published_at.asc())
                 ).scalars().all()
                 rows.extend(chunk_rows)
-            rows.sort(key=lambda item: item.published_at)
+            rows.sort(key=lambda item: ensure_utc(item.published_at))
         else:
             rows = session.execute(stmt.order_by(RawItem.published_at.asc())).scalars().all()
         merge_window_min = max(0, int(getattr(self.settings, "normalization_merge_window_min", 0)))
@@ -262,10 +460,19 @@ class NormalizationService:
                         # keep "unknown" without calling LLM — main analysis LLM handles direction
                     else:
                         event_type = self._infer_event_type(text)
+            summary = self._item_summary(item)
+            refinement = self._maybe_refine_with_llm(item, text, tickers, event_type)
+            tickers, event_type, summary, merge_key = self._apply_llm_refinement(
+                item=item,
+                tickers=tickers,
+                event_type=event_type,
+                summary=summary,
+                refinement=refinement,
+            )
             primary_ticker = tickers[0] if tickers else "UNKNOWN"
             if merge_window_min > 0:
                 bucket = minute_bucket(item.published_at, width_min=merge_window_min).isoformat()
-                key = (primary_ticker, event_type, bucket)
+                key = (primary_ticker, event_type, merge_key or event_type, bucket)
             else:
                 key = (item.id,)
 
@@ -278,7 +485,7 @@ class NormalizationService:
                         severity=self._severity(event_type),
                         event_time=ensure_utc(item.published_at),
                         evidence_refs=[item.id],
-                        summary=self._item_summary(item),
+                        summary=summary,
                     ),
                     raw_items=[item],
                 )
@@ -296,6 +503,6 @@ class NormalizationService:
                 item_ts = ensure_utc(item.published_at)
                 if item_ts > ensure_utc(group.canonical.event_time):
                     group.canonical.event_time = item_ts
-                    group.canonical.summary = self._item_summary(item)
+                    group.canonical.summary = summary
 
         return list(grouped.values())

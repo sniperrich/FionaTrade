@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
     llm_classifier_model: str = "gemini-3-flash"
+    llm_normalization_model: str = "gemini-3-flash"
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 3
     llm_retry_backoff_seconds: float = 1.5
@@ -70,6 +71,12 @@ class Settings(BaseSettings):
     event_tradeability_filter_enabled: bool = True
     event_tradeability_min_score: int = 55
     normalization_merge_window_min: int = 0
+    normalization_llm_enabled: bool = True
+    normalization_llm_sources: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: DEFAULT_LIVE_ALLOWED_SOURCES.copy()
+    )
+    normalization_llm_max_chars: int = 2400
+    normalization_llm_prompt_version: str = "v1"
     enable_term_management: bool = True
     term_short_horizon_min: int = 60
     term_mid_horizon_min: int = 240
@@ -301,7 +308,7 @@ class Settings(BaseSettings):
             return [part.upper().strip() for part in stripped.split(",") if part.strip()]
         return value
 
-    @field_validator("live_allowed_sources", mode="before")
+    @field_validator("live_allowed_sources", "normalization_llm_sources", mode="before")
     @classmethod
     def _parse_csv_source_list(cls, value):
         if value is None or value == "":
