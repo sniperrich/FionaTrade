@@ -241,7 +241,9 @@ class AnalysisService:
         r"|guidance|forecast|outlook|earnings|estimate|sec|doj|investigation|probe"
         r"|lawsuit|litigation|contract|award|order|penalty|fine|recall|faa|fda"
         r"|layoff|restructuring|bankrupt|chapter 11|fire|explosion|plant|factory"
-        r"|shutdown|accident|fraud|material weakness|restatement|dividend|deal)\b",
+        r"|shutdown|accident|fraud|material weakness|restatement|dividend|deal"
+        r"|deliver(?:y|ies)|production|j-?code|reimburse(?:ment|d|s)?|billing code"
+        r"|coverage decision|commercial launch|approval)\b",
         re.IGNORECASE,
     )
     _EARNINGS_POSITIVE_RE = re.compile(
@@ -553,6 +555,7 @@ class AnalysisService:
         secondary_confirmation_only = bool(unique_sources) and all(
             is_secondary_confirmation_source(source) for source in unique_sources
         )
+        single_source_high_quality = len(unique_sources) == 1 and strong_sources >= 1 and len(event.tickers or []) == 1
 
         for item in candidates:
             title = str(item.get("title") or "")
@@ -588,10 +591,12 @@ class AnalysisService:
             score += 18
         if effective_event_type and effective_event_type != "unknown":
             score += 6
+        if single_source_high_quality and (hard_event_hits or effective_event_type != "unknown"):
+            score += 10
         if weak_source_only:
             score -= 18
         if secondary_confirmation_only:
-            score -= 15
+            score -= 4 if hard_event_hits else 15
         if follow_up_hits:
             score -= 28
         if price_action_hits:
@@ -621,7 +626,7 @@ class AnalysisService:
         if follow_up_hits and (not hard_event_hits or effective_event_type == "unknown"):
             tradeable = False
             reason = "follow_up_or_commentary"
-        elif secondary_confirmation_only and strong_sources == 0:
+        elif secondary_confirmation_only and strong_sources == 0 and hard_event_hits == 0:
             tradeable = False
             reason = "secondary_confirmation_only"
         elif opinion_hits and not hard_event_hits:
@@ -1553,12 +1558,30 @@ class AnalysisService:
 
         evidence_payload = self._build_evidence_payload(session, event)
         if not evidence_payload:
-            result = {
-                "quality": "LOW",
-                "quality_score": 15,
-                "reason": "no_high_quality_evidence_text",
-                "model": model,
-            }
+            tradeability = self.assess_tradeability(event, session=session)
+            if (
+                tradeability.get("tradeable")
+                and int(tradeability.get("hard_event_hits", 0) or 0) >= 1
+                and (
+                    int(tradeability.get("ticker_specific_hits", 0) or 0) >= 1
+                    or len(event.tickers or []) == 1
+                )
+                and int(tradeability.get("strong_sources", 0) or 0) >= 1
+            ):
+                multi_source = int(tradeability.get("unique_sources", 0) or 0) >= 2
+                result = {
+                    "quality": "HIGH" if multi_source else "MEDIUM",
+                    "quality_score": 78 if multi_source else 65,
+                    "reason": "summary_indicates_hard_catalyst",
+                    "model": model,
+                }
+            else:
+                result = {
+                    "quality": "LOW",
+                    "quality_score": 15,
+                    "reason": "no_high_quality_evidence_text",
+                    "model": model,
+                }
             self._quality_cache[cache_key] = dict(result)
             return result
 

@@ -87,8 +87,12 @@ Return strict JSON with these keys:
 
 Rules:
 - Prefer the primary ticker actually impacted by the article, not every company mentioned.
-- Mark follow-up commentary, roundup, analyst chatter, and "why stock is moving/falling" explainers as not material new information unless they contain new ticker-specific facts.
+- Distinguish hard catalysts from commentary. Hard catalysts include concrete company-specific facts such as earnings, guidance, deliveries, regulatory approvals, permanent billing/reimbursement codes, lawsuits filed, M&A, financing, contract wins/losses, executive departures, penalties, or formally reported operational incidents.
+- If a headline contains BOTH price-action wording and a new hard catalyst ("shares fall after disappointing deliveries report", "stock jumps on FDA approval"), treat it as material new information and not as a mere price-action explanation.
+- Do not mark an item as follow-up commentary just because it says "reported earlier" if it still states a concrete company-specific catalyst that would matter intraday.
+- Mark follow-up commentary, roundup, analyst chatter, peer comparisons, "final trades", "stocks moving", and pure "why stock is moving/falling" explainers as not material new information when they do not add a fresh hard catalyst.
 - Use unknown when the article is not a clear company-specific tradable catalyst.
+- Prefer a single primary ticker. Use related_tickers only when the article genuinely affects multiple named companies; do not keep passive mentions as co-equal tickers.
 - merge_key should group different source phrasings of the same underlying event."""
 
 

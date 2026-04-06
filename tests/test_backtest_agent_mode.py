@@ -650,6 +650,172 @@ def test_agent_backtest_llm_quality_gate_allows_watch_event_without_tradeability
     assert result.decisions[0].action == "BUY"
 
 
+def test_agent_backtest_llm_quality_gate_allows_unknown_event(session, settings, monkeypatch) -> None:
+    now = datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc)
+
+    def _fake_graph_run(*_args, **_kwargs):
+        return {
+            "final_action": "BUY",
+            "final_position_pct": 0.1,
+            "final_reasoning": "single-ticker hard catalyst",
+            "agent_signals": {
+                "news": {"signal": "BUY"},
+                "risk_manager": {"signal": "BUY", "metadata": {"approved": True, "max_position_pct": 0.1}},
+            },
+        }
+
+    monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+
+    raw = _raw_item(
+        now=now,
+        source="benzinga",
+        ticker="JNJ",
+        title="Johnson & Johnson secures permanent J-code for INLEXZO",
+        item_hash="hash-jnj-watch-unknown",
+    )
+    raw.body = "Johnson & Johnson secures a permanent J-code that streamlines reimbursement for INLEXZO." * 4
+    session.add(raw)
+    session.flush()
+    event = Event(
+        event_type="unknown",
+        entities=["JNJ"],
+        tickers=["JNJ"],
+        severity=70,
+        event_time=now - timedelta(minutes=5),
+        confidence=70,
+        validation_status="WATCH",
+        summary="Johnson & Johnson secures permanent J-code for INLEXZO",
+    )
+    session.add(event)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source="benzinga",
+            source_tier=1,
+            captured_at=now - timedelta(minutes=4),
+            summary=raw.title,
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(ticker="SPY", ts=now, open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="JNJ", ts=now, open=100, high=101, low=99, close=100, volume=1000, source="test"),
+        ]
+    )
+    session.flush()
+
+    monkeypatch.setattr(
+        "app.backtest_engine.agent_backtest.AnalysisService.assess_event_quality",
+        lambda *_args, **_kwargs: {
+            "quality": "HIGH",
+            "quality_score": 80,
+            "reason": "single-ticker hard catalyst",
+        },
+    )
+
+    result = AgentBacktestEngine(settings).run(
+        session,
+        params={
+            "tickers": ["JNJ"],
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-05",
+            "decision_frequency": 1,
+            "sources": ["benzinga"],
+            "use_event_quality_filter": True,
+            "event_quality_min_score": 55,
+            "event_quality_fail_open": False,
+            "agent_entry_timing": "daily_next_open",
+        },
+    )
+
+    assert result.decisions[0].action == "BUY"
+
+
+def test_agent_backtest_without_quality_filter_accepts_strong_watch_event(session, settings, monkeypatch) -> None:
+    now = datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc)
+
+    def _fake_graph_run(*_args, **_kwargs):
+        return {
+            "final_action": "BUY",
+            "final_position_pct": 0.1,
+            "final_reasoning": "strong single-source catalyst",
+            "agent_signals": {
+                "news": {"signal": "BUY"},
+                "risk_manager": {"signal": "BUY", "metadata": {"approved": True, "max_position_pct": 0.1}},
+            },
+        }
+
+    monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+
+    raw = _raw_item(
+        now=now,
+        source="reuters",
+        ticker="AAPL",
+        title="AAPL wins major contract and raises guidance",
+        item_hash="hash-aapl-watch-no-quality",
+    )
+    session.add(raw)
+    session.flush()
+    event = Event(
+        event_type="contract_award",
+        entities=["AAPL"],
+        tickers=["AAPL"],
+        severity=85,
+        event_time=now - timedelta(minutes=5),
+        confidence=90,
+        validation_status="WATCH",
+        summary="AAPL wins major contract and raises guidance",
+    )
+    session.add(event)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source="reuters",
+            source_tier=1,
+            captured_at=now - timedelta(minutes=4),
+            summary=raw.title,
+        )
+    )
+    session.add_all(
+        [
+            Bar1m(ticker="SPY", ts=now, open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=now, open=100, high=101, low=99, close=100, volume=1000, source="test"),
+        ]
+    )
+    session.flush()
+
+    monkeypatch.setattr(
+        "app.backtest_engine.agent_backtest.AnalysisService.assess_tradeability",
+        lambda *_args, **_kwargs: {
+            "tradeable": True,
+            "strong_sources": 1,
+            "hard_event_hits": 1,
+            "ticker_specific_hits": 1,
+        },
+    )
+
+    result = AgentBacktestEngine(settings).run(
+        session,
+        params={
+            "tickers": ["AAPL"],
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-05",
+            "decision_frequency": 1,
+            "sources": ["reuters"],
+            "use_event_quality_filter": False,
+            "agent_entry_timing": "daily_next_open",
+        },
+    )
+
+    assert result.decisions[0].action == "BUY"
+
+
 def test_daily_realized_pnl_uses_closed_trade_pnl_not_cash_flow(settings) -> None:
     trades = [
         BTTrade(date=date(2026, 1, 5), ticker="AAPL", side="BUY", shares=10.0, price=100.0, notional=1000.0, reason="open"),

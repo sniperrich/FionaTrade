@@ -434,3 +434,108 @@ def test_live_trigger_event_llm_quality_gate_can_accept_watch_event(session, set
 
     assert payload is not None
     assert payload["id"] == event.id
+
+
+def test_live_trigger_event_quality_gate_can_accept_unknown_event(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_use_event_quality_filter": True,
+            "live_event_quality_min_score": 55,
+            "live_event_quality_fail_open": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    now = datetime.now(timezone.utc)
+
+    raw = RawItem(
+        source="benzinga",
+        source_tier=1,
+        url="https://example.com/jnj-watch",
+        title="Johnson & Johnson secures permanent J-code for INLEXZO",
+        body="Johnson & Johnson secures a permanent J-code that streamlines reimbursement for INLEXZO." * 4,
+        published_at=now - timedelta(minutes=5),
+        ingested_at=now - timedelta(minutes=4),
+        item_hash="hash-jnj-watch",
+        metadata_json={"ticker": "JNJ", "structured_ticker": True, "matched_tickers": ["JNJ"]},
+        processed=False,
+    )
+    session.add(raw)
+    session.flush()
+    event = Event(
+        event_type="unknown",
+        entities=["JNJ"],
+        tickers=["JNJ"],
+        severity=70,
+        event_time=now - timedelta(minutes=5),
+        confidence=70,
+        validation_status="WATCH",
+        summary="Johnson & Johnson secures permanent J-code for INLEXZO",
+    )
+    session.add(event)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source="benzinga",
+            source_tier=1,
+            captured_at=now - timedelta(minutes=4),
+            summary=raw.title,
+        )
+    )
+    session.flush()
+
+    monkeypatch.setattr(
+        service.analysis,
+        "assess_event_quality",
+        lambda *_args, **_kwargs: {
+            "quality": "HIGH",
+            "quality_score": 80,
+            "reason": "single-ticker hard catalyst",
+        },
+    )
+
+    payload = service._find_trigger_event(
+        session,
+        ticker="JNJ",
+        since=now - timedelta(hours=1),
+        allowed_sources={"benzinga"},
+    )
+
+    assert payload is not None
+    assert payload["id"] == event.id
+
+
+def test_live_trigger_event_without_quality_filter_accepts_strong_watch_event(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_use_event_quality_filter": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    now = datetime.now(timezone.utc)
+    event = _strong_event(session, now=now, ticker="AAPL")
+    event.validation_status = "WATCH"
+    session.flush()
+
+    monkeypatch.setattr(
+        service.analysis,
+        "assess_tradeability",
+        lambda *_args, **_kwargs: {
+            "tradeable": True,
+            "strong_sources": 1,
+            "hard_event_hits": 1,
+            "ticker_specific_hits": 1,
+        },
+    )
+
+    payload = service._find_trigger_event(
+        session,
+        ticker="AAPL",
+        since=now - timedelta(hours=1),
+        allowed_sources={"reuters"},
+    )
+
+    assert payload is not None
+    assert payload["id"] == event.id

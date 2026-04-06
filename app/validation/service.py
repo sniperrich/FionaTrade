@@ -168,6 +168,7 @@ class ValidationService:
         source_count = len(sources)
         has_tier0 = any(t == 0 for t in tiers)
         conflict = self._has_conflict(conflict_texts)
+        current_family = self._event_family(cluster.canonical.event_type, summary)
         primary_sources = {
             source
             for source, _ in source_entries
@@ -181,6 +182,31 @@ class ValidationService:
         primary_source_count = len(primary_sources)
         secondary_source_count = len(secondary_sources)
         secondary_only = bool(source_count) and primary_source_count == 0 and secondary_source_count > 0
+        single_source_high_quality = (
+            primary_source_count == 1
+            and secondary_source_count == 0
+            and len(cluster.canonical.tickers or []) == 1
+            and cluster.canonical.event_type in {
+                "earnings_miss",
+                "sec_earnings_release",
+                "major_litigation",
+                "regulatory_penalty",
+                "financial_fraud",
+                "audit_issue",
+                "accident_disaster",
+            }
+        ) or (
+            primary_source_count == 1
+            and secondary_source_count == 0
+            and len(cluster.canonical.tickers or []) == 1
+            and current_family in {
+                "major_litigation",
+                "regulatory_penalty",
+                "financial_fraud",
+                "audit_issue",
+                "accident_disaster",
+            }
+        )
 
         source_score = max(TIER_SCORE.get(t, 10) for t in tiers)
         corroboration_score = 0
@@ -198,6 +224,8 @@ class ValidationService:
             return confidence, "WATCH", "source_conflict_detected"
         if has_tier0 or primary_source_count >= 2 or (primary_source_count >= 1 and secondary_source_count >= 1):
             return confidence, "VALID", None
+        if single_source_high_quality:
+            return max(confidence, 55), "VALID", None
         if secondary_only:
             return confidence, "WATCH", "secondary_confirmation_only"
         return confidence, "WATCH", "single_source_only"

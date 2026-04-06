@@ -798,18 +798,21 @@ class LiveTradingService:
         allowed_sources: set[str],
     ) -> dict[str, Any] | None:
         use_quality_filter = bool(getattr(self.settings, "live_use_event_quality_filter", True))
+        excluded_event_types = tuple(
+            event_type
+            for event_type in EXCLUDED_FROM_TRADING
+            if not (use_quality_filter and event_type == "unknown")
+        )
         stmt = (
             select(Event)
             .where(
                 Event.confidence >= max(0, self._effective_live_min_confidence()),
-                Event.event_type.notin_(tuple(EXCLUDED_FROM_TRADING)),
+                Event.event_type.notin_(excluded_event_types),
                 Event.tickers.cast(sa.Text).ilike(f'%"{ticker.upper()}"%'),
             )
             .order_by(desc(Event.event_time), desc(Event.created_at), desc(Event.id))
             .limit(40 if use_quality_filter else 20)
         )
-        if not use_quality_filter:
-            stmt = stmt.where(Event.validation_status == "VALID")
         if since is not None:
             stmt = stmt.where(sa.or_(Event.event_time >= since, Event.created_at >= since))
 

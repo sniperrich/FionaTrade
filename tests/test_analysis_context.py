@@ -357,6 +357,148 @@ def test_tradeability_blocks_secondary_confirmation_only_source(session, setting
     assert tradeability["reason"] == "secondary_confirmation_only"
 
 
+def test_tradeability_allows_secondary_source_when_hard_catalyst_is_ticker_specific(session, settings):
+    svc = AnalysisService(settings)
+    event_ts = datetime(2026, 4, 2, 14, 0, tzinfo=timezone.utc)
+    event = Event(
+        event_type="unknown",
+        tickers=["TSLA"],
+        entities=["Tesla"],
+        severity=70,
+        confidence=68,
+        validation_status="WATCH",
+        summary="Tesla shares fell after a disappointing deliveries report",
+        event_time=event_ts,
+    )
+    session.add(event)
+    session.flush()
+
+    raw = RawItem(
+        source="cnbc",
+        source_tier=2,
+        url="https://example.com/tsla-deliveries",
+        title="Tesla shares fell after a disappointing deliveries report",
+        body="Tesla shares fell after a disappointing deliveries report. The deliveries miss signaled weaker demand and lower production efficiency.",
+        published_at=event_ts,
+        ingested_at=event_ts,
+        item_hash="analysis-tsla-cnbc-hard-catalyst",
+        metadata_json={"ticker": "TSLA"},
+        processed=True,
+    )
+    session.add(raw)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=raw.source,
+            source_tier=raw.source_tier,
+            summary=raw.title,
+        )
+    )
+    session.flush()
+
+    tradeability = svc.assess_tradeability(event, session=session)
+    assert tradeability["tradeable"] is True
+    assert tradeability["hard_event_hits"] >= 1
+
+
+def test_tradeability_recognizes_jcode_reimbursement_catalyst(session, settings):
+    svc = AnalysisService(settings)
+    event_ts = datetime(2026, 4, 2, 15, 0, tzinfo=timezone.utc)
+    event = Event(
+        event_type="unknown",
+        tickers=["JNJ"],
+        entities=["Johnson & Johnson"],
+        severity=65,
+        confidence=66,
+        validation_status="WATCH",
+        summary="Johnson & Johnson secured a permanent J-code for INLEXZO, streamlining reimbursement",
+        event_time=event_ts,
+    )
+    session.add(event)
+    session.flush()
+
+    raw = RawItem(
+        source="benzinga",
+        source_tier=1,
+        url="https://example.com/jnj-jcode",
+        title="Johnson & Johnson secures permanent J-code for INLEXZO",
+        body="Johnson & Johnson secured a permanent J-code for INLEXZO, streamlining reimbursement and billing for the therapy.",
+        published_at=event_ts,
+        ingested_at=event_ts,
+        item_hash="analysis-jnj-jcode",
+        metadata_json={"ticker": "JNJ"},
+        processed=True,
+    )
+    session.add(raw)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=raw.source,
+            source_tier=raw.source_tier,
+            summary=raw.title,
+        )
+    )
+    session.flush()
+
+    tradeability = svc.assess_tradeability(event, session=session)
+    assert tradeability["tradeable"] is True
+    assert tradeability["hard_event_hits"] >= 1
+
+
+def test_event_quality_fallback_accepts_single_source_hard_catalyst(session, settings):
+    quality_settings = settings.model_copy(update={"llm_base_url": "http://example.com", "llm_classifier_model": "test-model"})
+    svc = AnalysisService(quality_settings)
+    event_ts = datetime(2026, 4, 2, 16, 0, tzinfo=timezone.utc)
+    event = Event(
+        event_type="earnings_miss",
+        tickers=["TSLA"],
+        entities=["Tesla"],
+        severity=70,
+        confidence=72,
+        validation_status="WATCH",
+        summary="Tesla deliveries missed estimates in the latest report",
+        event_time=event_ts,
+    )
+    session.add(event)
+    session.flush()
+
+    raw = RawItem(
+        source="benzinga",
+        source_tier=1,
+        url="https://example.com/tsla-short-body",
+        title="Tesla deliveries miss estimates",
+        body="Deliveries missed estimates.",
+        published_at=event_ts,
+        ingested_at=event_ts,
+        item_hash="analysis-tsla-short-body",
+        metadata_json={"ticker": "TSLA"},
+        processed=True,
+    )
+    session.add(raw)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=raw.source,
+            source_tier=raw.source_tier,
+            summary=raw.title,
+        )
+    )
+    session.flush()
+
+    quality = svc.assess_event_quality(event, session=session)
+    assert quality["quality"] in {"MEDIUM", "HIGH"}
+    assert quality["quality_score"] >= 65
+
+
 def test_tradeability_blocks_followup_commentary_patterns(session, settings):
     svc = AnalysisService(settings)
     event_ts = datetime(2026, 3, 6, 10, 2, tzinfo=timezone.utc)

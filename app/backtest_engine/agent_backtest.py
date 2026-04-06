@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent_graph.graph import AgentGraph
 from app.analysis.service import AnalysisService
-from app.analysis.taxonomy import normalize_source_name
+from app.analysis.taxonomy import EXCLUDED_FROM_TRADING, normalize_source_name
 from app.core.config import Settings
 from app.core.logging import get_app_logger
 from app.core.utils import ensure_utc
@@ -1242,14 +1242,18 @@ class AgentBacktestEngine:
         event_quality_fail_open: bool,
     ) -> dict[str, Any] | None:
         since = as_of - timedelta(hours=48)
+        excluded_event_types = tuple(
+            event_type
+            for event_type in EXCLUDED_FROM_TRADING
+            if not (use_event_quality_filter and event_type == "unknown")
+        )
         conditions = [
             Event.confidence >= max(0, int(getattr(self.settings, "live_min_confidence", 50) or 0)),
             Event.event_time >= since,
             Event.event_time <= as_of,
+            Event.event_type.notin_(excluded_event_types),
             Event.tickers.cast(sa.Text).ilike(f'%"{ticker.upper()}"%'),
         ]
-        if not use_event_quality_filter:
-            conditions.append(Event.validation_status == "VALID")
         stmt = (
             select(Event)
             .where(*conditions)

@@ -121,6 +121,33 @@ def test_validation_single_tier0_source_is_valid(session, settings):
     assert result.watch_events == 0
 
 
+def test_validation_single_primary_hard_catalyst_becomes_valid(session, settings):
+    now = utc_now()
+    session.add(
+        RawItem(
+            source="benzinga",
+            source_tier=1,
+            url="https://benzinga/tsla-deliveries",
+            title="Tesla Q1 total deliveries missed estimates",
+            body="Tesla reported Q1 total deliveries of 358,023 units, missing the Visible Alpha estimate of 368,903 units.",
+            published_at=now,
+            ingested_at=now,
+            item_hash=make_hash("benzinga", "tsla-deliveries"),
+            metadata_json={"ticker": "TSLA", "event_type_hint": "earnings_miss"},
+            processed=False,
+        )
+    )
+    session.flush()
+
+    norm = NormalizationService(settings)
+    clusters = norm.build_clusters(session)
+    result = ValidationService().validate_and_store(session, clusters)
+
+    assert result.created_events == 1
+    assert result.valid_events == 1
+    assert result.watch_events == 0
+
+
 def test_validation_two_secondary_sources_remain_watch(session, settings):
     now = utc_now()
     first = RawItem(
