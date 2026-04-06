@@ -213,3 +213,69 @@ def test_get_ticker_news_summary_honors_explicit_since(session):
     )
 
     assert [item["id"] for item in items] == [new_item.id]
+
+
+def test_get_ticker_news_summary_rejects_short_ticker_metadata_false_positive(session):
+    now = datetime.now(timezone.utc)
+    noisy = RawItem(
+        source="cnbc",
+        source_tier=2,
+        url="https://example.com/generic-banks",
+        title="Consumers are anxious about the economy",
+        body="Generic macro commentary about household spending and deposit trends.",
+        published_at=now - timedelta(minutes=5),
+        ingested_at=now - timedelta(minutes=4),
+        item_hash="hash-generic-bac-noise",
+        metadata_json={"ticker": "BAC"},
+        processed=False,
+    )
+    real = RawItem(
+        source="reuters",
+        source_tier=1,
+        url="https://example.com/bac-real",
+        title="Bank of America expands wealth-management hiring",
+        body="Bank of America said it is expanding wealth-management hiring across major regions.",
+        published_at=now - timedelta(minutes=3),
+        ingested_at=now - timedelta(minutes=2),
+        item_hash="hash-bac-real",
+        metadata_json={"ticker": "BAC", "structured_ticker": True, "matched_tickers": ["BAC"]},
+        processed=False,
+    )
+    session.add_all([noisy, real])
+    session.flush()
+
+    items = get_ticker_news_summary(session, ticker="BAC", lookback_hours=24, limit=10)
+    assert [item["id"] for item in items] == [real.id]
+
+
+def test_get_ticker_news_summary_rejects_pg13_noise_for_pg(session):
+    now = datetime.now(timezone.utc)
+    noisy = RawItem(
+        source="benzinga",
+        source_tier=2,
+        url="https://example.com/pg13",
+        title="Streaming platform launches new PG-13 movie slate",
+        body="Entertainment industry piece about movie ratings and release windows.",
+        published_at=now - timedelta(minutes=5),
+        ingested_at=now - timedelta(minutes=4),
+        item_hash="hash-pg13-noise",
+        metadata_json={"ticker": "PG"},
+        processed=False,
+    )
+    real = RawItem(
+        source="reuters",
+        source_tier=1,
+        url="https://example.com/pg-real",
+        title="Procter & Gamble raises annual sales forecast",
+        body="Procter & Gamble raised its annual sales forecast after strong demand in household categories.",
+        published_at=now - timedelta(minutes=3),
+        ingested_at=now - timedelta(minutes=2),
+        item_hash="hash-pg-real",
+        metadata_json={"ticker": "PG", "structured_ticker": True, "matched_tickers": ["PG"]},
+        processed=False,
+    )
+    session.add_all([noisy, real])
+    session.flush()
+
+    items = get_ticker_news_summary(session, ticker="PG", lookback_hours=24, limit=10)
+    assert [item["id"] for item in items] == [real.id]

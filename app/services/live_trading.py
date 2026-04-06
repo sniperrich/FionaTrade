@@ -29,6 +29,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.analysis.taxonomy import EXCLUDED_FROM_TRADING, is_follow_up_commentary, normalize_source_name
+from app.analysis.service import AnalysisService
 from app.agent_graph.graph import AgentGraph
 from app.broker.alpaca import AlpacaBroker
 from app.core.config import DEFAULT_LIVE_ALLOWED_SOURCES, Settings
@@ -41,7 +42,7 @@ from app.services.capital_confirmation import CapitalConfirmationService
 from app.services.market_data import MarketDataService
 from app.services.runtime_control import CONTROL_LIVE_CYCLE_LEASE, CONTROL_LIVE_ENABLED, RuntimeControlService
 from app.services.worker_runtime import WorkerRuntimeService
-from app.tools.news import count_new_raw_items
+from app.tools.news import count_new_raw_items, raw_item_mentions_ticker
 
 logger = get_app_logger()
 
@@ -62,6 +63,7 @@ class LiveTradingService:
         self.market_data = MarketDataService(settings)
         self.runtime = WorkerRuntimeService()
         self.capital_confirmation = CapitalConfirmationService()
+        self.analysis = AnalysisService(settings)
 
     def run_cycle(self, session: Session, trigger: str = "scheduled") -> dict[str, Any]:
         if not _LIVE_CYCLE_MUTEX.acquire(blocking=False):
@@ -816,8 +818,9 @@ class LiveTradingService:
                 .where(EventEvidence.event_id == event.id)
                 .order_by(EventEvidence.source_tier.asc(), EventEvidence.captured_at.asc(), EventEvidence.id.asc())
             ).scalars().all()
+            tradeability = self.analysis.assess_tradeability(event, session=session)
             payload = self._event_payload(event, evidences, allowed_sources=allowed_sources)
-            if payload is not None:
+            if payload is not None and self._is_strong_tradeable_event(event, tradeability):
                 return payload
         return None
 
@@ -1396,15 +1399,21 @@ class LiveTradingService:
 
     @staticmethod
     def _raw_item_mentions_any_ticker(raw: RawItem, ticker_set: set[str]) -> bool:
-        meta = raw.metadata_json or {}
-        meta_ticker = str(meta.get("ticker") or "").upper().strip()
-        if meta_ticker and meta_ticker in ticker_set:
-            return True
-        title = (raw.title or "").upper()
-        body = (raw.body or "").upper()
         for ticker in ticker_set:
-            if ticker and (ticker in title or ticker in body):
+            if ticker and raw_item_mentions_ticker(raw, ticker):
                 return True
+        return False
+
+    @staticmethod
+    def _is_strong_tradeable_event(event: Event, tradeability: dict[str, Any]) -> bool:
+        if not tradeability.get("tradeable", False):
+            return False
+        if int(tradeability.get("strong_sources", 0) or 0) < 1:
+            return False
+        if int(tradeability.get("hard_event_hits", 0) or 0) >= 1:
+            return True
+        if int(tradeability.get("ticker_specific_hits", 0) or 0) >= 1:
+            return True
         return False
 
     def _get_agent_graph(self) -> AgentGraph:

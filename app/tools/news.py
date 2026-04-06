@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import re
 
 from sqlalchemy import select
 import sqlalchemy as sa
@@ -115,8 +116,68 @@ _TICKER_COMPANY_NAMES: dict[str, list[str]] = {
 
 
 def _metadata_ticker_pattern_clause(ticker_upper: str):
-    pattern = f'%\"ticker\": \"{ticker_upper}\"%'
-    return sa.cast(RawItem.metadata_json, sa.Text).ilike(pattern)
+    meta_text = sa.cast(RawItem.metadata_json, sa.Text)
+    matched_pattern = f'%\"matched_tickers\":%\"{ticker_upper}\"%'
+    structured_pattern = f'%\"structured_ticker\": true%'
+    direct_pattern = f'%\"ticker\": \"{ticker_upper}\"%'
+    return sa.or_(
+        meta_text.ilike(matched_pattern),
+        sa.and_(meta_text.ilike(structured_pattern), meta_text.ilike(direct_pattern)),
+    )
+
+
+def _metadata_matched_tickers(metadata_json: dict | None) -> set[str]:
+    meta = metadata_json or {}
+    found: set[str] = set()
+    raw = meta.get("matched_tickers")
+    if isinstance(raw, list):
+        for item in raw:
+            token = str(item or "").strip().upper()
+            if token:
+                found.add(token)
+    if meta.get("structured_ticker"):
+        token = str(meta.get("ticker") or "").strip().upper()
+        if token:
+            found.add(token)
+    return found
+
+
+def _text_mentions_company_name(text: str, ticker_upper: str) -> bool:
+    lowered = (text or "").lower()
+    for name in _TICKER_COMPANY_NAMES.get(ticker_upper, []):
+        pattern = r"(?<![a-z])" + re.escape(name.lower()) + r"(?![a-z])"
+        if re.search(pattern, lowered):
+            return True
+    return False
+
+
+def _text_mentions_symbol(text: str, ticker_upper: str) -> bool:
+    tokens = re.findall(r"[A-Za-z.$&']+", text or "")
+    for token in tokens:
+        cleaned = token.strip().strip("$").upper()
+        if cleaned == ticker_upper:
+            return True
+    return False
+
+
+def raw_item_mentions_ticker(raw: RawItem, ticker: str) -> bool:
+    ticker_upper = str(ticker or "").strip().upper()
+    if not ticker_upper:
+        return False
+
+    matched_tickers = _metadata_matched_tickers(getattr(raw, "metadata_json", None))
+    if ticker_upper in matched_tickers:
+        return True
+
+    text = f"{getattr(raw, 'title', '')}\n{getattr(raw, 'body', '')}"
+    if _text_mentions_company_name(text, ticker_upper):
+        return True
+
+    # Short tickers are too noisy to trust on symbol token alone (e.g. PG, HD, BAC).
+    if len(ticker_upper) <= 3:
+        return False
+
+    return _text_mentions_symbol(text, ticker_upper)
 
 
 def get_recent_events(
@@ -253,16 +314,20 @@ def get_ticker_news_summary(
         if str(source).strip()
     }
 
-    # Word-boundary patterns for ticker symbol in title
-    title_patterns = [
-        f"({ticker_upper})%",   # (AAPL)...
-        f"% {ticker_upper} %",  # ... AAPL ...
-        f"% {ticker_upper},%",  # ... AAPL,...
-        f"% {ticker_upper}:%",  # ... AAPL:...
-        f"% {ticker_upper}'%",  # ... AAPL's...
-        f"{ticker_upper} %",    # AAPL ... (start of title)
-        f"% {ticker_upper}",    # ... AAPL (end of title)
-    ]
+    # Word-boundary symbol patterns are only safe enough for longer tickers.
+    title_patterns = []
+    if len(ticker_upper) > 3:
+        title_patterns.extend(
+            [
+                f"({ticker_upper})%",
+                f"% {ticker_upper} %",
+                f"% {ticker_upper},%",
+                f"% {ticker_upper}:%",
+                f"% {ticker_upper}'%",
+                f"{ticker_upper} %",
+                f"% {ticker_upper}",
+            ]
+        )
 
     # Company name patterns (catches "Apple", "Amazon", etc.) in title and body
     company_names = _TICKER_COMPANY_NAMES.get(ticker_upper, [])
@@ -294,6 +359,8 @@ def get_ticker_news_summary(
     for row in rows:
         source_name = normalize_source_name(row.source)
         if allowed_source_set and source_name not in allowed_source_set:
+            continue
+        if not raw_item_mentions_ticker(row, ticker_upper):
             continue
         ingested_at = row.ingested_at.isoformat() if row.ingested_at else None
         published_at = row.published_at.isoformat()

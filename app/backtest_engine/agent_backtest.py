@@ -17,13 +17,15 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, func
+import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent_graph.graph import AgentGraph
+from app.analysis.service import AnalysisService
 from app.analysis.taxonomy import normalize_source_name
 from app.core.config import Settings
 from app.core.logging import get_app_logger
-from app.db.models import Bar1m
+from app.db.models import Bar1m, Event, EventEvidence
 
 logger = get_app_logger()
 
@@ -169,6 +171,7 @@ class AgentBacktestEngine:
     ) -> None:
         self.settings = settings
         self.progress_callback = progress_callback
+        self.analysis = AnalysisService(settings)
 
     def run(self, session: Session, params: dict | None = None) -> AgentBacktestResult:
         """Execute an agent-mode backtest.
@@ -329,6 +332,23 @@ class AgentBacktestEngine:
                     _safe_print(f"  [{_ts()}] 🤖 Running agents for {ticker}...", end="")
                     local_session = make_session()
                     try:
+                        trigger_event = self._find_trigger_event(
+                            local_session,
+                            ticker=ticker,
+                            as_of=as_of,
+                            allowed_sources=allowed_sources,
+                        )
+                        if trigger_event is None:
+                            _safe_print(" → HOLD 0% (strong_news_gate)")
+                            return {
+                                "ticker": ticker,
+                                "action": "HOLD",
+                                "pos_pct": 0.0,
+                                "reasoning": "[strong_news_gate] no strong ticker-specific tradeable event",
+                                "signals": {},
+                                "state": {"final_action": "HOLD", "final_position_pct": 0.0, "agent_signals": {}},
+                            }
+
                         pos = portfolio.positions.get(ticker)
                         pos_value = portfolio.position_value(ticker, close_prices.get(ticker, 0))
                         pos_pct_current = pos_value / max(current_equity, 1)
@@ -356,6 +376,8 @@ class AgentBacktestEngine:
                             },
                             "portfolio_positions": portfolio_positions,
                             "ticker_loss_streak": ticker_loss_streak,
+                            "trigger_event_id": trigger_event["id"],
+                            "trigger_event": trigger_event,
                         }
                         if allowed_sources:
                             bt_context["allowed_sources"] = allowed_sources
@@ -633,6 +655,90 @@ class AgentBacktestEngine:
             equity_curve=equity_curve, trades=all_trades,
             decisions=all_decisions, errors=errors,
         )
+
+    def _find_trigger_event(
+        self,
+        session: Session,
+        *,
+        ticker: str,
+        as_of: datetime,
+        allowed_sources: list[str] | None,
+    ) -> dict[str, Any] | None:
+        since = as_of - timedelta(hours=48)
+        stmt = (
+            select(Event)
+            .where(
+                Event.validation_status == "VALID",
+                Event.confidence >= max(0, int(getattr(self.settings, "live_min_confidence", 50) or 0)),
+                Event.event_time >= since,
+                Event.event_time <= as_of,
+                Event.tickers.cast(sa.Text).ilike(f'%"{ticker.upper()}"%'),
+            )
+            .order_by(Event.event_time.desc(), Event.created_at.desc(), Event.id.desc())
+            .limit(20)
+        )
+        events = session.execute(stmt).scalars().all()
+        for event in events:
+            evidences = session.execute(
+                select(EventEvidence)
+                .where(EventEvidence.event_id == event.id)
+                .order_by(EventEvidence.source_tier.asc(), EventEvidence.captured_at.asc(), EventEvidence.id.asc())
+            ).scalars().all()
+            payload = self._event_payload(event, evidences, allowed_sources=allowed_sources)
+            if payload is None:
+                continue
+            tradeability = self.analysis.assess_tradeability(event, session=session)
+            if self._is_strong_tradeable_event(tradeability):
+                return payload
+        return None
+
+    @staticmethod
+    def _event_payload(
+        event: Event,
+        evidences: list[EventEvidence],
+        *,
+        allowed_sources: list[str] | None,
+    ) -> dict[str, Any] | None:
+        if not evidences:
+            return None
+        allowed_source_set = {
+            normalize_source_name(str(source).strip().lower())
+            for source in (allowed_sources or [])
+            if str(source).strip()
+        }
+        normalized_sources = {
+            normalize_source_name(ev.source)
+            for ev in evidences
+            if getattr(ev, "source", None)
+        }
+        if allowed_source_set and not normalized_sources.intersection(allowed_source_set):
+            return None
+        high_quality_sources = {
+            normalize_source_name(ev.source)
+            for ev in evidences
+            if getattr(ev, "source_tier", 9) <= 1 and getattr(ev, "source", None)
+        }
+        return {
+            "id": int(event.id),
+            "event_type": str(event.event_type or "unknown"),
+            "confidence": int(event.confidence or 0),
+            "summary": str(event.summary or ""),
+            "high_quality_source_count": len(high_quality_sources),
+            "source_count": len(normalized_sources),
+            "sources": sorted(normalized_sources),
+        }
+
+    @staticmethod
+    def _is_strong_tradeable_event(tradeability: dict[str, Any]) -> bool:
+        if not tradeability.get("tradeable", False):
+            return False
+        if int(tradeability.get("strong_sources", 0) or 0) < 1:
+            return False
+        if int(tradeability.get("hard_event_hits", 0) or 0) >= 1:
+            return True
+        if int(tradeability.get("ticker_specific_hits", 0) or 0) >= 1:
+            return True
+        return False
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

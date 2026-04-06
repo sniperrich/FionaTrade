@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -9,7 +9,7 @@ from app.api.routes import backtest_options, queue_backtest
 from app.backtest_engine.agent_backtest import AgentBacktestEngine, AgentBacktestResult, BTDecision, BTTrade
 from app.backtest_engine.service import BacktestEngineService
 from app.core.config import DEFAULT_LIVE_ALLOWED_SOURCES
-from app.db.models import BacktestTrade, Bar1m, WorkerCommand
+from app.db.models import BacktestTrade, Bar1m, Event, EventEvidence, RawItem, WorkerCommand
 
 
 def _fake_agent_result() -> AgentBacktestResult:
@@ -61,6 +61,58 @@ def _fake_agent_result() -> AgentBacktestResult:
         ],
         errors=[],
     )
+
+
+def _raw_item(*, now: datetime, source: str, ticker: str, title: str, item_hash: str) -> RawItem:
+    return RawItem(
+        source=source,
+        source_tier=1,
+        url=f"https://example.com/{item_hash}",
+        title=title,
+        body=f"{title} detailed body with material company-specific information." * 8,
+        published_at=now - timedelta(minutes=5),
+        ingested_at=now - timedelta(minutes=4),
+        item_hash=item_hash,
+        metadata_json={"ticker": ticker, "structured_ticker": True, "matched_tickers": [ticker]},
+        processed=False,
+    )
+
+
+def _strong_event(session, *, now: datetime, ticker: str, source: str = "reuters") -> Event:
+    raw = _raw_item(
+        now=now,
+        source=source,
+        ticker=ticker,
+        title=f"{ticker} wins major contract and raises guidance",
+        item_hash=f"hash-{ticker.lower()}-{source}",
+    )
+    session.add(raw)
+    session.flush()
+    event = Event(
+        event_type="contract_award",
+        entities=[ticker],
+        tickers=[ticker],
+        severity=85,
+        event_time=now - timedelta(minutes=5),
+        confidence=90,
+        validation_status="VALID",
+        summary=f"{ticker} wins major contract and raises guidance",
+    )
+    session.add(event)
+    session.flush()
+    session.add(
+        EventEvidence(
+            event_id=event.id,
+            raw_item_id=raw.id,
+            url=raw.url,
+            source=source,
+            source_tier=1,
+            captured_at=now - timedelta(minutes=4),
+            summary=raw.title,
+        )
+    )
+    session.flush()
+    return event
 
 
 def test_backtest_options_default_to_agent_mode(session, settings) -> None:
@@ -195,6 +247,18 @@ def test_agent_backtest_intraday_flatten_closes_same_day(session, settings, monk
         }
 
     monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+    monkeypatch.setattr(
+        "app.backtest_engine.agent_backtest.AgentBacktestEngine._find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 1,
+            "event_type": "contract_award",
+            "confidence": 90,
+            "summary": "AAPL wins major contract and raises guidance",
+            "high_quality_source_count": 1,
+            "source_count": 1,
+            "sources": ["reuters"],
+        },
+    )
 
     session.add_all(
         [
@@ -246,6 +310,18 @@ def test_agent_backtest_passes_high_quality_sources_to_graph(session, settings, 
         }
 
     monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+    monkeypatch.setattr(
+        "app.backtest_engine.agent_backtest.AgentBacktestEngine._find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 42,
+            "event_type": "contract_award",
+            "confidence": 90,
+            "summary": "AAPL wins major contract and raises guidance",
+            "high_quality_source_count": 1,
+            "source_count": 1,
+            "sources": ["reuters"],
+        },
+    )
 
     session.add_all(
         [
@@ -268,6 +344,53 @@ def test_agent_backtest_passes_high_quality_sources_to_graph(session, settings, 
 
     assert captured_contexts
     assert captured_contexts[0]["allowed_sources"] == ["benzinga", "reuters"]
+    assert captured_contexts[0]["trigger_event_id"] == 42
+
+
+def test_agent_backtest_skips_graph_without_strong_tradeable_event(session, settings, monkeypatch) -> None:
+    now = datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc)
+    graph_called = False
+
+    def _fake_graph_run(*_args, **_kwargs):
+        nonlocal graph_called
+        graph_called = True
+        raise AssertionError("graph should not run without strong trigger event")
+
+    monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+    monkeypatch.setattr(
+        "app.backtest_engine.agent_backtest.AnalysisService.assess_tradeability",
+        lambda *_args, **_kwargs: {
+            "tradeable": False,
+            "strong_sources": 0,
+            "hard_event_hits": 0,
+            "ticker_specific_hits": 0,
+        },
+    )
+
+    session.add_all(
+        [
+            Bar1m(ticker="SPY", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=100, high=101, low=99, close=100, volume=1000, source="test"),
+        ]
+    )
+    session.flush()
+    _strong_event(session, now=now, ticker="AAPL")
+
+    result = AgentBacktestEngine(settings).run(
+        session,
+        params={
+            "tickers": ["AAPL"],
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-05",
+            "decision_frequency": 1,
+            "sources": ["reuters"],
+        },
+    )
+
+    assert graph_called is False
+    assert result.total_trades == 0
+    assert result.decisions[0].action == "HOLD"
+    assert "strong_news_gate" in result.decisions[0].reasoning
 
 
 def test_daily_realized_pnl_uses_closed_trade_pnl_not_cash_flow(settings) -> None:
