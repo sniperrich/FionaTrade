@@ -109,6 +109,7 @@
       <div class="form-group mb8">
         <label>Filters</label>
         <div class="stack" style="gap:8px">
+          <label class="text-sm"><input type="checkbox" id="bt-intraday-flatten" {% if backtest_defaults.intraday_flatten %}checked{% endif %} /> Flatten at same-day close</label>
           <label class="text-sm"><input type="checkbox" id="bt-use-validation" checked /> Use signal validation</label>
           <label class="text-sm"><input type="checkbox" id="bt-use-tradeability" checked /> Use tradeability filter</label>
           <label class="text-sm"><input type="checkbox" id="bt-use-quality-filter" /> Use event quality filter</label>
@@ -356,6 +357,7 @@ function currentBacktestPayload(){
     decision_frequency: Number(document.getElementById('bt-decision-frequency').value || 1),
     initial_capital: Number(document.getElementById('bt-initial-capital').value || 100000),
     max_position_pct: Number(document.getElementById('bt-max-position-pct').value || 0.1),
+    intraday_flatten: document.getElementById('bt-intraday-flatten').checked,
     min_confidence: Number(document.getElementById('bt-min-confidence').value || 0),
     min_severity: Number(document.getElementById('bt-min-severity').value || 0),
     use_signal_validation: document.getElementById('bt-use-validation').checked,

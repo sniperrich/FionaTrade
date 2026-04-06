@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 from fastapi import HTTPException
 
 from app.api.routes import backtest_options, queue_backtest
-from app.backtest_engine.agent_backtest import AgentBacktestResult, BTDecision, BTTrade
+from app.backtest_engine.agent_backtest import AgentBacktestEngine, AgentBacktestResult, BTDecision, BTTrade
 from app.backtest_engine.service import BacktestEngineService
-from app.db.models import BacktestTrade, WorkerCommand
+from app.db.models import BacktestTrade, Bar1m, WorkerCommand
 
 
 def _fake_agent_result() -> AgentBacktestResult:
@@ -68,6 +68,7 @@ def test_backtest_options_default_to_agent_mode(session, settings) -> None:
     assert payload["defaults"]["engine_mode"] == "agent"
     assert payload["defaults"]["decision_frequency"] == 1
     assert payload["defaults"]["tickers"] == list(settings.live_trading_tickers)
+    assert payload["defaults"]["intraday_flatten"] is False
 
 
 def test_queue_backtest_defaults_to_agent_mode(session, settings) -> None:
@@ -82,6 +83,7 @@ def test_queue_backtest_defaults_to_agent_mode(session, settings) -> None:
     assert command is not None
     assert command.payload_json["engine_mode"] == "agent"
     assert command.payload_json["tickers"] == list(settings.live_trading_tickers)
+    assert command.payload_json["intraday_flatten"] is False
 
 
 def test_queue_backtest_parses_boolean_strings_and_rejects_bad_numeric_payload(session, settings) -> None:
@@ -136,8 +138,53 @@ def test_backtest_service_agent_mode_persists_live_like_run(session, settings, m
     assert run.metrics["engine_mode"] == "agent"
     assert run.metrics["mode_label"] == "AGENT"
     assert run.metrics["events_considered"] == 1
+    assert run.metrics["profit_factor"] is None
     assert run.metrics["trades"] == 1
     assert len(run.trade_log) == 1
     assert run.trade_log[0]["ticker"] == "AAPL"
     assert run.trade_log[0]["side"] == "LONG"
     assert session.query(BacktestTrade).filter(BacktestTrade.run_id == run.id).count() == 1
+
+
+def test_agent_backtest_intraday_flatten_closes_same_day(session, settings, monkeypatch) -> None:
+    def _fake_graph_run(_self, _session, ticker, **_kwargs):
+        return {
+            "final_action": "BUY" if ticker == "AAPL" else "HOLD",
+            "final_position_pct": 0.1,
+            "final_reasoning": "positive catalyst",
+            "agent_signals": {
+                "news": {"signal": "BUY"},
+                "risk_manager": {"signal": "BUY", "metadata": {"approved": True, "max_position_pct": 0.1}},
+            },
+        }
+
+    monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+
+    session.add_all(
+        [
+            Bar1m(ticker="SPY", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="SPY", ts=datetime(2026, 1, 6, 20, 59, tzinfo=timezone.utc), open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=100, high=101, low=99, close=100, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=datetime(2026, 1, 6, 14, 30, tzinfo=timezone.utc), open=101, high=102, low=100, close=101, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=datetime(2026, 1, 6, 20, 59, tzinfo=timezone.utc), open=102, high=103, low=101, close=102, volume=1000, source="test"),
+        ]
+    )
+    session.flush()
+
+    result = AgentBacktestEngine(settings).run(
+        session,
+        params={
+            "tickers": ["AAPL"],
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-06",
+            "decision_frequency": 1,
+            "initial_capital": 100_000,
+            "max_position_pct": 0.1,
+            "slippage_pct": 0.0,
+            "intraday_flatten": True,
+        },
+    )
+
+    reasons = [trade.reason for trade in result.trades]
+    assert "intraday_flatten" in reasons
+    assert reasons[-1] == "intraday_flatten"

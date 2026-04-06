@@ -123,6 +123,18 @@ class BacktestEngineService:
             return value.strip().lower() in {"1", "true", "yes", "y", "on"}
         return default
 
+    @classmethod
+    def _json_safe(cls, value: object) -> object:
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, dict):
+            return {key: cls._json_safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._json_safe(item) for item in value]
+        if isinstance(value, tuple):
+            return [cls._json_safe(item) for item in value]
+        return value
+
     @staticmethod
     def _pct_change(base: float | None, current: float | None) -> float | None:
         if base is None or current is None or abs(base) < 1e-9:
@@ -196,6 +208,34 @@ class BacktestEngineService:
         if not regular_session_only:
             return bars
         return [bar for bar in bars if self._is_regular_session_bar(bar.ts)]
+
+    def _regular_close_bar_for_session_day(
+        self,
+        session: Session,
+        ticker: str,
+        ts,
+    ) -> Bar1m | None:
+        session_day = ensure_utc(ts).astimezone(self._NY_TZ).date()
+        ny_start = datetime.combine(session_day, self._REGULAR_SESSION_OPEN, tzinfo=self._NY_TZ)
+        ny_end = datetime.combine(session_day, self._REGULAR_SESSION_CLOSE, tzinfo=self._NY_TZ)
+        rth_start = ny_start.astimezone(ZoneInfo("UTC"))
+        rth_end = ny_end.astimezone(ZoneInfo("UTC"))
+        return (
+            session.execute(
+                select(Bar1m)
+                .where(
+                        and_(
+                        Bar1m.ticker == ticker.upper(),
+                        Bar1m.ts >= rth_start,
+                        Bar1m.ts < rth_end,
+                    )
+                )
+                .order_by(Bar1m.ts.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
 
     def _apply_slippage(self, price: float, side: str, leg: str, slippage_bps: float | None = None) -> float:
         bps = self.settings.default_slippage_bps if slippage_bps is None else max(float(slippage_bps), 0.0)
@@ -340,6 +380,10 @@ class BacktestEngineService:
         normalized_params["max_position_pct"] = float(
             params.get("max_position_pct", getattr(self.settings, "live_max_position_pct", self.settings.max_position_pct))
         )
+        normalized_params["intraday_flatten"] = self._as_bool(
+            params.get("intraday_flatten"),
+            default=getattr(self.settings, "backtest_intraday_flatten", False),
+        )
         normalized_params["use_llm"] = True
 
         if run_id is not None:
@@ -403,6 +447,7 @@ class BacktestEngineService:
                 "events_considered": len(result.decisions),
                 "agent_decisions": len(result.decisions),
                 "decision_frequency": normalized_params["decision_frequency"],
+                "intraday_flatten": normalized_params["intraday_flatten"],
                 "tickers": tickers,
                 "errors": list(result.errors or []),
                 "error_count": len(result.errors or []),
@@ -441,6 +486,7 @@ class BacktestEngineService:
                 )
             )
 
+        metrics = self._json_safe(metrics)
         run.params = normalized_params
         run.metrics = metrics
         run.equity_curve = equity_curve
@@ -839,13 +885,13 @@ class BacktestEngineService:
         wins = [x for x in pnl_list if x > 0]
         losses = [x for x in pnl_list if x < 0]
         win_rate = (len(wins) / len(pnl_list)) if pnl_list else 0.0
-        profit_factor = (sum(wins) / abs(sum(losses))) if losses else (float("inf") if wins else 0.0)
+        profit_factor = (sum(wins) / abs(sum(losses))) if losses else (None if wins else 0.0)
 
         avg_win = mean(wins) if wins else 0.0
         avg_loss = abs(mean(losses)) if losses else 0.0
         pnl_ratio = (avg_win / avg_loss) if avg_loss else 0.0
 
-        return {
+        return self._json_safe({
             "total_return": total_return,
             "annualized_return": annualized_return,
             "sharpe": sharpe,
@@ -858,7 +904,7 @@ class BacktestEngineService:
             "largest_win": max(wins) if wins else 0.0,
             "largest_loss": min(losses) if losses else 0.0,
             "trades": len(pnl_list),
-        }
+        })
 
     def run(self, session: Session, params: dict | None = None, run_id: int | None = None) -> BacktestResult:
         params = params or {}
@@ -917,6 +963,10 @@ class BacktestEngineService:
         regular_session_only = self._as_bool(
             params.get("regular_session_only"),
             default=self.settings.backtest_regular_session_only,
+        )
+        intraday_flatten = self._as_bool(
+            params.get("intraday_flatten"),
+            default=getattr(self.settings, "backtest_intraday_flatten", False),
         )
         max_next_session_delay_min = int(
             params.get("max_next_session_delay_min", self.settings.backtest_max_next_session_delay_min)
@@ -1231,6 +1281,7 @@ class BacktestEngineService:
                 "allow_unknown_with_llm": allow_unknown_with_llm,
                 "allow_next_session_entry": allow_next_session_entry,
                 "regular_session_only": regular_session_only,
+                "intraday_flatten": intraday_flatten,
                 "max_next_session_delay_min": max_next_session_delay_min,
                 "use_tradeability_filter": use_tradeability_filter,
                 "tradeability_min_score": tradeability_min_score,
@@ -1705,6 +1756,10 @@ class BacktestEngineService:
                 planned_exit_ts,
                 regular_session_only=regular_session_only,
             )
+            if intraday_flatten:
+                intraday_close_bar = self._regular_close_bar_for_session_day(session, ticker, entry_bar.ts)
+                if intraday_close_bar is not None and ensure_utc(intraday_close_bar.ts) > ensure_utc(entry_bar.ts):
+                    planned_exit_bar = intraday_close_bar
             if not planned_exit_bar:
                 emit_progress(idx)
                 continue
@@ -1752,7 +1807,7 @@ class BacktestEngineService:
 
             exit_ts = planned_exit_bar.ts
             exit_base_px = float(planned_exit_bar.close)
-            exit_reason = "HORIZON"
+            exit_reason = "INTRADAY_FLAT" if intraday_flatten else "HORIZON"
 
             if hard_stops:
                 hit = self._first_barrier_hit(
@@ -1897,6 +1952,7 @@ class BacktestEngineService:
         metrics["allow_unknown_with_llm"] = allow_unknown_with_llm
         metrics["allow_next_session_entry"] = allow_next_session_entry
         metrics["regular_session_only"] = regular_session_only
+        metrics["intraday_flatten"] = intraday_flatten
         metrics["max_next_session_delay_min"] = max_next_session_delay_min
         metrics["conviction_position_sizing"] = conviction_position_sizing
         metrics["conviction_min_risk_multiplier"] = self.settings.backtest_conviction_min_risk_multiplier
@@ -1927,6 +1983,7 @@ class BacktestEngineService:
         metrics["phase_detail"] = "Backtest completed"
         metrics["last_progress_at"] = utc_now().isoformat()
 
+        metrics = self._json_safe(metrics)
         run.metrics = metrics
         run.equity_curve = equity_curve
         run.trade_log = trade_log

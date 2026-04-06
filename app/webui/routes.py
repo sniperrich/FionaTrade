@@ -235,6 +235,7 @@ def backtests_page(
                 "decision_frequency": 1,
                 "initial_capital": settings.initial_nav,
                 "max_position_pct": getattr(settings, "live_max_position_pct", settings.max_position_pct),
+                "intraday_flatten": bool(getattr(settings, "backtest_intraday_flatten", False)),
                 "min_confidence": settings.min_trade_confidence,
                 "min_severity": 0,
                 "flow_confirmation_enabled": bool(getattr(settings, "flow_confirmation_enabled", True)),

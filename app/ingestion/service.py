@@ -16,7 +16,9 @@ from app.ingestion.fred_client import FREDClient
 from app.ingestion.rss_client import RssClient
 from app.ingestion.sec_client import SecClient
 from app.ingestion.types import SourceCheck
+from app.normalization.service import NormalizationService
 from app.schemas.types import RawNewsItem
+from app.validation.service import ValidationService
 
 
 @dataclass
@@ -25,6 +27,10 @@ class IngestionResult:
     inserted: int
     duplicate_dropped: int
     raw_item_ids: list[int]
+    created_events: int = 0
+    valid_events: int = 0
+    watch_events: int = 0
+    rejected_events: int = 0
 
 
 class IngestionService:
@@ -223,11 +229,32 @@ class IngestionService:
             raw_ids.append(row.id)
             recent_title_set.add(normalized_title)
 
+        created_events = 0
+        valid_events = 0
+        watch_events = 0
+        rejected_events = 0
+        if raw_ids:
+            clusters = NormalizationService(self.settings).build_clusters(session, raw_ids=raw_ids)
+            if clusters:
+                validation = ValidationService(
+                    corroboration_window_minutes=int(
+                        getattr(self.settings, "validation_corroboration_window_minutes", 180)
+                    )
+                ).validate_and_store(session, clusters)
+                created_events = int(validation.created_events)
+                valid_events = int(validation.valid_events)
+                watch_events = int(validation.watch_events)
+                rejected_events = int(validation.rejected_events)
+
         return IngestionResult(
             fetched=len(fetched_items),
             inserted=inserted,
             duplicate_dropped=duplicates,
             raw_item_ids=raw_ids,
+            created_events=created_events,
+            valid_events=valid_events,
+            watch_events=watch_events,
+            rejected_events=rejected_events,
         )
 
     def run(

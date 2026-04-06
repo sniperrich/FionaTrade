@@ -185,6 +185,7 @@ class AgentBacktestEngine:
         max_pos_pct = float(p.get("max_position_pct", 0.15))
         slippage_pct = float(p.get("slippage_pct", 0.0005))
         stop_loss_pct = float(p.get("stop_loss_pct", 0.07))
+        intraday_flatten = bool(p.get("intraday_flatten", getattr(self.settings, "backtest_intraday_flatten", False)))
 
         # Build list of trading days from bar data
         trading_days = self._get_trading_days(session, start, end, tickers[0])
@@ -456,6 +457,15 @@ class AgentBacktestEngine:
                     self._close_position(portfolio, ticker_sl, exec_price, day, all_trades, "stop_loss")
                     sys.stdout.flush()
 
+            if intraday_flatten:
+                for ticker_flat in list(portfolio.positions.keys()):
+                    pos = portfolio.positions.get(ticker_flat)
+                    close_price = close_prices.get(ticker_flat, 0)
+                    if not pos or close_price <= 0:
+                        continue
+                    exec_price = close_price * (1 - slippage_pct) if pos.side == "LONG" else close_price * (1 + slippage_pct)
+                    self._close_position(portfolio, ticker_flat, exec_price, day, all_trades, "intraday_flatten")
+
             # Mark-to-market at close
             equity = portfolio.equity(close_prices)
             equity_curve.append({
@@ -480,8 +490,11 @@ class AgentBacktestEngine:
                     for t, p in portfolio.positions.items()
                 ) or "none"
                 logger.info(
-                    "[agent_backtest] %s: Equity=$%,.2f  Cash=$%,.2f  Positions=%d",
-                    day, equity, portfolio.cash, len(portfolio.positions),
+                    "[agent_backtest] %s: Equity=$%s  Cash=$%s  Positions=%d",
+                    day,
+                    format(equity, ",.2f"),
+                    format(portfolio.cash, ",.2f"),
+                    len(portfolio.positions),
                 )
                 dd_pct = max_drawdown * 100
                 print(f"  [{_ts()}] 📈 {day}: Equity=${equity:,.0f} | Cash=${portfolio.cash:,.0f} | DD={dd_pct:.1f}% | Pos=[{pos_str}]")

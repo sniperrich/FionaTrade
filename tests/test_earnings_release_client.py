@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.db.models import EarningsCalendar, SourceStatus
+from app.db.models import EarningsCalendar, Event, RawItem, SourceStatus
 from app.ingestion.earnings_release_client import EarningsReleaseClient
 from app.ingestion.service import IngestionService
-from app.normalization.service import NormalizationService
 
 
 def test_earnings_release_client_builds_structured_item(session, settings):
@@ -69,12 +68,15 @@ def test_earnings_release_ingestion_persists_source_status_and_ticker(session, s
         to_date="2025-10-22",
     )
     persisted = IngestionService(settings).persist_items(session, items, [check])
-    clusters = NormalizationService(settings).build_clusters(session, raw_ids=persisted.raw_item_ids)
 
     assert persisted.inserted == 1
-    assert len(clusters) == 1
-    assert clusters[0].canonical.tickers == ["TXN"]
-    assert clusters[0].canonical.event_type == "earnings_miss"
+    assert persisted.created_events == 1
+    assert persisted.valid_events == 1
+    event = session.query(Event).one()
+    raw_item = session.query(RawItem).one()
+    assert event.tickers == ["TXN"]
+    assert event.event_type == "earnings_miss"
+    assert raw_item.processed is True
 
     status = session.query(SourceStatus).filter(SourceStatus.source_key == "earnings_release").one()
     assert status.status == "ONLINE"
