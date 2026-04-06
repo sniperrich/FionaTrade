@@ -270,9 +270,10 @@ class AgentBacktestEngine:
                         pos_pct_current = pos_value / max(current_equity, 1)
                         current_side = pos.side if pos else None
 
-                        daily_pnl = sum(
-                            t.notional * (-1 if t.side in ("BUY", "COVER") else 1)
-                            for t in all_trades if str(t.date) == str(day) and t.ticker == ticker
+                        daily_pnl = self._compute_daily_realized_pnl(
+                            all_trades,
+                            target_day=day,
+                            ticker=ticker,
                         )
 
                         bt_context = {
@@ -803,6 +804,44 @@ class AgentBacktestEngine:
                     pnls.append((entry.price - t.price) * entry.shares)
 
         return pnls
+
+    @staticmethod
+    def _compute_daily_realized_pnl(
+        trades: list[BTTrade],
+        target_day: date,
+        ticker: str | None = None,
+    ) -> float:
+        """Compute realized P&L booked on `target_day`.
+
+        This is intentionally close-date based. Opening cash flows should not be
+        treated as losses. PnL is realized only when an open trade is matched by
+        a SELL/COVER leg, including closes of positions opened on earlier days.
+        """
+        open_trades: dict[str, list[BTTrade]] = {}
+        realized = 0.0
+
+        for trade in trades:
+            if ticker and trade.ticker != ticker:
+                continue
+            if trade.side in ("BUY", "SHORT"):
+                open_trades.setdefault(trade.ticker, []).append(trade)
+                continue
+
+            opens = open_trades.get(trade.ticker, [])
+            if not opens:
+                continue
+
+            entry = opens.pop(0)
+            pnl = 0.0
+            if trade.side == "SELL":
+                pnl = (trade.price - entry.price) * entry.shares
+            elif trade.side == "COVER":
+                pnl = (entry.price - trade.price) * entry.shares
+
+            if trade.date == target_day:
+                realized += pnl
+
+        return realized
 
     @staticmethod
     def _update_loss_streak(

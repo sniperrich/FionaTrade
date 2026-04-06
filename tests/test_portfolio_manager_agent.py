@@ -103,6 +103,27 @@ class TestPortfolioManagerHoldDecision:
         assert plan["planned_action"] == "BUY"
         assert abs(float(plan["planned_position_pct"]) - 0.07) < 1e-9
 
+    def test_news_priority_blocks_short_against_bullish_news(self, settings, session):
+        agent = _make_agent(settings)
+        llm_resp = (
+            '{"action":"SHORT","position_pct":0.08,"conviction":"MEDIUM",'
+            '"supporting_agents":["macro_analyst","technicals"],"dissenting_agents":["news_sentiment"],'
+            '"entry_rationale":"risk-off","exit_criteria":"stop","reasoning":"macro and technicals bearish"}'
+        )
+        context = _build_context(
+            macro_signal="SHORT",
+            news_signal="BUY",
+            fund_signal="HOLD",
+            tech_signal="SHORT",
+        )
+        context["agent_signals"]["news_sentiment"]["confidence"] = 70
+        with patch.object(agent, "_call_llm", return_value=llm_resp):
+            result = agent.analyze(session, "XOM", context)
+
+        assert result.signal == "HOLD"
+        assert result.metadata["position_pct"] == 0.0
+        assert "news_priority_gate" in result.reasoning
+
 
 class TestPortfolioManagerWeightedConfidence:
     def test_weighted_confidence_calculation(self, settings, session):
@@ -114,9 +135,9 @@ class TestPortfolioManagerWeightedConfidence:
             "fundamentals": {"signal": "BUY", "confidence": 70},
             "macro_analyst": {"signal": "BUY", "confidence": 50},
         }
-        # 80*0.20 + 60*0.60 + 70*0.10 + 50*0.10 = 16+36+7+5 = 64.0
+        # 80*0.10 + 60*0.80 + 70*0.05 + 50*0.05 = 8+48+3.5+2.5 = 62.0
         conf = agent._compute_weighted_confidence(signals)
-        assert abs(conf - 64.0) < 0.1
+        assert abs(conf - 62.0) < 0.1
 
     def test_no_signals_returns_fifty(self, settings, session):
         agent = _make_agent(settings)

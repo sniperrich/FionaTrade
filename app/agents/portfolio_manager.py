@@ -70,10 +70,10 @@ IMPORTANT RULES:
 3. HOLD is valid when: conviction=LOW, or fewer than 2 agents align on the same direction, or the signal is unclear/mixed
 4. BUY or SHORT requires: conviction=HIGH or MEDIUM, AND at least 2 agents clearly aligned in the same direction
 5. Use SELL to close an existing long position when outlook has turned negative or neutral
-6. Weight news ({news_weight_pct}%) highest for direction; technicals ({tech_weight_pct}%) as timing confirmation; macro ({macro_weight_pct}%) and fundamentals ({fund_weight_pct}%) as low-weight filters
+6. Weight news ({news_weight_pct}%) highest for direction; technicals ({tech_weight_pct}%) only as timing confirmation; macro ({macro_weight_pct}%) and fundamentals ({fund_weight_pct}%) are low-weight filters
 7. conviction=HIGH requires 3+ agents aligned; MEDIUM requires 2 agents aligned; LOW for 0-1 aligned or mixed signals
-8. When 2+ agents say SHORT/SELL, you SHOULD short or sell — do not override with BUY
-9. When agents disagree (e.g., fund=BUY, tech=SHORT, news=SHORT), side with the MAJORITY; if tie, return HOLD
+8. If news_sentiment has a clear directional view with medium/high confidence, do NOT take the opposite direction; prefer HOLD when the rest of the stack conflicts with news
+9. When agents disagree, break ties in favor of news_sentiment; if news conflicts with the rest and the edge is unclear, return HOLD instead of trading against news
 10. Typical position_pct: 5-8% for MEDIUM conviction, 8-15% for HIGH conviction
 11. If we already hold a profitable position and agents are mixed, prefer HOLD over reversal
 12. It is FINE to return HOLD — do not force trades just because risk is approved
@@ -89,14 +89,33 @@ class PortfolioManagerAgent(BaseAgent):
 
     def _base_weights(self) -> dict[str, float]:
         weights = {
-            "news_sentiment": float(getattr(self.settings, "agent_weight_news", 0.60)),
-            "technicals": float(getattr(self.settings, "agent_weight_technicals", 0.20)),
-            "macro_analyst": float(getattr(self.settings, "agent_weight_macro", 0.10)),
-            "fundamentals": float(getattr(self.settings, "agent_weight_fundamentals", 0.10)),
+            "news_sentiment": float(getattr(self.settings, "agent_weight_news", 0.80)),
+            "technicals": float(getattr(self.settings, "agent_weight_technicals", 0.10)),
+            "macro_analyst": float(getattr(self.settings, "agent_weight_macro", 0.05)),
+            "fundamentals": float(getattr(self.settings, "agent_weight_fundamentals", 0.05)),
         }
         safe = {k: max(0.0, v) for k, v in weights.items()}
         total = sum(safe.values()) or 1.0
         return {k: (v / total) for k, v in safe.items()}
+
+    @staticmethod
+    def _is_directionally_opposed(
+        action: str,
+        news_signal: str,
+        news_confidence: float,
+    ) -> bool:
+        if news_confidence < 55:
+            return False
+        action = str(action or "").upper().strip()
+        news_signal = str(news_signal or "").upper().strip()
+        positive_news = {"BUY"}
+        negative_news = {"SHORT", "SELL"}
+        positive_actions = {"BUY"}
+        negative_actions = {"SHORT", "SELL"}
+        return (
+            (news_signal in positive_news and action in negative_actions)
+            or (news_signal in negative_news and action in positive_actions)
+        )
 
     def analyze(self, session: Session, ticker: str, context: dict | None = None) -> AgentSignal:
         context = context or {}
@@ -204,6 +223,18 @@ class PortfolioManagerAgent(BaseAgent):
                 action = "HOLD"
             if not risk_approved:
                 action = "HOLD"
+
+            news_signal = str(news.get("signal", "N/A") or "N/A").upper().strip()
+            news_confidence = float(news.get("confidence", 0) or 0)
+            if self._is_directionally_opposed(action, news_signal, news_confidence):
+                action = "HOLD"
+                parsed["position_pct"] = 0.0
+                parsed["execution_mode"] = "NO_TRADE"
+                parsed["planned_action"] = "HOLD"
+                parsed["reasoning"] = (
+                    f"{parsed.get('reasoning', '')} "
+                    f"[news_priority_gate blocked opposite action: news={news_signal} conf={int(news_confidence)}]"
+                ).strip()
 
             raw_position_pct = min(float(parsed.get("position_pct", 0.0)), max_pct)
             position_pct = raw_position_pct

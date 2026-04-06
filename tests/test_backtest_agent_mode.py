@@ -188,3 +188,25 @@ def test_agent_backtest_intraday_flatten_closes_same_day(session, settings, monk
     reasons = [trade.reason for trade in result.trades]
     assert "intraday_flatten" in reasons
     assert reasons[-1] == "intraday_flatten"
+
+
+def test_daily_realized_pnl_uses_closed_trade_pnl_not_cash_flow(settings) -> None:
+    trades = [
+        BTTrade(date=date(2026, 1, 5), ticker="AAPL", side="BUY", shares=10.0, price=100.0, notional=1000.0, reason="open"),
+        BTTrade(date=date(2026, 1, 5), ticker="AAPL", side="SELL", shares=10.0, price=103.0, notional=1030.0, reason="close"),
+        BTTrade(date=date(2026, 1, 5), ticker="MSFT", side="SHORT", shares=5.0, price=200.0, notional=1000.0, reason="open"),
+        BTTrade(date=date(2026, 1, 5), ticker="MSFT", side="COVER", shares=5.0, price=190.0, notional=950.0, reason="close"),
+    ]
+
+    pnl = AgentBacktestEngine(settings)._compute_daily_realized_pnl(
+        trades,
+        target_day=date(2026, 1, 5),
+        ticker="AAPL",
+    )
+    assert pnl == 30.0
+
+    total_pnl = AgentBacktestEngine(settings)._compute_daily_realized_pnl(
+        trades,
+        target_day=date(2026, 1, 5),
+    )
+    assert total_pnl == 80.0

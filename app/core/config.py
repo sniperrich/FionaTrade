@@ -265,10 +265,10 @@ class Settings(BaseSettings):
     flow_confirmation_enabled: bool = True
     flow_confirmation_soft_gate: bool = True
     # Base agent weights (direction bias).
-    agent_weight_news: float = 0.60
-    agent_weight_technicals: float = 0.20
-    agent_weight_macro: float = 0.10
-    agent_weight_fundamentals: float = 0.10
+    agent_weight_news: float = 0.80
+    agent_weight_technicals: float = 0.10
+    agent_weight_macro: float = 0.05
+    agent_weight_fundamentals: float = 0.05
     # Entry-planning controls (Live First v1).
     live_entry_planning_enabled: bool = True
     live_entry_plan_default_valid_minutes: int = 180

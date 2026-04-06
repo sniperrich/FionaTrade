@@ -568,37 +568,37 @@
     <div>
       <div style="display:flex;justify-content:space-between;margin-bottom:4px">
         <span class="setting-label" style="color:var(--accent)">📰 News Sentiment</span>
-        <span class="slider-val" id="w-news-val">{{ (led.get('AGENT_WEIGHT_NEWS', 0.6) * 100) | int }}%</span>
+        <span class="slider-val" id="w-news-val">{{ (led.get('AGENT_WEIGHT_NEWS', 0.8) * 100) | int }}%</span>
       </div>
       <input type="range" id="w-news" min="5" max="80" step="1"
-        value="{{ (led.get('AGENT_WEIGHT_NEWS', 0.6) * 100) | int }}"
+        value="{{ (led.get('AGENT_WEIGHT_NEWS', 0.8) * 100) | int }}"
         oninput="onWeightChange()" class="w100" />
     </div>
     <div>
       <div style="display:flex;justify-content:space-between;margin-bottom:4px">
         <span class="setting-label" style="color:var(--blue)">📊 Technicals</span>
-        <span class="slider-val" id="w-tech-val">{{ (led.get('AGENT_WEIGHT_TECHNICALS', 0.2) * 100) | int }}%</span>
+        <span class="slider-val" id="w-tech-val">{{ (led.get('AGENT_WEIGHT_TECHNICALS', 0.1) * 100) | int }}%</span>
       </div>
       <input type="range" id="w-tech" min="5" max="80" step="1"
-        value="{{ (led.get('AGENT_WEIGHT_TECHNICALS', 0.2) * 100) | int }}"
+        value="{{ (led.get('AGENT_WEIGHT_TECHNICALS', 0.1) * 100) | int }}"
         oninput="onWeightChange()" class="w100" />
     </div>
     <div>
       <div style="display:flex;justify-content:space-between;margin-bottom:4px">
         <span class="setting-label" style="color:var(--green)">🌍 Macro</span>
-        <span class="slider-val" id="w-macro-val">{{ (led.get('AGENT_WEIGHT_MACRO', 0.1) * 100) | int }}%</span>
+        <span class="slider-val" id="w-macro-val">{{ (led.get('AGENT_WEIGHT_MACRO', 0.05) * 100) | int }}%</span>
       </div>
       <input type="range" id="w-macro" min="5" max="80" step="1"
-        value="{{ (led.get('AGENT_WEIGHT_MACRO', 0.1) * 100) | int }}"
+        value="{{ (led.get('AGENT_WEIGHT_MACRO', 0.05) * 100) | int }}"
         oninput="onWeightChange()" class="w100" />
     </div>
     <div>
       <div style="display:flex;justify-content:space-between;margin-bottom:4px">
         <span class="setting-label" style="color:var(--purple)">🏢 Fundamentals</span>
-        <span class="slider-val" id="w-fund-val">{{ (led.get('AGENT_WEIGHT_FUNDAMENTALS', 0.1) * 100) | int }}%</span>
+        <span class="slider-val" id="w-fund-val">{{ (led.get('AGENT_WEIGHT_FUNDAMENTALS', 0.05) * 100) | int }}%</span>
       </div>
       <input type="range" id="w-fund" min="5" max="80" step="1"
-        value="{{ (led.get('AGENT_WEIGHT_FUNDAMENTALS', 0.1) * 100) | int }}"
+        value="{{ (led.get('AGENT_WEIGHT_FUNDAMENTALS', 0.05) * 100) | int }}"
         oninput="onWeightChange()" class="w100" />
     </div>
   </div>
@@ -1010,10 +1010,10 @@ function applyAll(ed){
   setChk('s-enable-finnhub-company-news-live', ed.ENABLE_FINNHUB_COMPANY_NEWS_LIVE !== false);
 
   // Weights
-  setRange('w-news',  Math.round((parseFloat(ed.AGENT_WEIGHT_NEWS ?? 0.6)) * 100));
-  setRange('w-tech',  Math.round((parseFloat(ed.AGENT_WEIGHT_TECHNICALS ?? 0.2)) * 100));
-  setRange('w-macro', Math.round((parseFloat(ed.AGENT_WEIGHT_MACRO ?? 0.1)) * 100));
-  setRange('w-fund',  Math.round((parseFloat(ed.AGENT_WEIGHT_FUNDAMENTALS ?? 0.1)) * 100));
+  setRange('w-news',  Math.round((parseFloat(ed.AGENT_WEIGHT_NEWS ?? 0.8)) * 100));
+  setRange('w-tech',  Math.round((parseFloat(ed.AGENT_WEIGHT_TECHNICALS ?? 0.1)) * 100));
+  setRange('w-macro', Math.round((parseFloat(ed.AGENT_WEIGHT_MACRO ?? 0.05)) * 100));
+  setRange('w-fund',  Math.round((parseFloat(ed.AGENT_WEIGHT_FUNDAMENTALS ?? 0.05)) * 100));
   onWeightChange();
 
   // LLM
