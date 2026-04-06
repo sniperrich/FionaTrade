@@ -26,7 +26,7 @@ from app.analysis.taxonomy import (
     normalize_source_name,
     resolve_event_type_for_text,
 )
-from app.core.config import Settings
+from app.core.config import DEFAULT_LIVE_ALLOWED_SOURCES, Settings
 from app.core.logging import ensure_logging, get_app_logger, log_writeout
 from app.core.utils import ensure_utc, utc_now
 from app.db.models import BacktestRun, BacktestTrade, Bar1m, Event
@@ -384,7 +384,26 @@ class BacktestEngineService:
             params.get("intraday_flatten"),
             default=getattr(self.settings, "backtest_intraday_flatten", False),
         )
+        normalized_params["sources"] = sorted(
+            {
+                normalize_source_name(str(source).strip().lower())
+                for source in self._as_list(params.get("sources") or DEFAULT_LIVE_ALLOWED_SOURCES)
+                if str(source).strip()
+            }
+            - {"yahoo", "yahoo_finance"}
+        )
         normalized_params["use_llm"] = True
+        start_date = date.fromisoformat(str(normalized_params["start_date"]))
+        end_date = date.fromisoformat(str(normalized_params["end_date"]))
+        decision_frequency = normalized_params["decision_frequency"]
+        progress_engine = AgentBacktestEngine(self.settings)
+        trading_days = progress_engine._get_trading_days(
+            session,
+            start_date,
+            end_date,
+            tickers[0] if tickers else "SPY",
+        )
+        total_decision_steps = max(1, len(trading_days[::decision_frequency]) * len(tickers)) if tickers else 1
 
         if run_id is not None:
             run = session.get(BacktestRun, run_id)
@@ -411,16 +430,52 @@ class BacktestEngineService:
             "phase": "agent_execution",
             "phase_label": self._BACKTEST_PHASE_LABELS["agent_execution"],
             "phase_current": 0,
-            "phase_total": len(tickers),
+            "phase_total": total_decision_steps,
             "phase_pct": 0.0,
-            "phase_detail": f"Running full agent graph for {len(tickers)} tickers",
+            "phase_detail": (
+                f"Running full agent graph for {len(tickers)} tickers "
+                f"across {max(1, len(trading_days[::decision_frequency]))} decision days"
+            ),
+            "progress_current": 0,
+            "progress_total": total_decision_steps,
+            "progress_pct": 0.0,
             "last_progress_at": utc_now().isoformat(),
         }
         session.flush()
         session.commit()
 
+        def persist_agent_progress(processed: int, total: int, detail: str) -> None:
+            nonlocal run
+            progress_total = max(1, int(total or total_decision_steps or 1))
+            progress_current = max(0, min(int(processed or 0), progress_total))
+            progress_pct = max(0.0, min(100.0, (progress_current / progress_total) * 100.0))
+            partial_metrics = dict(run.metrics or {})
+            partial_metrics.update(
+                {
+                    "engine_mode": "agent",
+                    "mode_label": self._engine_mode_label("agent", use_llm=True),
+                    "phase": "agent_execution",
+                    "phase_label": self._BACKTEST_PHASE_LABELS["agent_execution"],
+                    "phase_current": progress_current,
+                    "phase_total": progress_total,
+                    "phase_pct": progress_pct,
+                    "progress_current": progress_current,
+                    "progress_total": progress_total,
+                    "progress_pct": progress_pct,
+                    "phase_detail": detail,
+                    "last_progress_at": utc_now().isoformat(),
+                }
+            )
+            run.status = "RUNNING"
+            run.metrics = partial_metrics
+            session.flush()
+            session.commit()
+
         started = time.perf_counter()
-        result = AgentBacktestEngine(self.settings).run(session, params=normalized_params)
+        result = AgentBacktestEngine(
+            self.settings,
+            progress_callback=persist_agent_progress,
+        ).run(session, params=normalized_params)
         trade_log = self._pair_agent_trade_legs(result.trades)
         equity_curve = []
         for point in result.equity_curve or []:
@@ -449,18 +504,19 @@ class BacktestEngineService:
                 "decision_frequency": normalized_params["decision_frequency"],
                 "intraday_flatten": normalized_params["intraday_flatten"],
                 "tickers": tickers,
+                "selected_sources": normalized_params["sources"],
                 "errors": list(result.errors or []),
                 "error_count": len(result.errors or []),
                 "winning_trades": result.winning_trades,
                 "losing_trades": result.losing_trades,
                 "stop_losses": result.stop_losses,
-                "progress_current": len(result.decisions),
-                "progress_total": len(result.decisions),
+                "progress_current": total_decision_steps,
+                "progress_total": total_decision_steps,
                 "progress_pct": 100.0,
                 "phase": "completed",
                 "phase_label": self._BACKTEST_PHASE_LABELS["completed"],
-                "phase_current": len(result.decisions) if result.decisions else 1,
-                "phase_total": len(result.decisions) if result.decisions else 1,
+                "phase_current": total_decision_steps,
+                "phase_total": total_decision_steps,
                 "phase_pct": 100.0,
                 "phase_detail": "Agent backtest completed",
                 "last_progress_at": utc_now().isoformat(),

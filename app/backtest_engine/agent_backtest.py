@@ -13,13 +13,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent_graph.graph import AgentGraph
+from app.analysis.taxonomy import normalize_source_name
 from app.core.config import Settings
 from app.core.logging import get_app_logger
 from app.db.models import Bar1m
@@ -160,8 +161,14 @@ class AgentBacktestResult:
 class AgentBacktestEngine:
     """Backtest the agent pipeline over historical data."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> None:
         self.settings = settings
+        self.progress_callback = progress_callback
 
     def run(self, session: Session, params: dict | None = None) -> AgentBacktestResult:
         """Execute an agent-mode backtest.
@@ -186,6 +193,14 @@ class AgentBacktestEngine:
         slippage_pct = float(p.get("slippage_pct", 0.0005))
         stop_loss_pct = float(p.get("stop_loss_pct", 0.07))
         intraday_flatten = bool(p.get("intraday_flatten", getattr(self.settings, "backtest_intraday_flatten", False)))
+        allowed_sources = sorted(
+            {
+                normalize_source_name(str(source).strip().lower())
+                for source in (p.get("sources") or [])
+                if str(source).strip()
+            }
+            - {"yahoo", "yahoo_finance"}
+        )
 
         # Build list of trading days from bar data
         trading_days = self._get_trading_days(session, start, end, tickers[0])
@@ -199,6 +214,7 @@ class AgentBacktestEngine:
             )
 
         decision_days = trading_days[::freq]
+        total_decisions = len(decision_days) * len(tickers)
         logger.info(
             "[agent_backtest] %d trading days, %d decision days, %d tickers",
             len(trading_days), len(decision_days), len(tickers),
@@ -237,9 +253,56 @@ class AgentBacktestEngine:
 
         peak_equity = initial_capital
         max_drawdown = 0.0
+        processed_decisions = 0
+        pending_entries: dict[date, list[dict[str, Any]]] = {}
+
+        def _publish_progress(detail: str) -> None:
+            if not self.progress_callback:
+                return
+            self.progress_callback(processed_decisions, total_decisions, detail)
 
         for day_idx, day in enumerate(trading_days):
             is_decision_day = day in decision_days
+
+            if intraday_flatten:
+                scheduled_entries = pending_entries.pop(day, [])
+                if scheduled_entries:
+                    open_prices = {
+                        ticker_open: self._get_price(session, ticker_open, day, "open")
+                        for ticker_open in tickers
+                    }
+                    for entry in scheduled_entries:
+                        ticker = entry["ticker"]
+                        action = entry["action"]
+                        pos_pct = float(entry["pos_pct"])
+                        decision_idx = int(entry["decision_idx"])
+                        trades_before = len(all_trades)
+                        open_price = open_prices.get(ticker)
+                        if not open_price or open_price <= 0:
+                            continue
+                        exec_price = open_price * (1 + slippage_pct) if action == "BUY" else open_price * (1 - slippage_pct)
+                        target_pct = min(pos_pct, max_pos_pct)
+                        equity = portfolio.equity({k: float(v) for k, v in open_prices.items() if v and v > 0})
+                        atr_stop = self._compute_atr_stop(
+                            session, ticker, day, default_stop=stop_loss_pct
+                        )
+                        self._execute_decision(
+                            portfolio,
+                            ticker,
+                            action,
+                            target_pct,
+                            equity,
+                            exec_price,
+                            day,
+                            all_trades,
+                            stop_loss_pct=atr_stop,
+                        )
+                        if len(all_trades) > trades_before:
+                            t = all_trades[-1]
+                            print(f"    💰 TRADE: {t.side} {t.shares:.2f} {t.ticker} @ ${t.price:.2f} (${t.notional:,.0f}) [stop={atr_stop:.1%}]")
+                            sys.stdout.flush()
+                            ticker_last_side[ticker] = action
+                            ticker_entry_decision_idx[ticker] = decision_idx
 
             if is_decision_day:
                 # Run agent graph for each ticker — parallel across tickers
@@ -247,6 +310,7 @@ class AgentBacktestEngine:
                 decision_idx = decision_days.index(day) + 1
                 print(f"\n[{_ts()}] 📊 Decision Day {decision_idx}/{len(decision_days)}: {day}")
                 sys.stdout.flush()
+                _publish_progress(f"Decision day {decision_idx}/{len(decision_days)} started for {len(tickers)} tickers")
 
                 # Pre-compute shared state for all tickers
                 close_prices = self._get_close_prices(session, tickers, day)
@@ -293,6 +357,8 @@ class AgentBacktestEngine:
                             "portfolio_positions": portfolio_positions,
                             "ticker_loss_streak": ticker_loss_streak,
                         }
+                        if allowed_sources:
+                            bt_context["allowed_sources"] = allowed_sources
                         state = graph.run(local_session, ticker, context=bt_context, as_of=as_of)
                     finally:
                         local_session.close()
@@ -343,6 +409,12 @@ class AgentBacktestEngine:
                             err = f"Day {day} {tk}: {exc}"
                             logger.warning("[agent_backtest] %s", err)
                             errors.append(err)
+                        finally:
+                            processed_decisions += 1
+                            _publish_progress(
+                                f"Processed {processed_decisions}/{total_decisions} agent decisions "
+                                f"(day {decision_idx}/{len(decision_days)} · {tk})"
+                            )
 
                 # Execute trades sequentially (order matters for cash management)
                 for result in sorted(ticker_results, key=lambda r: tickers.index(r["ticker"])):
@@ -382,6 +454,18 @@ class AgentBacktestEngine:
                             print(f"    🏭 SECTOR LIMIT: {ticker} ({ticker_sector}) blocked — already {len(sector_positions)} in sector ({', '.join(sector_positions)})")
                             sys.stdout.flush()
                         else:
+                            if intraday_flatten:
+                                pending_entries.setdefault(next_day, []).append(
+                                    {
+                                        "ticker": ticker,
+                                        "action": action,
+                                        "pos_pct": pos_pct,
+                                        "decision_idx": decision_idx,
+                                    }
+                                )
+                                print(f"    🗓️  SCHEDULED: {action} {ticker} for {next_day} open")
+                                sys.stdout.flush()
+                                continue
                             open_price = self._get_price(session, ticker, next_day, "open")
                             if open_price and open_price > 0:
                                 exec_price = open_price * (1 + slippage_pct) if action == "BUY" else open_price * (1 - slippage_pct)

@@ -10,7 +10,7 @@ from sqlalchemy import and_, desc, distinct, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.deps import get_app_settings, get_db, require_api_access
-from app.core.config import Settings, get_settings
+from app.core.config import DEFAULT_LIVE_ALLOWED_SOURCES, Settings, get_settings
 from app.core.utils import ensure_utc, utc_now
 from app.backtest_engine.service import BacktestEngineService
 from app.agents.reward import batch_score_runs
@@ -696,7 +696,7 @@ def backtest_options(
             "engine_mode": "agent",
             "use_llm": True,
             "event_profile": "",
-            "sources": [],
+            "sources": [source for source in DEFAULT_LIVE_ALLOWED_SOURCES if source not in {"yahoo", "yahoo_finance"}],
             "tickers": list(settings.live_trading_tickers or settings.agent_tickers_override or settings.sp100_tickers[:5]),
             "decision_frequency": 1,
             "initial_capital": settings.initial_nav,
@@ -767,13 +767,20 @@ def queue_backtest(
         }
     ) or list(settings.live_trading_tickers)
 
+    selected_sources = _normalize_source_list(
+        payload.get("sources")
+        or (DEFAULT_LIVE_ALLOWED_SOURCES if engine_mode == "agent" else [])
+    )
+    if engine_mode == "agent":
+        selected_sources = [source for source in selected_sources if source not in {"yahoo", "yahoo_finance"}]
+
     params = {
         "start_date": str(start_date),
         "end_date": str(end_date),
         "engine_mode": engine_mode,
         "use_llm": _payload_bool(payload, "use_llm", False),
         "event_profile": str(payload.get("event_profile") or "").strip().lower(),
-        "sources": _normalize_source_list(payload.get("sources")),
+        "sources": selected_sources,
         "tickers": tickers,
         "initial_capital": _payload_float(payload, "initial_capital", settings.initial_nav, minimum=1000.0),
         "max_position_pct": _payload_float(

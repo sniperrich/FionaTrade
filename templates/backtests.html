@@ -129,10 +129,10 @@
       </div>
       <div class="form-group mb12">
         <label>Source Filter</label>
-        <div class="text-muted text-sm mb8">仅 `Event + LLM / Event + Rules` 模式使用。留空表示不过滤。</div>
+        <div class="text-muted text-sm mb8">Agent 模式会把这些 source 作为新闻上下文白名单；默认仅启用高质量源并排除 Yahoo。</div>
         <div id="bt-sources" class="grid g3" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
           {% for source in backtest_sources %}
-          <label class="text-sm"><input type="checkbox" value="{{ source }}" /> {{ source }}</label>
+          <label class="text-sm"><input type="checkbox" value="{{ source }}" {% if source in backtest_defaults.sources %}checked{% endif %} /> {{ source }}</label>
           {% endfor %}
           {% if not backtest_sources %}
           <div class="empty-state">No event evidence sources found yet.</div>

@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from app.api.routes import backtest_options, queue_backtest
 from app.backtest_engine.agent_backtest import AgentBacktestEngine, AgentBacktestResult, BTDecision, BTTrade
 from app.backtest_engine.service import BacktestEngineService
+from app.core.config import DEFAULT_LIVE_ALLOWED_SOURCES
 from app.db.models import BacktestTrade, Bar1m, WorkerCommand
 
 
@@ -69,6 +70,7 @@ def test_backtest_options_default_to_agent_mode(session, settings) -> None:
     assert payload["defaults"]["decision_frequency"] == 1
     assert payload["defaults"]["tickers"] == list(settings.live_trading_tickers)
     assert payload["defaults"]["intraday_flatten"] is False
+    assert payload["defaults"]["sources"] == [source for source in DEFAULT_LIVE_ALLOWED_SOURCES if source not in {"yahoo", "yahoo_finance"}]
 
 
 def test_queue_backtest_defaults_to_agent_mode(session, settings) -> None:
@@ -84,6 +86,7 @@ def test_queue_backtest_defaults_to_agent_mode(session, settings) -> None:
     assert command.payload_json["engine_mode"] == "agent"
     assert command.payload_json["tickers"] == list(settings.live_trading_tickers)
     assert command.payload_json["intraday_flatten"] is False
+    assert command.payload_json["sources"] == [source for source in DEFAULT_LIVE_ALLOWED_SOURCES if source not in {"yahoo", "yahoo_finance"}]
 
 
 def test_queue_backtest_parses_boolean_strings_and_rejects_bad_numeric_payload(session, settings) -> None:
@@ -146,6 +149,39 @@ def test_backtest_service_agent_mode_persists_live_like_run(session, settings, m
     assert session.query(BacktestTrade).filter(BacktestTrade.run_id == run.id).count() == 1
 
 
+def test_backtest_service_agent_mode_uses_decision_progress_total(session, settings, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.backtest_engine.service.AgentBacktestEngine._get_trading_days",
+        lambda *_args, **_kwargs: [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)],
+    )
+
+    def _fake_run(self, *_args, **_kwargs):
+        assert self.progress_callback is not None
+        self.progress_callback(1, 3, "Processed 1/3 agent decisions")
+        self.progress_callback(2, 3, "Processed 2/3 agent decisions")
+        return _fake_agent_result()
+
+    monkeypatch.setattr("app.backtest_engine.service.AgentBacktestEngine.run", _fake_run)
+
+    result = BacktestEngineService(settings).run(
+        session,
+        params={
+            "engine_mode": "agent",
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-07",
+            "tickers": ["AAPL"],
+            "decision_frequency": 1,
+        },
+    )
+
+    run = BacktestEngineService(settings).get_run(session, result.run_id)
+    assert run is not None
+    assert run.metrics["progress_total"] == 3
+    assert run.metrics["phase_total"] == 3
+    assert run.metrics["progress_current"] == 3
+    assert run.metrics["phase_current"] == 3
+
+
 def test_agent_backtest_intraday_flatten_closes_same_day(session, settings, monkeypatch) -> None:
     def _fake_graph_run(_self, _session, ticker, **_kwargs):
         return {
@@ -188,6 +224,50 @@ def test_agent_backtest_intraday_flatten_closes_same_day(session, settings, monk
     reasons = [trade.reason for trade in result.trades]
     assert "intraday_flatten" in reasons
     assert reasons[-1] == "intraday_flatten"
+    buy_trade = next(trade for trade in result.trades if trade.side == "BUY")
+    sell_trade = next(trade for trade in result.trades if trade.side == "SELL")
+    assert buy_trade.date == date(2026, 1, 6)
+    assert sell_trade.date == date(2026, 1, 6)
+
+
+def test_agent_backtest_passes_high_quality_sources_to_graph(session, settings, monkeypatch) -> None:
+    captured_contexts: list[dict] = []
+
+    def _fake_graph_run(_self, _session, ticker, **kwargs):
+        captured_contexts.append(dict(kwargs.get("context") or {}))
+        return {
+            "final_action": "HOLD",
+            "final_position_pct": 0.0,
+            "final_reasoning": "no trade",
+            "agent_signals": {
+                "news": {"signal": "HOLD"},
+                "risk_manager": {"signal": "HOLD", "metadata": {"approved": False}},
+            },
+        }
+
+    monkeypatch.setattr("app.backtest_engine.agent_backtest.AgentGraph.run", _fake_graph_run)
+
+    session.add_all(
+        [
+            Bar1m(ticker="SPY", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=100, high=100, low=100, close=100, volume=1000, source="test"),
+            Bar1m(ticker="AAPL", ts=datetime(2026, 1, 5, 20, 59, tzinfo=timezone.utc), open=100, high=101, low=99, close=100, volume=1000, source="test"),
+        ]
+    )
+    session.flush()
+
+    AgentBacktestEngine(settings).run(
+        session,
+        params={
+            "tickers": ["AAPL"],
+            "start_date": "2026-01-05",
+            "end_date": "2026-01-05",
+            "decision_frequency": 1,
+            "sources": ["benzinga", "reuters", "yahoo_finance"],
+        },
+    )
+
+    assert captured_contexts
+    assert captured_contexts[0]["allowed_sources"] == ["benzinga", "reuters"]
 
 
 def test_daily_realized_pnl_uses_closed_trade_pnl_not_cash_flow(settings) -> None:
