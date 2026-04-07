@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from app.db.models import EntryPlan, WorkerRunEvent
 from app.services.live_trading import LiveTradingService
 
@@ -62,7 +64,8 @@ def test_process_ticker_creates_and_replaces_wait_plan(session, settings, monkey
     assert abs(float(plans[1].target_pct) - 0.06) < 1e-9
 
 
-def test_execute_active_wait_until_open_plan_triggers_order(session, settings, monkeypatch) -> None:
+@pytest.mark.parametrize("label", ["open", "market_open"])
+def test_execute_active_wait_until_open_plan_triggers_order(session, settings, monkeypatch, label: str) -> None:
     service = LiveTradingService(settings)
 
     plan = EntryPlan(
@@ -104,7 +107,7 @@ def test_execute_active_wait_until_open_plan_triggers_order(session, settings, m
         portfolio_value=100_000.0,
         tickers=["MSFT"],
         cycle_id="cycle-open",
-        msi={"label": "open", "tradeable": True, "et_time_str": "09:31 ET"},
+        msi={"label": label, "tradeable": True, "et_time_str": "09:31 ET"},
         run=None,
     )
 
@@ -114,7 +117,8 @@ def test_execute_active_wait_until_open_plan_triggers_order(session, settings, m
     assert plan.triggered_at is not None
 
 
-def test_execute_active_plan_emits_trigger_log_event(session, settings, monkeypatch) -> None:
+@pytest.mark.parametrize("label", ["open", "market_open"])
+def test_execute_active_plan_emits_trigger_log_event(session, settings, monkeypatch, label: str) -> None:
     service = LiveTradingService(settings)
 
     plan = EntryPlan(
@@ -166,7 +170,7 @@ def test_execute_active_plan_emits_trigger_log_event(session, settings, monkeypa
         portfolio_value=100_000.0,
         tickers=["NVDA"],
         cycle_id="cycle-log",
-        msi={"label": "open", "tradeable": True, "et_time_str": "09:31 ET"},
+        msi={"label": label, "tradeable": True, "et_time_str": "09:31 ET"},
         run=run,
     )
 
@@ -249,3 +253,85 @@ def test_flow_soft_gate_downgrades_to_wait_breakout(session, settings, monkeypat
     assert latest_plan is not None
     assert latest_plan.execution_mode == "WAIT_BREAKOUT_CONFIRMATION"
     assert abs(float(latest_plan.target_pct) - 0.035) < 1e-9
+
+
+def test_flow_soft_gate_trims_existing_position_without_adding(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+
+    class DummyGraph:
+        def run(self, _session, _ticker, context=None, progress_callback=None):
+            return {
+                "final_action": "BUY",
+                "final_position_pct": 0.10,
+                "final_reasoning": "news catalyst strong",
+                "portfolio_manager_result": {
+                    "confidence": 80,
+                    "metadata": {"action": "BUY", "position_pct": 0.10},
+                },
+                "execution_plan": {"execution_mode": "IMMEDIATE"},
+            }
+
+    monkeypatch.setattr(service, "_get_agent_graph", lambda: DummyGraph())
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 77,
+            "event_type": "contract_award",
+            "confidence": 90,
+            "high_quality_source_count": 2,
+        },
+    )
+    monkeypatch.setattr(service.market_data, "is_ticker_cache_fresh", lambda *_args, **_kwargs: (True, 1.0))
+    monkeypatch.setattr(
+        service.capital_confirmation,
+        "evaluate",
+        lambda _session, ticker, direction: {
+            "flow_score": 30,
+            "flow_bucket": "WEAK",
+            "position_multiplier": 0.35,
+        },
+    )
+
+    placed_market_orders: list[dict] = []
+    placed_bracket_orders: list[dict] = []
+
+    class DummyBroker:
+        def get_latest_price(self, _ticker):
+            return 100.0
+
+        def get_position(self, _ticker):
+            return SimpleNamespace(quantity=60)
+
+        def get_open_orders(self, _ticker):
+            return []
+
+        def place_order(self, **kwargs):
+            placed_market_orders.append(kwargs)
+            return SimpleNamespace(success=True, order_id="ord-trim-1", error=None)
+
+        def place_bracket_order(self, **kwargs):
+            placed_bracket_orders.append(kwargs)
+            return SimpleNamespace(success=True, order_id="ord-bracket-1", error=None)
+
+    result = service._process_ticker(
+        session,
+        DummyBroker(),
+        "AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="flowtrim1",
+        msi={"et_time_str": "10:15 ET", "label": "open", "tradeable": True},
+        dry_run=False,
+        run=None,
+    )
+
+    assert result["action"] == "SELL"
+    assert result["order_placed"] is True
+    assert result["flow_score"] == 30
+    assert result["flow_manage_mode"] == "MANAGE_EXISTING_ONLY"
+    assert result["stop_loss"] is None
+    assert result["take_profit"] is None
+    assert len(placed_market_orders) == 1
+    assert not placed_bracket_orders
+    assert placed_market_orders[0]["action"] == "SELL"
+    assert placed_market_orders[0]["quantity"] == 25

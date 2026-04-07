@@ -925,6 +925,15 @@ class LiveTradingService:
             "short_positions_count": sum(1 for pos in positions if float(pos.quantity or 0.0) < 0),
         }
 
+    @staticmethod
+    def _has_same_direction_position(desired_action: str, current_qty: float) -> bool:
+        desired = str(desired_action or "").upper()
+        if desired == "BUY":
+            return current_qty > 0
+        if desired == "SHORT":
+            return current_qty < 0
+        return False
+
     def _same_theme_direction_count(
         self,
         session: Session,
@@ -1218,7 +1227,7 @@ class LiveTradingService:
         trigger = dict(plan.trigger_json or {})
 
         if mode == "WAIT_UNTIL_OPEN":
-            if msi.get("label") == "open" and bool(msi.get("tradeable")):
+            if str(msi.get("label") or "").lower() in {"open", "market_open"} and bool(msi.get("tradeable")):
                 return True, "regular session is open"
             return False, f"waiting for regular open (current={msi.get('label')})"
 
@@ -1677,11 +1686,25 @@ class LiveTradingService:
         except Exception:
             pass
 
+        current_qty_for_flow = 0.0
+        if (
+            not dry_run
+            and desired_action in {"BUY", "SHORT"}
+            and bool(getattr(self.settings, "flow_confirmation_enabled", True))
+        ):
+            try:
+                current_pos_for_flow = broker.get_position(ticker)
+                current_qty_for_flow = float(current_pos_for_flow.quantity) if current_pos_for_flow else 0.0
+            except Exception:
+                current_qty_for_flow = 0.0
+
         flow_info: dict[str, Any] = {
             "flow_score": None,
             "flow_bucket": None,
             "position_multiplier": None,
+            "flow_manage_mode": None,
         }
+        manage_existing_only = False
         if (
             not dry_run
             and bool(getattr(self.settings, "flow_confirmation_enabled", True))
@@ -1701,23 +1724,32 @@ class LiveTradingService:
                 "flow_score": flow_score,
                 "flow_bucket": flow.get("flow_bucket"),
                 "position_multiplier": multiplier,
+                "flow_manage_mode": None,
             }
             reasoning = (
                 f"{reasoning} | flow={flow_score} bucket={flow.get('flow_bucket')} x{multiplier:.2f}"
             )[:1000]
             if flow_score < 40:
-                planned_action = desired_action
-                desired_action = "HOLD"
-                execution_plan = {
-                    "execution_mode": "WAIT_BREAKOUT_CONFIRMATION",
-                    "planned_action": planned_action,
-                    "planned_position_pct": target_pct,
-                    "valid_for_minutes": int(getattr(self.settings, "live_entry_plan_default_valid_minutes", 180)),
-                    "entry_plan": {
-                        "breakout_lookback_min": int(getattr(self.settings, "live_entry_plan_breakout_lookback_min", 15)),
-                        "notes": "flow_score_below_40",
-                    },
-                }
+                if self._has_same_direction_position(desired_action, current_qty_for_flow):
+                    manage_existing_only = True
+                    flow_info["flow_manage_mode"] = "MANAGE_EXISTING_ONLY"
+                    reasoning = (
+                        f"{reasoning} | weak_flow_manage_existing_only current_qty={current_qty_for_flow:.4f}"
+                    )[:1000]
+                else:
+                    planned_action = desired_action
+                    desired_action = "HOLD"
+                    flow_info["flow_manage_mode"] = "WAIT_BREAKOUT_CONFIRMATION"
+                    execution_plan = {
+                        "execution_mode": "WAIT_BREAKOUT_CONFIRMATION",
+                        "planned_action": planned_action,
+                        "planned_position_pct": target_pct,
+                        "valid_for_minutes": int(getattr(self.settings, "live_entry_plan_default_valid_minutes", 180)),
+                        "entry_plan": {
+                            "breakout_lookback_min": int(getattr(self.settings, "live_entry_plan_breakout_lookback_min", 15)),
+                            "notes": "flow_score_below_40",
+                        },
+                    }
 
         if dry_run:
             status = "analysis" if dry_run else "skipped"
@@ -1924,15 +1956,16 @@ class LiveTradingService:
             broker=broker,
             ticker=ticker,
             desired_action=desired_action,
-                target_pct=target_pct,
-                portfolio_value=portfolio_value,
-                cycle_id=cycle_id,
-                msi=msi,
-                agent_run_id=agent_run_id,
-                reasoning=reasoning,
-                run=run,
-                trigger_event=trigger_event,
-            )
+            target_pct=target_pct,
+            portfolio_value=portfolio_value,
+            cycle_id=cycle_id,
+            msi=msi,
+            agent_run_id=agent_run_id,
+            reasoning=reasoning,
+            run=run,
+            trigger_event=trigger_event,
+            same_direction_manage_only=manage_existing_only,
+        )
         order_result.update(
             {
                 "used_cached_macro": used_cached_macro,
@@ -2148,6 +2181,7 @@ class LiveTradingService:
         reasoning: str,
         run: WorkerRun | None,
         trigger_event: dict[str, Any] | None = None,
+        same_direction_manage_only: bool = False,
     ) -> dict[str, Any]:
         if run is not None:
             self._persist_progress_update(
@@ -2221,7 +2255,7 @@ class LiveTradingService:
                 update={"stage": "position_sizing", "agent": None},
             )
         target_dollars = portfolio_value * target_pct
-        target_qty = int(target_dollars / current_price)
+        target_qty = int((target_dollars / current_price) + 1e-6)
         if target_qty < _MIN_SHARES:
             self._record_live_trade(
                 session,
@@ -2239,8 +2273,18 @@ class LiveTradingService:
             )
             return {"ticker": ticker, "action": desired_action, "order_placed": False, "reason": "insufficient capital"}
 
-        order_action, order_qty = self._resolve_order(desired_action, target_qty, current_qty)
+        order_action, order_qty = self._resolve_order(
+            desired_action,
+            target_qty,
+            current_qty,
+            same_direction_manage_only=same_direction_manage_only,
+        )
         if order_action is None or order_qty < _MIN_SHARES:
+            no_change_reason = "Position already at target"
+            result_reason = "position unchanged"
+            if same_direction_manage_only and self._has_same_direction_position(desired_action, current_qty):
+                no_change_reason = f"Weak flow confirmation: holding existing {desired_action} without adding"
+                result_reason = "weak_flow_hold_existing"
             self._record_live_trade(
                 session,
                 cycle_id=cycle_id,
@@ -2253,9 +2297,9 @@ class LiveTradingService:
                 status="no_change",
                 et_time=msi["et_time_str"],
                 market_session=msi["label"],
-                reasoning="Position already at target",
+                reasoning=no_change_reason,
             )
-            return {"ticker": ticker, "action": desired_action, "order_placed": False, "reason": "position unchanged"}
+            return {"ticker": ticker, "action": desired_action, "order_placed": False, "reason": result_reason}
 
         is_new_directional_position = current_qty == 0 and order_action in {"BUY", "SHORT"}
         live_control = self._live_control_state(session)
@@ -2472,18 +2516,32 @@ class LiveTradingService:
             )
             return {"ticker": ticker, "action": desired_action, "order_placed": False, "reason": "open_order_exists"}
 
-        stop_price, tp_price = self._compute_stop_take(session, ticker, current_price, order_action)
-        logger.info(
-            "[live] %s %s %d shares @ ~$%.2f | sl=%.2f tp=%.2f (%.1f%% of $%.0f)",
-            order_action,
-            ticker,
-            order_qty,
-            current_price,
-            stop_price,
-            tp_price,
-            target_pct * 100,
-            portfolio_value,
-        )
+        use_bracket_order = order_action in {"BUY", "SHORT"}
+        stop_price: float | None = None
+        tp_price: float | None = None
+        if use_bracket_order:
+            stop_price, tp_price = self._compute_stop_take(session, ticker, current_price, order_action)
+            logger.info(
+                "[live] %s %s %d shares @ ~$%.2f | sl=%.2f tp=%.2f (%.1f%% of $%.0f)",
+                order_action,
+                ticker,
+                order_qty,
+                current_price,
+                stop_price,
+                tp_price,
+                target_pct * 100,
+                portfolio_value,
+            )
+        else:
+            logger.info(
+                "[live] %s %s %d shares @ ~$%.2f | rebalance to %.1f%% target of $%.0f",
+                order_action,
+                ticker,
+                order_qty,
+                current_price,
+                target_pct * 100,
+                portfolio_value,
+            )
 
         if run is not None:
             self._persist_progress_update(
@@ -2493,13 +2551,20 @@ class LiveTradingService:
                 cycle_id=cycle_id,
                 update={"stage": "placing_order", "agent": None},
             )
-        result = broker.place_bracket_order(
-            ticker=ticker,
-            action=order_action,
-            quantity=order_qty,
-            take_profit_price=tp_price,
-            stop_loss_price=stop_price,
-        )
+        if use_bracket_order:
+            result = broker.place_bracket_order(
+                ticker=ticker,
+                action=order_action,
+                quantity=order_qty,
+                take_profit_price=tp_price,
+                stop_loss_price=stop_price,
+            )
+        else:
+            result = broker.place_order(
+                ticker=ticker,
+                action=order_action,
+                quantity=order_qty,
+            )
         status = "submitted" if result.success else "error"
         self._record_live_trade(
             session,
@@ -2528,7 +2593,14 @@ class LiveTradingService:
             "error": result.error,
         }
 
-    def _resolve_order(self, desired: str, target_qty: int, current_qty: float) -> tuple[str | None, int]:
+    def _resolve_order(
+        self,
+        desired: str,
+        target_qty: int,
+        current_qty: float,
+        *,
+        same_direction_manage_only: bool = False,
+    ) -> tuple[str | None, int]:
         current_long = max(0, current_qty)
         current_short = max(0, -current_qty)
 
@@ -2537,7 +2609,11 @@ class LiveTradingService:
                 return "COVER", int(current_short)
             delta = target_qty - int(current_long)
             if delta > 0:
+                if same_direction_manage_only and current_long > 0:
+                    return None, 0
                 return "BUY", delta
+            if delta < 0:
+                return "SELL", abs(delta)
             return None, 0
 
         if desired == "SHORT":
@@ -2545,7 +2621,11 @@ class LiveTradingService:
                 return "SELL", int(current_long)
             delta = target_qty - int(current_short)
             if delta > 0:
+                if same_direction_manage_only and current_short > 0:
+                    return None, 0
                 return "SHORT", delta
+            if delta < 0:
+                return "COVER", abs(delta)
             return None, 0
 
         if desired == "SELL":

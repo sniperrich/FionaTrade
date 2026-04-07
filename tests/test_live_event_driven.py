@@ -507,6 +507,33 @@ def test_live_trigger_event_quality_gate_can_accept_unknown_event(session, setti
     assert payload["id"] == event.id
 
 
+def test_live_trigger_event_accepts_new_default_high_quality_source(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+    now = datetime.now(timezone.utc)
+    event = _strong_event(session, now=now, ticker="AAPL", source="marketwatch")
+
+    monkeypatch.setattr(
+        service.analysis,
+        "assess_event_quality",
+        lambda *_args, **_kwargs: {
+            "quality": "HIGH",
+            "quality_score": 85,
+            "reason": "ticker-specific marketwatch catalyst",
+        },
+    )
+
+    payload = service._find_trigger_event(
+        session,
+        ticker="AAPL",
+        since=now - timedelta(hours=1),
+        allowed_sources=service._allowed_source_set(),
+    )
+
+    assert payload is not None
+    assert payload["id"] == event.id
+    assert "marketwatch" in payload["sources"]
+
+
 def test_live_trigger_event_without_quality_filter_accepts_strong_watch_event(session, settings, monkeypatch) -> None:
     live_settings = settings.model_copy(
         update={

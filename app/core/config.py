@@ -19,6 +19,12 @@ DEFAULT_LIVE_ALLOWED_SOURCES = [
     "benzinga",
     "reuters",
     "cnbc",
+    "marketwatch",
+    "nytimes",
+    "ft",
+    "axios",
+    "wsj",
+    "bloomberg",
     "earnings_release",
     "sec",
 ]

@@ -124,6 +124,9 @@ def test_backtest_options_default_to_agent_mode(session, settings) -> None:
     assert payload["defaults"]["tickers"] == list(settings.live_trading_tickers)
     assert payload["defaults"]["intraday_flatten"] is False
     assert payload["defaults"]["sources"] == [source for source in DEFAULT_LIVE_ALLOWED_SOURCES if source not in {"yahoo", "yahoo_finance"}]
+    assert payload["defaults"]["use_event_quality_filter"] is settings.backtest_use_event_quality_filter
+    assert payload["defaults"]["event_quality_min_score"] == settings.backtest_event_quality_min_score
+    assert payload["defaults"]["event_quality_fail_open"] is settings.backtest_event_quality_fail_open
 
 
 def test_queue_backtest_defaults_to_agent_mode(session, settings) -> None:
@@ -141,6 +144,9 @@ def test_queue_backtest_defaults_to_agent_mode(session, settings) -> None:
     assert command.payload_json["tickers"] == list(settings.live_trading_tickers)
     assert command.payload_json["intraday_flatten"] is False
     assert command.payload_json["sources"] == [source for source in DEFAULT_LIVE_ALLOWED_SOURCES if source not in {"yahoo", "yahoo_finance"}]
+    assert command.payload_json["use_event_quality_filter"] is settings.backtest_use_event_quality_filter
+    assert command.payload_json["event_quality_min_score"] == settings.backtest_event_quality_min_score
+    assert command.payload_json["event_quality_fail_open"] is settings.backtest_event_quality_fail_open
 
 
 def test_queue_backtest_parses_boolean_strings_and_rejects_bad_numeric_payload(session, settings) -> None:
