@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.db.models import EntryPlan, WorkerRunEvent
+from app.db.models import AgentRun, EntryPlan, WorkerRunEvent
 from app.services.live_trading import LiveTradingService
 
 
@@ -17,7 +17,12 @@ def test_process_ticker_creates_and_replaces_wait_plan(session, settings, monkey
             return {
                 "final_action": "HOLD",
                 "final_position_pct": 0.0,
+                "final_confidence": 82,
                 "final_reasoning": "timing not ideal",
+                "portfolio_manager_result": {
+                    "confidence": 82,
+                    "metadata": {"action": "HOLD", "position_pct": 0.06},
+                },
                 "execution_plan": {
                     "execution_mode": "WAIT_PULLBACK",
                     "planned_action": "BUY",
@@ -28,6 +33,16 @@ def test_process_ticker_creates_and_replaces_wait_plan(session, settings, monkey
             }
 
     monkeypatch.setattr(service, "_get_agent_graph", lambda: DummyGraph())
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 11,
+            "event_type": "contract_award",
+            "confidence": 90,
+            "high_quality_source_count": 2,
+        },
+    )
     monkeypatch.setattr(service, "_latest_cached_close", lambda _session, _ticker: 100.0)
 
     class DummyBroker:
@@ -64,6 +79,49 @@ def test_process_ticker_creates_and_replaces_wait_plan(session, settings, monkey
     assert abs(float(plans[1].target_pct) - 0.06) < 1e-9
 
 
+def test_process_ticker_does_not_create_wait_plan_without_trigger_event(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+
+    class DummyGraph:
+        def run(self, _session, _ticker, context=None, progress_callback=None):
+            return {
+                "final_action": "HOLD",
+                "final_position_pct": 0.0,
+                "final_reasoning": "wait for open",
+                "portfolio_manager_result": {
+                    "confidence": 84,
+                    "metadata": {"action": "HOLD", "position_pct": 0.07},
+                },
+                "execution_plan": {
+                    "execution_mode": "WAIT_UNTIL_OPEN",
+                    "planned_action": "BUY",
+                    "planned_position_pct": 0.07,
+                    "valid_for_minutes": 120,
+                    "entry_plan": {},
+                },
+            }
+
+    monkeypatch.setattr(service, "_get_agent_graph", lambda: DummyGraph())
+    monkeypatch.setattr(service, "_find_trigger_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_latest_cached_close", lambda _session, _ticker: 100.0)
+
+    result = service._process_ticker(
+        session,
+        object(),
+        "JPM",
+        portfolio_value=100_000.0,
+        cycle_id="noeventplan1",
+        msi={"et_time_str": "08:45 ET", "label": "pre_market", "tradeable": False},
+        dry_run=False,
+        run=None,
+    )
+
+    assert result["action"] == "HOLD"
+    assert result["blocked_by_missing_event"] is True
+    assert result.get("plan_created") is not True
+    assert session.query(EntryPlan).filter(EntryPlan.ticker == "JPM").count() == 0
+
+
 @pytest.mark.parametrize("label", ["open", "market_open"])
 def test_execute_active_wait_until_open_plan_triggers_order(session, settings, monkeypatch, label: str) -> None:
     service = LiveTradingService(settings)
@@ -81,6 +139,16 @@ def test_execute_active_wait_until_open_plan_triggers_order(session, settings, m
     session.flush()
 
     monkeypatch.setattr(service.market_data, "is_ticker_cache_fresh", lambda _session, _ticker, max_age_minutes=None: (True, 1.0))
+    monkeypatch.setattr(
+        service,
+        "_trigger_event_for_agent_run",
+        lambda *_args, **_kwargs: {
+            "id": 21,
+            "event_type": "major_litigation",
+            "confidence": 88,
+            "high_quality_source_count": 2,
+        },
+    )
 
     class DummyBroker:
         def get_latest_price(self, _ticker):
@@ -144,6 +212,16 @@ def test_execute_active_plan_emits_trigger_log_event(session, settings, monkeypa
         "is_ticker_cache_fresh",
         lambda _session, _ticker, max_age_minutes=None: (True, 1.0),
     )
+    monkeypatch.setattr(
+        service,
+        "_trigger_event_for_agent_run",
+        lambda *_args, **_kwargs: {
+            "id": 22,
+            "event_type": "major_litigation",
+            "confidence": 88,
+            "high_quality_source_count": 2,
+        },
+    )
 
     class DummyBroker:
         def get_latest_price(self, _ticker):
@@ -184,6 +262,55 @@ def test_execute_active_plan_emits_trigger_log_event(session, settings, monkeypa
     payload = event.payload_json or {}
     assert payload.get("plan_id") == plan.id
     assert payload.get("status") == "triggered"
+
+
+def test_execute_active_plan_invalidates_missing_trigger_event(session, settings, monkeypatch) -> None:
+    service = LiveTradingService(settings)
+
+    agent_run = AgentRun(
+        ticker="JPM",
+        trigger="scheduled",
+        final_action="HOLD",
+        final_confidence=64,
+        final_position_pct=0.0,
+        final_reasoning="wait for open",
+        portfolio_output={"metadata": {"action": "HOLD"}},
+    )
+    session.add(agent_run)
+    session.flush()
+
+    plan = EntryPlan(
+        ticker="JPM",
+        agent_run_id=agent_run.id,
+        status="ACTIVE",
+        execution_mode="WAIT_UNTIL_OPEN",
+        planned_action="BUY",
+        target_pct=0.07,
+        trigger_json={},
+        valid_until=datetime.now(timezone.utc).replace(microsecond=0),
+    )
+    session.add(plan)
+    session.flush()
+
+    class DummyBroker:
+        def get_latest_price(self, _ticker):
+            pytest.fail("get_latest_price should not be called for invalid entry plans")
+
+    result = service._execute_active_entry_plans(
+        session=session,
+        broker=DummyBroker(),
+        portfolio_value=100_000.0,
+        tickers=["JPM"],
+        cycle_id="cycle-invalid-plan",
+        msi={"label": "market_open", "tradeable": True, "et_time_str": "09:31 ET"},
+        run=None,
+    )
+
+    assert result["triggered_tickers"] == []
+    assert result["results"][0]["reason"] == "invalid_missing_trigger_event"
+    session.refresh(plan)
+    assert plan.status == "INVALIDATED"
+    assert plan.trigger_reason == "entry plan invalidated: missing trigger_event"
 
 
 def test_flow_soft_gate_downgrades_to_wait_breakout(session, settings, monkeypatch) -> None:

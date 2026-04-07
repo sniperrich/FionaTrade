@@ -1580,6 +1580,16 @@ class LiveTradingService:
         blocked_by_news_conflict = False
         used_cached_macro = bool(state.get("used_cached_macro", graph_context.get("used_cached_macro", False)))
         used_cached_fund = bool(state.get("used_cached_fundamentals", graph_context.get("used_cached_fundamentals", False)))
+
+        def _current_gate_target() -> tuple[str | None, bool]:
+            if desired_action in {"BUY", "SHORT", "SELL"}:
+                return desired_action, False
+            mode = str(execution_plan.get("execution_mode", "NO_TRADE") or "NO_TRADE").upper().strip()
+            planned = str(execution_plan.get("planned_action", "HOLD") or "HOLD").upper().strip()
+            if desired_action == "HOLD" and mode in _WAIT_MODES and planned in {"BUY", "SHORT", "SELL"}:
+                return planned, True
+            return None, False
+
         if run is not None:
             self._persist_progress_update(
                 session=session,
@@ -1590,22 +1600,28 @@ class LiveTradingService:
             )
 
         target_pct = min(target_pct, self.settings.live_max_position_pct)
-        if desired_action in {"BUY", "SHORT", "SELL"} and final_confidence < live_min_confidence:
+        gated_action, gated_is_plan = _current_gate_target()
+        if gated_action and final_confidence < live_min_confidence:
             blocked_by_confidence = True
-            prior_action = desired_action
             desired_action = "HOLD"
             target_pct = 0.0
             execution_plan = {}
+            confidence_outcome = (
+                f"cleared pending {gated_action} plan"
+                if gated_is_plan
+                else f"downgraded {gated_action}->HOLD"
+            )
             reasoning = (
                 f"{reasoning} | confidence_gate={final_confidence}<{live_min_confidence}, "
-                f"downgraded {prior_action}->HOLD"
+                f"{confidence_outcome}"
             )[:1000]
             if run is not None:
+                blocked_what = "pending plan" if gated_is_plan else "action"
                 self._persist_runtime_event(
                     session=session,
                     run_id=run.id,
                     message=(
-                        f"{ticker}: confidence gate blocked {prior_action} "
+                        f"{ticker}: confidence gate blocked {blocked_what} {gated_action} "
                         f"(confidence={final_confidence}, min={live_min_confidence})"
                     ),
                     level="info",
@@ -1613,60 +1629,78 @@ class LiveTradingService:
                     ticker=ticker,
                     agent="portfolio_manager",
                     payload={
-                        "blocked_action": prior_action,
+                        "blocked_action": gated_action,
+                        "blocked_pending_plan": gated_is_plan,
                         "final_confidence": final_confidence,
                         "live_min_confidence": live_min_confidence,
                     },
                 )
 
         news_signal = str((state.get("news_sentiment_result") or {}).get("signal", "") or "").upper().strip()
-        if desired_action in {"BUY", "SHORT", "SELL"} and not trigger_event:
+        gated_action, gated_is_plan = _current_gate_target()
+        if gated_action and not trigger_event:
             blocked_by_missing_event = True
-            prior_action = desired_action
             desired_action = "HOLD"
             target_pct = 0.0
             execution_plan = {}
+            missing_event_outcome = (
+                f"cleared pending {gated_action} plan"
+                if gated_is_plan
+                else f"downgraded {gated_action}->HOLD"
+            )
             reasoning = (
-                f"{reasoning} | event_gate=no_trigger_event, downgraded {prior_action}->HOLD"
+                f"{reasoning} | event_gate=no_trigger_event, {missing_event_outcome}"
             )[:1000]
             if run is not None:
+                blocked_what = "pending plan" if gated_is_plan else "action"
                 self._persist_runtime_event(
                     session=session,
                     run_id=run.id,
-                    message=f"{ticker}: event gate blocked {prior_action} (missing trigger_event_id)",
+                    message=f"{ticker}: event gate blocked {blocked_what} {gated_action} (missing trigger_event_id)",
                     level="info",
                     stage="event_gate_blocked",
                     ticker=ticker,
                     agent="portfolio_manager",
-                    payload={"blocked_action": prior_action, "reason": "missing_trigger_event"},
+                    payload={
+                        "blocked_action": gated_action,
+                        "blocked_pending_plan": gated_is_plan,
+                        "reason": "missing_trigger_event",
+                    },
                 )
 
+        gated_action, gated_is_plan = _current_gate_target()
         if (
-            desired_action in {"SHORT", "SELL"}
+            gated_action in {"SHORT", "SELL"}
             and news_signal == "BUY"
             and trigger_event is not None
             and int(trigger_event.get("high_quality_source_count", 0) or 0) < 2
         ):
             blocked_by_news_conflict = True
-            prior_action = desired_action
             desired_action = "HOLD"
             target_pct = 0.0
             execution_plan = {}
+            news_conflict_outcome = (
+                f"cleared pending {gated_action} plan"
+                if gated_is_plan
+                else f"downgraded {gated_action}->HOLD"
+            )
             reasoning = (
-                f"{reasoning} | news_conflict_gate=BUY_vs_{prior_action}, "
+                f"{reasoning} | news_conflict_gate=BUY_vs_{gated_action}, "
                 f"high_quality_sources={trigger_event.get('high_quality_source_count', 0)}<2"
             )[:1000]
             if run is not None:
+                blocked_what = "pending plan" if gated_is_plan else "action"
                 self._persist_runtime_event(
                     session=session,
                     run_id=run.id,
-                    message=f"{ticker}: news conflict blocked {prior_action} (tier0/1 corroboration insufficient)",
+                    message=f"{ticker}: news conflict blocked {blocked_what} {gated_action} (tier0/1 corroboration insufficient)",
                     level="info",
                     stage="news_conflict_blocked",
                     ticker=ticker,
                     agent="portfolio_manager",
                     payload={
-                        "blocked_action": prior_action,
+                        "blocked_action": gated_action,
+                        "blocked_pending_plan": gated_is_plan,
                         "news_signal": news_signal,
                         "trigger_event_id": trigger_event.get("id"),
                         "high_quality_source_count": int(trigger_event.get("high_quality_source_count", 0) or 0),
@@ -2020,6 +2054,37 @@ class LiveTradingService:
         triggered_tickers: set[str] = set()
         for plan in rows:
             ticker = plan.ticker
+            plan_trigger_event = self._trigger_event_for_agent_run(session, agent_run_id=plan.agent_run_id)
+            if plan.planned_action in {"BUY", "SHORT", "SELL"} and plan_trigger_event is None:
+                now = datetime.now(timezone.utc)
+                plan.status = "INVALIDATED"
+                plan.updated_at = now
+                plan.trigger_reason = "entry plan invalidated: missing trigger_event"[:1000]
+                self._emit_plan_event(
+                    session,
+                    run=run,
+                    stage="entry_plan_invalidated",
+                    ticker=ticker,
+                    message=f"Entry plan #{plan.id} invalidated: missing trigger_event",
+                    level="warn",
+                    payload={
+                        "plan_id": plan.id,
+                        "status": "invalidated",
+                        "reason": "missing_trigger_event",
+                        "planned_action": plan.planned_action,
+                        "agent_run_id": plan.agent_run_id,
+                    },
+                )
+                session.flush()
+                results.append(
+                    {
+                        "plan_id": plan.id,
+                        "ticker": ticker,
+                        "order_placed": False,
+                        "reason": "invalid_missing_trigger_event",
+                    }
+                )
+                continue
             try:
                 current_price = broker.get_latest_price(ticker)
             except Exception as exc:
@@ -2110,7 +2175,7 @@ class LiveTradingService:
                 agent_run_id=plan.agent_run_id,
                 reasoning=f"Triggered entry plan #{plan.id}: {trigger_reason}",
                 run=run,
-                trigger_event=self._trigger_event_for_agent_run(session, agent_run_id=plan.agent_run_id),
+                trigger_event=plan_trigger_event,
             )
             if exec_result.get("order_placed"):
                 plan.status = "TRIGGERED"
