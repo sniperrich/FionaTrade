@@ -572,6 +572,27 @@ def build_news_context_text(
         expanded_articles: Optional dict from get_articles_full_text() — when provided,
             these articles are injected as full-text blocks below the headline list.
     """
+    return build_news_context_payload(
+        session,
+        ticker,
+        lookback_hours=lookback_hours,
+        as_of=as_of,
+        since=since,
+        expanded_articles=expanded_articles,
+        allowed_sources=allowed_sources,
+    )["text"]
+
+
+def build_news_context_payload(
+    session: Session,
+    ticker: str,
+    lookback_hours: int = 336,
+    as_of: datetime | None = None,
+    since: datetime | None = None,
+    expanded_articles: dict[int, dict] | None = None,
+    allowed_sources: list[str] | None = None,
+) -> dict[str, object]:
+    """Build news context plus lightweight counts for grounding checks."""
     ref_time = as_of or datetime.now(timezone.utc)
 
     events = get_recent_events(
@@ -634,4 +655,9 @@ def build_news_context_text(
             lines.append(full_body)
             lines.append("-" * 60)
 
-    return "\n".join(lines)
+    return {
+        "text": "\n".join(lines),
+        "event_count": len(events),
+        "headline_count": len(news),
+        "full_article_count": len(expanded_articles or {}),
+    }

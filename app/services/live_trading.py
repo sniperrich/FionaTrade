@@ -28,6 +28,7 @@ import sqlalchemy as sa
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
+from app.analysis.rules_fallback import fallback_action
 from app.analysis.taxonomy import EXCLUDED_FROM_TRADING, is_follow_up_commentary, normalize_source_name
 from app.analysis.service import AnalysisService
 from app.agent_graph.graph import AgentGraph
@@ -379,7 +380,14 @@ class LiveTradingService:
                             cycle_start=cycle_start,
                             new_tradeable_by_ticker=new_tradeable_by_ticker,
                         )
-                        if should_skip:
+                        has_open_position = False
+                        if should_skip and not dry_run:
+                            try:
+                                current_pos = broker.get_position(ticker)
+                                has_open_position = bool(current_pos and float(current_pos.quantity or 0.0) != 0.0)
+                            except Exception:
+                                has_open_position = False
+                        if should_skip and not has_open_position:
                             ticker_cooldown_skipped += 1
                             results.append(
                                 {
@@ -860,6 +868,7 @@ class LiveTradingService:
         return {
             "id": int(event.id),
             "event_type": str(event.event_type or "unknown"),
+            "prior_direction": self._event_prior_direction(event.event_type),
             "confidence": int(event.confidence or 0),
             "summary": str(event.summary or ""),
             "high_quality_source_count": len(high_quality_sources),
@@ -1004,6 +1013,33 @@ class LiveTradingService:
             configured = int(getattr(self.settings, "min_trade_confidence", 0) or 0)
         return max(0, min(100, configured))
 
+    @staticmethod
+    def _event_prior_direction(event_type: str | None) -> str:
+        fallback = fallback_action(str(event_type or "unknown"))
+        if fallback == "BUY":
+            return "UP"
+        if fallback == "SHORT":
+            return "DOWN"
+        return "NEUTRAL"
+
+    @staticmethod
+    def _confidence_position_scale(confidence: int) -> float:
+        if confidence < 60:
+            return 0.30
+        if confidence < 70:
+            return 0.50
+        if confidence < 80:
+            return 0.75
+        return 1.0
+
+    @staticmethod
+    def _confidence_drawdown_tolerance_pct(confidence: int) -> float:
+        if confidence < 60:
+            return 0.005
+        if confidence < 80:
+            return 0.010
+        return 0.015
+
     def _effective_fallback_cycle_seconds(self, market_session: str) -> int:
         """Return event-driven fallback interval by market session."""
         legacy = max(60, int(getattr(self.settings, "live_fallback_cycle_seconds", 600) or 600))
@@ -1059,6 +1095,147 @@ class LiveTradingService:
         except Exception:
             return None
 
+    def _latest_directional_live_trade(
+        self,
+        session: Session,
+        *,
+        ticker: str,
+        current_qty: float,
+    ) -> LiveTrade | None:
+        if current_qty == 0:
+            return None
+        opening_action = "BUY" if current_qty > 0 else "SHORT"
+        return session.execute(
+            select(LiveTrade)
+            .where(
+                LiveTrade.ticker == ticker,
+                LiveTrade.action == opening_action,
+                LiveTrade.quantity > 0,
+                LiveTrade.status.in_(["submitted", "filled", "pending_new"]),
+            )
+            .order_by(desc(LiveTrade.created_at), desc(LiveTrade.id))
+            .limit(1)
+        ).scalar_one_or_none()
+
+    def _maybe_manage_signal_decay(
+        self,
+        *,
+        session: Session,
+        broker: AlpacaBroker,
+        ticker: str,
+        portfolio_value: float,
+        cycle_id: str,
+        msi: dict[str, Any],
+        run: WorkerRun | None,
+    ) -> dict[str, Any] | None:
+        try:
+            current_pos = broker.get_position(ticker)
+        except Exception:
+            current_pos = None
+        if current_pos is None:
+            return None
+        current_qty = float(current_pos.quantity or 0.0)
+        if current_qty == 0:
+            return None
+
+        origin_trade = self._latest_directional_live_trade(session, ticker=ticker, current_qty=current_qty)
+        if origin_trade is None:
+            return None
+
+        signal_created_at = origin_trade.created_at
+        origin_confidence = 50
+        trigger_event = None
+        if origin_trade.agent_run_id:
+            agent_run = session.get(AgentRun, int(origin_trade.agent_run_id))
+            if agent_run is not None:
+                signal_created_at = agent_run.created_at or signal_created_at
+                if signal_created_at.tzinfo is None:
+                    signal_created_at = signal_created_at.replace(tzinfo=timezone.utc)
+                origin_confidence = int(agent_run.final_confidence or origin_confidence)
+            trigger_event = self._trigger_event_for_agent_run(session, agent_run_id=origin_trade.agent_run_id)
+
+        max_age_hours = max(0.5, float(getattr(self.settings, "live_signal_max_age_hours", 4.0) or 4.0))
+        signal_age_hours = (datetime.now(timezone.utc) - signal_created_at).total_seconds() / 3600.0
+        if signal_age_hours <= max_age_hours:
+            return None
+
+        avg_cost = abs(float(getattr(current_pos, "avg_cost", 0.0) or 0.0) * current_qty)
+        market_value = abs(float(getattr(current_pos, "market_value", 0.0) or 0.0))
+        notional = avg_cost if avg_cost > 0 else market_value
+        if notional <= 0:
+            return None
+        pnl_pct = float(getattr(current_pos, "unrealized_pnl", 0.0) or 0.0) / notional
+        tolerance_pct = self._confidence_drawdown_tolerance_pct(origin_confidence)
+        if pnl_pct >= -tolerance_pct:
+            return None
+
+        current_target_pct = market_value / max(portfolio_value, 1.0)
+        reduced_target_pct = max(0.0, current_target_pct * 0.5)
+        if reduced_target_pct >= current_target_pct:
+            return None
+
+        desired_action = "BUY" if current_qty > 0 else "SHORT"
+        reasoning = (
+            f"signal_decay_gate age={signal_age_hours:.2f}h>{max_age_hours:.2f}h "
+            f"pnl={pnl_pct:.2%}<-{tolerance_pct:.2%}; reduce target to {reduced_target_pct:.2%}"
+        )
+        result = self._submit_order_for_action(
+            session=session,
+            broker=broker,
+            ticker=ticker,
+            desired_action=desired_action,
+            target_pct=reduced_target_pct,
+            portfolio_value=portfolio_value,
+            cycle_id=cycle_id,
+            msi=msi,
+            agent_run_id=origin_trade.agent_run_id,
+            reasoning=reasoning,
+            run=run,
+            trigger_event=trigger_event,
+        )
+        result.update(
+            {
+                "signal_decay_managed": True,
+                "signal_age_hours": signal_age_hours,
+                "signal_loss_pct": pnl_pct,
+                "signal_loss_tolerance_pct": -tolerance_pct,
+                "signal_decay_target_pct": reduced_target_pct,
+                "origin_confidence": origin_confidence,
+                "trigger_event_id": trigger_event.get("id") if trigger_event else None,
+            }
+        )
+        self._annotate_agent_run(
+            session,
+            agent_run_id=origin_trade.agent_run_id,
+            updates={
+                "signal_decay_managed": True,
+                "signal_age_hours": round(signal_age_hours, 2),
+                "signal_loss_pct": round(pnl_pct, 4),
+                "signal_decay_target_pct": reduced_target_pct,
+            },
+        )
+        if run is not None:
+            self._persist_runtime_event(
+                session=session,
+                run_id=run.id,
+                message=(
+                    f"{ticker}: signal decay reduced exposure after {signal_age_hours:.1f}h "
+                    f"(pnl={pnl_pct:.2%}, tolerance=-{tolerance_pct:.2%})"
+                ),
+                level="info",
+                stage="signal_decay_reduced",
+                ticker=ticker,
+                payload={
+                    "signal_age_hours": round(signal_age_hours, 2),
+                    "signal_loss_pct": round(pnl_pct, 4),
+                    "signal_loss_tolerance_pct": -tolerance_pct,
+                    "signal_decay_target_pct": reduced_target_pct,
+                    "origin_confidence": origin_confidence,
+                    "trigger_event_id": trigger_event.get("id") if trigger_event else None,
+                },
+            )
+        return result
+
     def _extract_execution_plan(self, state: dict[str, Any]) -> dict[str, Any]:
         plan = state.get("execution_plan")
         if not isinstance(plan, dict):
@@ -1085,6 +1262,26 @@ class LiveTradingService:
             "valid_for_minutes": valid_for_minutes,
             "entry_plan": entry_plan,
         }
+
+    def _apply_confidence_position_scaling(
+        self,
+        *,
+        target_pct: float,
+        execution_plan: dict[str, Any],
+        final_confidence: int,
+    ) -> tuple[float, dict[str, Any], float]:
+        scale = self._confidence_position_scale(final_confidence)
+        scaled_target_pct = max(0.0, min(self.settings.live_max_position_pct, target_pct * scale))
+        scaled_plan = dict(execution_plan or {})
+        if scaled_plan:
+            scaled_plan["planned_position_pct"] = max(
+                0.0,
+                min(
+                    self.settings.live_max_position_pct,
+                    float(scaled_plan.get("planned_position_pct", 0.0) or 0.0) * scale,
+                ),
+            )
+        return scaled_target_pct, scaled_plan, scale
 
     def _replace_active_entry_plans(
         self,
@@ -1512,8 +1709,6 @@ class LiveTradingService:
         fast_path: bool = False,
         allowed_sources: set[str] | None = None,
     ) -> dict[str, Any]:
-        graph = self._get_agent_graph()
-
         def progress_callback(update: dict[str, Any]) -> None:
             if run is None:
                 return
@@ -1531,6 +1726,19 @@ class LiveTradingService:
             last_run_at=last_run_at,
             live_enabled_at=warmup_state.get("enabled_at"),
         )
+        if not dry_run:
+            decay_result = self._maybe_manage_signal_decay(
+                session=session,
+                broker=broker,
+                ticker=ticker,
+                portfolio_value=portfolio_value,
+                cycle_id=cycle_id,
+                msi=msi,
+                run=run,
+            )
+            if decay_result is not None:
+                return decay_result
+        graph = self._get_agent_graph()
         trigger_event = self._find_trigger_event(
             session,
             ticker=ticker,
@@ -1669,23 +1877,37 @@ class LiveTradingService:
                 )
 
         gated_action, gated_is_plan = _current_gate_target()
+        trigger_prior_direction = (
+            str(trigger_event.get("prior_direction", "") or "").upper().strip()
+            if trigger_event is not None
+            else ""
+        )
         if (
             gated_action in {"SHORT", "SELL"}
-            and news_signal == "BUY"
             and trigger_event is not None
             and int(trigger_event.get("high_quality_source_count", 0) or 0) < 2
+            and (
+                news_signal == "BUY"
+                or trigger_prior_direction == "UP"
+            )
         ):
             blocked_by_news_conflict = True
             desired_action = "HOLD"
             target_pct = 0.0
             execution_plan = {}
+            conflict_sources: list[str] = []
+            if news_signal == "BUY":
+                conflict_sources.append("news_signal=BUY")
+            if trigger_prior_direction == "UP":
+                conflict_sources.append("prior_direction=UP")
+            conflict_label = "+".join(conflict_sources) or "direction_conflict"
             news_conflict_outcome = (
                 f"cleared pending {gated_action} plan"
                 if gated_is_plan
                 else f"downgraded {gated_action}->HOLD"
             )
             reasoning = (
-                f"{reasoning} | news_conflict_gate=BUY_vs_{gated_action}, "
+                f"{reasoning} | news_conflict_gate={conflict_label}_vs_{gated_action}, "
                 f"high_quality_sources={trigger_event.get('high_quality_source_count', 0)}<2"
             )[:1000]
             if run is not None:
@@ -1702,10 +1924,22 @@ class LiveTradingService:
                         "blocked_action": gated_action,
                         "blocked_pending_plan": gated_is_plan,
                         "news_signal": news_signal,
+                        "trigger_prior_direction": trigger_prior_direction,
                         "trigger_event_id": trigger_event.get("id"),
                         "high_quality_source_count": int(trigger_event.get("high_quality_source_count", 0) or 0),
                     },
                 )
+
+        target_pct, execution_plan, confidence_scale = self._apply_confidence_position_scaling(
+            target_pct=target_pct,
+            execution_plan=execution_plan,
+            final_confidence=final_confidence,
+        )
+        if desired_action in {"BUY", "SHORT"} or (
+            desired_action == "HOLD"
+            and str(execution_plan.get("execution_mode", "")).upper() in _WAIT_MODES
+        ):
+            reasoning = f"{reasoning} | confidence_scale={confidence_scale:.2f}"[:1000]
 
         agent_run_id: int | None = None
         try:

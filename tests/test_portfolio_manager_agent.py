@@ -154,6 +154,16 @@ class TestPortfolioManagerWeightedConfidence:
         conf = agent._compute_weighted_confidence(signals)
         assert abs(conf - 60.0) < 0.1
 
+    def test_macro_relevance_scales_macro_weight(self, settings, session):
+        agent = _make_agent(settings)
+        base = agent._base_weights()
+        adjusted = agent._contextual_weights(
+            base,
+            {"metadata": {"ticker_relevance": 0.10}, "reasoning": "oil shock"},
+        )
+        assert adjusted["macro_analyst"] < base["macro_analyst"]
+        assert adjusted["news_sentiment"] > base["news_sentiment"]
+
 
 class TestPortfolioManagerInvalidLLMResponse:
     def test_invalid_action_defaults_to_hold(self, settings, session):

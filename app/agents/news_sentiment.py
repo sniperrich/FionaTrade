@@ -7,7 +7,7 @@ from app.core.logging import get_app_logger
 from app.tools.macro import get_geopolitical_news
 from app.tools.market_data import build_market_context_text
 from app.tools.news import (
-    build_news_context_text,
+    build_news_context_payload,
     build_news_screening_text,
     get_articles_full_text,
     get_finnhub_sentiment,
@@ -166,13 +166,35 @@ class NewsSentimentAgent(BaseAgent):
                         )
 
             # ── Pass 2: full analysis (with or without expanded full text) ──
-            news_context = build_news_context_text(
+            news_payload = build_news_context_payload(
                 session, ticker,
                 lookback_hours=336, as_of=as_of,
                 since=news_since or last_run_at,
                 expanded_articles=expanded_articles or None,
                 allowed_sources=allowed_sources,
             )
+            news_context = str(news_payload["text"])
+            if (
+                int(news_payload.get("event_count", 0) or 0) == 0
+                and int(news_payload.get("headline_count", 0) or 0) == 0
+                and int(news_payload.get("full_article_count", 0) or 0) == 0
+            ):
+                return AgentSignal(
+                    agent_name=self.name,
+                    signal="NO_SIGNAL",
+                    confidence=0,
+                    reasoning="No ticker-specific validated events or headlines in current analysis context",
+                    metadata={
+                        "sentiment": "NEUTRAL",
+                        "event_strength": "NOISE",
+                        "key_catalyst": "none",
+                        "full_articles_read": list(expanded_articles.keys()),
+                        "read_full_used": bool(expanded_articles),
+                        "event_count": 0,
+                        "headline_count": 0,
+                        "full_article_count": int(news_payload.get("full_article_count", 0) or 0),
+                    },
+                )
             market_ctx = build_market_context_text(session, ticker, as_of=as_of)
             combined = f"{news_context}\n\n{market_ctx}"
 
@@ -214,6 +236,9 @@ class NewsSentimentAgent(BaseAgent):
                     "key_catalyst": parsed.get("key_catalyst", "none"),
                     "full_articles_read": list(expanded_articles.keys()),
                     "read_full_used": read_full_used,
+                    "event_count": int(news_payload.get("event_count", 0) or 0),
+                    "headline_count": int(news_payload.get("headline_count", 0) or 0),
+                    "full_article_count": int(news_payload.get("full_article_count", 0) or 0),
                 },
             )
 

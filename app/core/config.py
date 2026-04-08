@@ -292,6 +292,8 @@ class Settings(BaseSettings):
     live_entry_plan_default_valid_minutes: int = 180
     live_entry_plan_breakout_lookback_min: int = 15
     live_entry_plan_default_pullback_pct: float = 0.5
+    # For stale losing positions, reduce exposure once the originating signal ages out.
+    live_signal_max_age_hours: float = 4.0
 
     @field_validator("agent_tickers_override", "live_trading_tickers", mode="before")
     @classmethod

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from app.broker.base import PositionInfo
@@ -212,3 +212,103 @@ def test_same_theme_direction_cap_blocks_duplicate_cluster(session, settings, mo
     assert result["order_placed"] is False
     assert result["reason"] == "same_theme_direction_cap"
     assert result["event_type"] == "guidance_cut"
+
+
+def test_signal_decay_reduces_stale_losing_position(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "flow_confirmation_enabled": False,
+            "live_signal_max_age_hours": 4.0,
+            "live_startup_ramp_minutes": 0,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    stale_at = datetime.now(timezone.utc) - timedelta(hours=5)
+
+    event = Event(
+        event_type="major_litigation",
+        entities=["AAPL"],
+        tickers=["AAPL"],
+        severity=80,
+        event_time=stale_at,
+        confidence=88,
+        validation_status="VALID",
+        summary="AAPL litigation risk",
+    )
+    session.add(event)
+    session.flush()
+    run = AgentRun(
+        ticker="AAPL",
+        trigger="event",
+        trigger_event_id=event.id,
+        final_action="BUY",
+        final_confidence=55,
+        final_position_pct=0.10,
+        final_reasoning="buy catalyst",
+        created_at=stale_at,
+    )
+    session.add(run)
+    session.flush()
+    session.add(
+        LiveTrade(
+            cycle_id="stale-entry",
+            ticker="AAPL",
+            agent_run_id=run.id,
+            action="BUY",
+            quantity=100,
+            target_pct=0.10,
+            status="submitted",
+            et_time="09:35 ET",
+            market_session="open",
+            created_at=stale_at,
+        )
+    )
+    session.flush()
+
+    monkeypatch.setattr(
+        service.market_data,
+        "is_ticker_cache_fresh",
+        lambda _session, _ticker, max_age_minutes=None: (True, 1.0),
+    )
+    monkeypatch.setattr(service, "_get_agent_graph", lambda: (_ for _ in ()).throw(AssertionError("graph should not run for signal-decay reductions")))
+
+    placed_market_orders: list[dict] = []
+
+    class _DecayBroker(_DummyBroker):
+        def __init__(self):
+            super().__init__(
+                positions=[
+                    PositionInfo(
+                        ticker="AAPL",
+                        quantity=100,
+                        avg_cost=100.0,
+                        market_value=9500.0,
+                        unrealized_pnl=-500.0,
+                    )
+                ],
+                latest_price=95.0,
+            )
+
+        def place_order(self, **kwargs):
+            placed_market_orders.append(kwargs)
+            return SimpleNamespace(success=True, order_id="decay-1", error=None)
+
+    result = service._process_ticker(
+        session=session,
+        broker=_DecayBroker(),
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="signal-decay-1",
+        msi={"et_time_str": "14:35 ET", "label": "open", "tradeable": True},
+        dry_run=False,
+        run=None,
+        fast_path=False,
+    )
+
+    assert result["signal_decay_managed"] is True
+    assert result["action"] == "SELL"
+    assert result["order_placed"] is True
+    assert result["quantity"] == 50
+    assert len(placed_market_orders) == 1
+    assert placed_market_orders[0]["action"] == "SELL"
+    assert placed_market_orders[0]["quantity"] == 50

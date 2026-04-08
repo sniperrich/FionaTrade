@@ -209,3 +209,99 @@ def test_live_blocks_short_when_news_is_buy_without_dual_hq_confirmation(session
     assert result["action"] == "HOLD"
     assert result["blocked_by_news_conflict"] is True
     assert result["trigger_event_id"] == 3
+
+
+def test_live_blocks_short_when_prior_direction_is_up_without_dual_hq_confirmation(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_min_confidence": 50,
+            "live_entry_planning_enabled": False,
+            "flow_confirmation_enabled": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    service._agent_graph = _DummyGraph(
+        {
+            **_base_state(action="SHORT", confidence=91),
+            "news_sentiment_result": {"signal": "SHORT", "confidence": 65},
+        }
+    )
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 4,
+            "event_type": "buyback",
+            "prior_direction": "UP",
+            "confidence": 88,
+            "high_quality_source_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_submit_order_for_action",
+        lambda **_kwargs: pytest.fail("_submit_order_for_action should not be called when prior_direction gate blocks trade"),
+    )
+
+    result = service._process_ticker(
+        session=session,
+        broker=object(),
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="pytest-prior-direction-conflict",
+        msi=_open_session(),
+        dry_run=False,
+        run=None,
+        fast_path=False,
+    )
+
+    assert result["action"] == "HOLD"
+    assert result["blocked_by_news_conflict"] is True
+    assert result["trigger_event_id"] == 4
+
+
+def test_live_scales_target_pct_for_low_confidence_entries(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "live_min_confidence": 50,
+            "live_entry_planning_enabled": False,
+            "flow_confirmation_enabled": False,
+        }
+    )
+    service = LiveTradingService(live_settings)
+    service._agent_graph = _DummyGraph(_base_state(action="BUY", confidence=56))
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 5,
+            "event_type": "major_litigation",
+            "prior_direction": "DOWN",
+            "confidence": 90,
+            "high_quality_source_count": 2,
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_submit_order(**kwargs):
+        captured.update(kwargs)
+        return {"ticker": kwargs["ticker"], "action": kwargs["desired_action"], "order_placed": True, "order_id": "OID-2"}
+
+    monkeypatch.setattr(service, "_submit_order_for_action", _fake_submit_order)
+
+    result = service._process_ticker(
+        session=session,
+        broker=object(),
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="pytest-confidence-scale",
+        msi=_open_session(),
+        dry_run=False,
+        run=None,
+        fast_path=False,
+    )
+
+    assert captured.get("desired_action") == "BUY"
+    assert abs(float(captured["target_pct"]) - 0.024) < 1e-9
+    assert result["order_placed"] is True

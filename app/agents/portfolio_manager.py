@@ -20,7 +20,7 @@ _USER_PROMPT_TEMPLATE = """\
 Make the final trade decision for {ticker} based on the following agent analyses.
 
 MACRO ANALYST:
-signal={macro_signal}, confidence={macro_conf}
+signal={macro_signal}, confidence={macro_conf}, ticker_relevance={macro_relevance:.2f}
 {macro_reasoning}
 
 NEWS SENTIMENT:
@@ -79,6 +79,7 @@ IMPORTANT RULES:
 12. It is FINE to return HOLD — do not force trades just because risk is approved
 13. If direction is clear but timing is poor, use action=HOLD with execution_mode in WAIT_* and set planned_action accordingly
 14. Use execution_mode=IMMEDIATE for direct entries, NO_TRADE when the setup should be ignored entirely
+15. Treat low-relevance macro views (ticker_relevance < 0.20) as weak background context, not a primary directional driver
 """
 
 
@@ -97,6 +98,33 @@ class PortfolioManagerAgent(BaseAgent):
         safe = {k: max(0.0, v) for k, v in weights.items()}
         total = sum(safe.values()) or 1.0
         return {k: (v / total) for k, v in safe.items()}
+
+    @staticmethod
+    def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
+        safe = {key: max(0.0, float(value or 0.0)) for key, value in weights.items()}
+        total = sum(safe.values()) or 1.0
+        return {key: (value / total) for key, value in safe.items()}
+
+    @staticmethod
+    def _macro_relevance(macro_signal: dict) -> float:
+        metadata = macro_signal.get("metadata", {}) if isinstance(macro_signal, dict) else {}
+        try:
+            relevance = float(metadata.get("ticker_relevance", 1.0) or 0.0)
+        except Exception:
+            relevance = 1.0
+        return max(0.0, min(1.0, relevance))
+
+    def _contextual_weights(self, weights: dict[str, float], macro_signal: dict) -> dict[str, float]:
+        adjusted = dict(weights)
+        adjusted["macro_analyst"] = adjusted.get("macro_analyst", 0.0) * self._macro_relevance(macro_signal)
+        return self._normalize_weights(adjusted)
+
+    def _format_macro_reasoning(self, macro_signal: dict) -> str:
+        reasoning = str((macro_signal or {}).get("reasoning", "No macro data") or "No macro data")[:200]
+        relevance = self._macro_relevance(macro_signal)
+        if relevance < 0.2:
+            return f"[low ticker relevance] {reasoning}"
+        return reasoning
 
     @staticmethod
     def _is_directionally_opposed(
@@ -139,6 +167,8 @@ class PortfolioManagerAgent(BaseAgent):
             fund = _sig("fundamentals")
             tech = _sig("technicals")
             risk = _sig("risk_manager")
+            macro_relevance = self._macro_relevance(macro)
+            effective_weights = self._contextual_weights(effective_weights, macro)
 
             risk_approved = risk.get("metadata", {}).get("approved", False) if risk else False
             max_pct = risk.get("metadata", {}).get("max_position_pct", 0.05) if risk else 0.05
@@ -160,7 +190,8 @@ class PortfolioManagerAgent(BaseAgent):
                 ticker=ticker,
                 macro_signal=macro.get("signal", "N/A"),
                 macro_conf=macro.get("confidence", 0),
-                macro_reasoning=macro.get("reasoning", "No macro data")[:200],
+                macro_relevance=macro_relevance,
+                macro_reasoning=self._format_macro_reasoning(macro),
                 news_signal=news.get("signal", "N/A"),
                 news_conf=news.get("confidence", 0),
                 news_reasoning=news.get("reasoning", "No news data")[:200],

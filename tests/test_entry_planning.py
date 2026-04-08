@@ -122,6 +122,70 @@ def test_process_ticker_does_not_create_wait_plan_without_trigger_event(session,
     assert session.query(EntryPlan).filter(EntryPlan.ticker == "JPM").count() == 0
 
 
+def test_process_ticker_scales_wait_plan_by_confidence(session, settings, monkeypatch) -> None:
+    live_settings = settings.model_copy(
+        update={
+            "flow_confirmation_enabled": False,
+            "live_entry_planning_enabled": True,
+        }
+    )
+    service = LiveTradingService(live_settings)
+
+    class DummyGraph:
+        def run(self, _session, _ticker, context=None, progress_callback=None):
+            return {
+                "final_action": "HOLD",
+                "final_position_pct": 0.0,
+                "final_reasoning": "timing not ideal",
+                "portfolio_manager_result": {
+                    "confidence": 56,
+                    "metadata": {"action": "HOLD", "position_pct": 0.06},
+                },
+                "execution_plan": {
+                    "execution_mode": "WAIT_PULLBACK",
+                    "planned_action": "BUY",
+                    "planned_position_pct": 0.06,
+                    "valid_for_minutes": 120,
+                    "entry_plan": {"pullback_pct": 0.8},
+                },
+            }
+
+    monkeypatch.setattr(service, "_get_agent_graph", lambda: DummyGraph())
+    monkeypatch.setattr(
+        service,
+        "_find_trigger_event",
+        lambda *_args, **_kwargs: {
+            "id": 12,
+            "event_type": "contract_award",
+            "prior_direction": "UP",
+            "confidence": 90,
+            "high_quality_source_count": 2,
+        },
+    )
+    monkeypatch.setattr(service, "_latest_cached_close", lambda _session, _ticker: 100.0)
+
+    result = service._process_ticker(
+        session,
+        object(),
+        "AAPL",
+        portfolio_value=100_000.0,
+        cycle_id="plan-scale-1",
+        msi={"et_time_str": "10:00 ET", "label": "open", "tradeable": True},
+        dry_run=False,
+        run=None,
+    )
+
+    assert result["plan_created"] is True
+    latest_plan = (
+        session.query(EntryPlan)
+        .filter(EntryPlan.ticker == "AAPL", EntryPlan.status == "ACTIVE")
+        .order_by(EntryPlan.id.desc())
+        .first()
+    )
+    assert latest_plan is not None
+    assert abs(float(latest_plan.target_pct) - 0.018) < 1e-9
+
+
 @pytest.mark.parametrize("label", ["open", "market_open"])
 def test_execute_active_wait_until_open_plan_triggers_order(session, settings, monkeypatch, label: str) -> None:
     service = LiveTradingService(settings)

@@ -28,6 +28,7 @@ Return a JSON object with these exact fields:
 {{
   "signal": "<BUY|SHORT|HOLD>",
   "confidence": <integer 0-100>,
+  "ticker_relevance": <float 0.0-1.0>,
   "macro_regime": "<RISK_ON|RISK_OFF|NEUTRAL|UNCERTAIN>",
   "key_risks": ["<risk1>", "<risk2>"],
   "key_tailwinds": ["<tailwind1>"],
@@ -45,6 +46,7 @@ Guidelines:
 - VIX < 20 = NEUTRAL (normal market conditions, do NOT treat as bearish); VIX 20-25 = lean SHORT; VIX > 25 = strong SHORT; VIX < 12 = lean BUY
 - If recent price action is DOWN despite good fundamentals, consider HOLD rather than reflexively going SHORT
 - confidence: 60-100 = clear, 35-60 = moderate lean, 0-35 = weak lean
+- ticker_relevance: 0.0 = no direct pathway from macro backdrop to this ticker, 1.0 = direct/high exposure
 
 GEOPOLITICAL EVENTS — how to factor them in:
 - Active military conflict (war, strikes, invasion) → RISK_OFF, lean SHORT; severity scales with oil/supply-chain exposure
@@ -90,6 +92,11 @@ class MacroAnalystAgent(BaseAgent):
             signal = parsed.get("signal", "HOLD").upper()
             if signal not in ("BUY", "SHORT", "HOLD"):
                 signal = "HOLD"
+            try:
+                ticker_relevance = float(parsed.get("ticker_relevance", 1.0) or 0.0)
+            except Exception:
+                ticker_relevance = 1.0
+            ticker_relevance = max(0.0, min(1.0, ticker_relevance))
 
             return AgentSignal(
                 agent_name=self.name,
@@ -97,6 +104,7 @@ class MacroAnalystAgent(BaseAgent):
                 confidence=int(parsed.get("confidence", 50)),
                 reasoning=parsed.get("reasoning", ""),
                 metadata={
+                    "ticker_relevance": ticker_relevance,
                     "macro_regime": parsed.get("macro_regime", "UNCERTAIN"),
                     "key_risks": parsed.get("key_risks", []),
                     "key_tailwinds": parsed.get("key_tailwinds", []),
