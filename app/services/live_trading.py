@@ -1637,6 +1637,13 @@ class LiveTradingService:
     def _passes_event_quality_gate(self, session: Session, event: Event) -> bool:
         if not bool(getattr(self.settings, "live_use_event_quality_filter", True)):
             return True
+        event_type = str(event.event_type or "unknown").strip().lower()
+        if (
+            event_type == "unknown"
+            and len(event.tickers or []) == 1
+            and int(event.confidence or 0) >= int(getattr(self.settings, "live_event_quality_min_score", 55))
+        ):
+            return True
         quality = self.analysis.assess_event_quality(event, session=session)
         if quality.get("error"):
             return bool(getattr(self.settings, "live_event_quality_fail_open", False))
@@ -2556,21 +2563,31 @@ class LiveTradingService:
         target_dollars = portfolio_value * target_pct
         target_qty = int((target_dollars / current_price) + 1e-6)
         if target_qty < _MIN_SHARES:
-            self._record_live_trade(
-                session,
-                cycle_id=cycle_id,
-                ticker=ticker,
-                agent_run_id=agent_run_id,
-                action=desired_action,
-                quantity=0,
-                target_pct=target_pct,
-                order_id=None,
-                status="skipped",
-                et_time=msi["et_time_str"],
-                market_session=msi["label"],
-                reasoning=f"Insufficient capital: {target_dollars:.0f} USD < 1 share at {current_price:.2f}",
-            )
-            return {"ticker": ticker, "action": desired_action, "order_placed": False, "reason": "insufficient capital"}
+            # If there is an existing position and the target drops to 0, let _resolve_order
+            # handle the close — don't short-circuit with "Insufficient capital".
+            if current_qty != 0 and target_qty == 0:
+                pass  # fall through; _resolve_order will emit SELL/COVER
+            else:
+                skip_reason = (
+                    f"Insufficient capital: {target_dollars:.0f} USD < 1 share at {current_price:.2f}"
+                    if target_pct > 0
+                    else "No position to manage (target=0%, no existing position)"
+                )
+                self._record_live_trade(
+                    session,
+                    cycle_id=cycle_id,
+                    ticker=ticker,
+                    agent_run_id=agent_run_id,
+                    action=desired_action,
+                    quantity=0,
+                    target_pct=target_pct,
+                    order_id=None,
+                    status="skipped",
+                    et_time=msi["et_time_str"],
+                    market_session=msi["label"],
+                    reasoning=skip_reason,
+                )
+                return {"ticker": ticker, "action": desired_action, "order_placed": False, "reason": "insufficient capital"}
 
         order_action, order_qty = self._resolve_order(
             desired_action,
@@ -2864,7 +2881,9 @@ class LiveTradingService:
                 action=order_action,
                 quantity=order_qty,
             )
-        status = "submitted" if result.success else "error"
+        fill_price = getattr(result, "fill_price", None) if result.success else None
+        fill_qty = float(order_qty) if fill_price is not None else None
+        status = ("filled" if fill_price is not None else "submitted") if result.success else "error"
         self._record_live_trade(
             session,
             cycle_id=cycle_id,
@@ -2875,6 +2894,8 @@ class LiveTradingService:
             target_pct=target_pct,
             order_id=result.order_id,
             status=status,
+            fill_price=fill_price,
+            fill_qty=fill_qty,
             et_time=msi["et_time_str"],
             market_session=msi["label"],
             reasoning=reasoning,
@@ -2955,6 +2976,8 @@ class LiveTradingService:
         market_session: str,
         reasoning: str = "",
         error: str | None = None,
+        fill_price: float | None = None,
+        fill_qty: float | None = None,
     ) -> None:
         try:
             with session.begin_nested():
@@ -2967,6 +2990,8 @@ class LiveTradingService:
                     target_pct=target_pct,
                     order_id=order_id,
                     status=status,
+                    fill_price=fill_price,
+                    fill_qty=fill_qty,
                     et_time=et_time,
                     market_session=market_session,
                     reasoning=reasoning,
