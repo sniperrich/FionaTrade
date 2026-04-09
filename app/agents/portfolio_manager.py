@@ -267,6 +267,23 @@ class PortfolioManagerAgent(BaseAgent):
                     f"[news_priority_gate blocked opposite action: news={news_signal} conf={int(news_confidence)}]"
                 ).strip()
 
+            # Tech confirmation gate: SHORT entries require technicals agent also signalling SHORT.
+            # Without this, 64 % of SHORT signals fire on HOLD technicals — a major source of losses.
+            tech_signal = str(tech.get("signal", "N/A") or "N/A").upper().strip()
+            if (
+                action == "SHORT"
+                and getattr(self.settings, "short_tech_gate_enabled", True)
+                and tech_signal not in {"SHORT", "SELL"}
+            ):
+                action = "HOLD"
+                parsed["position_pct"] = 0.0
+                parsed["execution_mode"] = "NO_TRADE"
+                parsed["planned_action"] = "HOLD"
+                parsed["reasoning"] = (
+                    f"{parsed.get('reasoning', '')} "
+                    f"[short_tech_gate: blocked SHORT, tech={tech_signal} (requires SHORT/SELL)]"
+                ).strip()
+
             raw_position_pct = min(float(parsed.get("position_pct", 0.0)), max_pct)
             position_pct = raw_position_pct
             if action in ("HOLD", "SELL"):

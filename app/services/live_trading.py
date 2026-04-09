@@ -1263,6 +1263,65 @@ class LiveTradingService:
             "entry_plan": entry_plan,
         }
 
+    def _detect_short_regime(self, session: Session, ticker: str) -> str:
+        """Return 'POST_SHOCK_BOUNCE' when the ticker is in a recovery regime that makes
+        short entries dangerous, 'NORMAL' otherwise.
+
+        Logic: if the ticker is down >3 % over the last 3 trading days (shock) AND has
+        already bounced >0.5 % from today's open (recovery), we classify this as a
+        post-shock bounce and suppress new SHORT entries.
+        """
+        try:
+            from datetime import timezone
+            from sqlalchemy import func as sqla_func
+            now_utc = datetime.now(timezone.utc)
+            three_days_ago = now_utc - timedelta(days=4)  # 4 calendar days covers 3 trading days
+
+            # Earliest bar in the 3-day window — proxy for "3 days ago close"
+            oldest_row = (
+                session.query(Bar1m.close)
+                .filter(Bar1m.ticker == ticker, Bar1m.ts >= three_days_ago)
+                .order_by(Bar1m.ts.asc())
+                .first()
+            )
+            # Latest bar — current price
+            latest_row = (
+                session.query(Bar1m.close)
+                .filter(Bar1m.ticker == ticker)
+                .order_by(Bar1m.ts.desc())
+                .first()
+            )
+            # Today's opening bar
+            today_start = now_utc.replace(hour=13, minute=30, second=0, microsecond=0)
+            open_row = (
+                session.query(Bar1m.close)
+                .filter(Bar1m.ticker == ticker, Bar1m.ts >= today_start)
+                .order_by(Bar1m.ts.asc())
+                .first()
+            )
+
+            if not oldest_row or not latest_row or not open_row:
+                return "NORMAL"
+
+            current_price = float(latest_row[0])
+            three_day_start = float(oldest_row[0])
+            today_open = float(open_row[0])
+
+            if three_day_start <= 0 or today_open <= 0:
+                return "NORMAL"
+
+            three_d_return = (current_price - three_day_start) / three_day_start
+            intraday_return = (current_price - today_open) / today_open
+
+            threshold_3d = float(getattr(self.settings, "short_regime_3d_threshold", -0.03))
+            threshold_bounce = float(getattr(self.settings, "short_regime_bounce_threshold", 0.005))
+
+            if three_d_return < threshold_3d and intraday_return > threshold_bounce:
+                return "POST_SHOCK_BOUNCE"
+        except Exception:
+            pass
+        return "NORMAL"
+
     def _apply_confidence_position_scaling(
         self,
         *,
@@ -1936,6 +1995,41 @@ class LiveTradingService:
                         "high_quality_source_count": int(trigger_event.get("high_quality_source_count", 0) or 0),
                     },
                 )
+
+        # Post-shock bounce regime gate: suppress SHORT when the ticker has already sold off
+        # heavily over 3 days but is bouncing intraday — the move is stale and likely to reverse.
+        gated_action, gated_is_plan = _current_gate_target()
+        if (
+            gated_action in {"SHORT", "SELL"}
+            and getattr(self.settings, "short_regime_gate_enabled", True)
+        ):
+            regime = self._detect_short_regime(session, ticker)
+            if regime == "POST_SHOCK_BOUNCE":
+                desired_action = "HOLD"
+                target_pct = 0.0
+                execution_plan = {}
+                regime_outcome = (
+                    f"cleared pending {gated_action} plan"
+                    if gated_is_plan
+                    else f"downgraded {gated_action}->HOLD"
+                )
+                reasoning = (
+                    f"{reasoning} | regime_gate=POST_SHOCK_BOUNCE_{regime_outcome}"
+                )[:1000]
+                if run is not None:
+                    self._persist_runtime_event(
+                        session=session,
+                        run_id=run.id,
+                        message=f"{ticker}: regime gate blocked {gated_action} (post-shock bounce detected)",
+                        level="info",
+                        stage="regime_gate_blocked",
+                        ticker=ticker,
+                        agent="live_trading",
+                        payload={
+                            "blocked_action": gated_action,
+                            "regime": regime,
+                        },
+                    )
 
         target_pct, execution_plan, confidence_scale = self._apply_confidence_position_scaling(
             target_pct=target_pct,

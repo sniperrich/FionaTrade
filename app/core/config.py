@@ -294,6 +294,14 @@ class Settings(BaseSettings):
     live_entry_plan_default_pullback_pct: float = 0.5
     # For stale losing positions, reduce exposure once the originating signal ages out.
     live_signal_max_age_hours: float = 4.0
+    # SHORT quality gates.
+    # Require technicals agent to also signal SHORT before allowing a SHORT entry.
+    short_tech_gate_enabled: bool = True
+    # Suppress SHORT entries when the ticker is in a post-shock intraday bounce regime:
+    # 3-day return below threshold AND today's return above bounce threshold.
+    short_regime_gate_enabled: bool = True
+    short_regime_3d_threshold: float = -0.03   # 3-day drop worse than -3 %
+    short_regime_bounce_threshold: float = 0.005  # intraday bounce already > +0.5 %
 
     @field_validator("agent_tickers_override", "live_trading_tickers", mode="before")
     @classmethod
