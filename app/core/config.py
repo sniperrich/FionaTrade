@@ -302,6 +302,8 @@ class Settings(BaseSettings):
     short_regime_gate_enabled: bool = True
     short_regime_3d_threshold: float = -0.03   # 3-day drop worse than -3 %
     short_regime_bounce_threshold: float = 0.005  # intraday bounce already > +0.5 %
+    # Auto-enable live trading 10 min before NYSE open and disable 10 min after close (Mon–Fri).
+    live_auto_schedule_enabled: bool = True
 
     @field_validator("agent_tickers_override", "live_trading_tickers", mode="before")
     @classmethod

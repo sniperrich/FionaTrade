@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from app.backtest_engine.service import BacktestEngineService
 from app.core.config import get_settings
@@ -195,6 +196,37 @@ def _scheduled_overnight_risk_control() -> None:
                 logger.info("[overnight] skipped: %s", result.get("reason"))
     except Exception as exc:
         logger.exception("[overnight] 风控任务失败: %s", exc)
+
+
+def _auto_market_open() -> None:
+    """Enable live trading 10 minutes before NYSE open (scheduled at 9:20 AM ET, Mon–Fri)."""
+    try:
+        with db_session() as session:
+            svc = RuntimeControlService()
+            if not svc.get_live_enabled(session, settings):
+                svc.set_live_enabled(session, settings, enabled=True, source="market_schedule")
+                logger.info("[market_schedule] auto-enabled live trading (pre-open)")
+            else:
+                logger.debug("[market_schedule] live already enabled, skipping open trigger")
+    except Exception as exc:
+        logger.exception("[market_schedule] error in auto-enable: %s", exc)
+
+
+def _auto_market_close() -> None:
+    """Disable live trading 10 minutes after NYSE close (scheduled at 4:10 PM ET, Mon–Fri)."""
+    try:
+        with db_session() as session:
+            svc = RuntimeControlService()
+            if svc.get_live_enabled(session, settings):
+                svc.set_live_enabled(
+                    session, settings, enabled=False,
+                    source="market_schedule", disable_mode="CANCEL_ORDERS",
+                )
+                logger.info("[market_schedule] auto-disabled live trading (post-close)")
+            else:
+                logger.debug("[market_schedule] live already disabled, skipping close trigger")
+    except Exception as exc:
+        logger.exception("[market_schedule] error in auto-disable: %s", exc)
 
 
 def _target_live_interval_seconds() -> tuple[int, str]:
@@ -730,6 +762,21 @@ def _start_scheduler() -> BackgroundScheduler:
             id="bar_refresh",
             replace_existing=True,
         )
+        if getattr(settings, "live_auto_schedule_enabled", True):
+            sched.add_job(
+                _auto_market_open,
+                CronTrigger(day_of_week="mon-fri", hour=9, minute=20, timezone="America/New_York"),
+                max_instances=1,
+                id="market_auto_open",
+                replace_existing=True,
+            )
+            sched.add_job(
+                _auto_market_close,
+                CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone="America/New_York"),
+                max_instances=1,
+                id="market_auto_close",
+                replace_existing=True,
+            )
     sched.start()
     return sched
 
