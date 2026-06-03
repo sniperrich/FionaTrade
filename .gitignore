@@ -1,5 +1,14 @@
 .venv/
 .env
+memory.md
+handoff.md
+reports/
+data/
+backups/
+cache/
+BENZINGA_TRADER/
+LEAN_BENZINGA/
+benzinga-scrapler/
 __pycache__/
 *.py[cod]
 *.sqlite3
