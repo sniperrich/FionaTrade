@@ -160,8 +160,7 @@ tests/                pytest suite
   [docs/README.operator.zh-CN.md](docs/README.operator.zh-CN.md)
 - Agent/repository contract:
   [AGENTS.md](AGENTS.md)
-- Archived internal research/reference notes:
-  - [docs/archive](docs/archive)
+- Internal reference notes:
   - [docs/reference](docs/reference)
 
 ## Scope Notes
