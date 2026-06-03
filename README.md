@@ -281,13 +281,7 @@ tests/                pytest suite
 - Internal reference notes:
   [docs/reference](docs/reference)
 
-## 🎯 Scope Notes
 
-This public repository intentionally excludes:
-
-- proprietary strategy datasets
-- private operational memory and handoff logs
-- Benzinga-specific private strategy modules extracted into a separate repo
 
 ## ⚠️ Disclaimer
 
