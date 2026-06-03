@@ -1,76 +1,166 @@
 # FionaTrade
 
 [![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-app-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-primary%20runtime-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Alpaca](https://img.shields.io/badge/Broker-Alpaca-0B0F19)](https://alpaca.markets/)
-[![LangGraph](https://img.shields.io/badge/Agent%20Graph-LangGraph-1F6FEB)](https://www.langchain.com/langgraph)
+[![FastAPI](https://img.shields.io/badge/FastAPI-control%20plane-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-runtime%20state-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Alpaca](https://img.shields.io/badge/direct%20broker-Alpaca-0B0F19)](https://alpaca.markets/)
+[![LangGraph](https://img.shields.io/badge/multi--agent-LangGraph-1F6FEB)](https://www.langchain.com/langgraph)
+[![Tests](https://img.shields.io/badge/tests-pytest-6E9F18)](./tests)
 
-FionaTrade is a PostgreSQL-first autonomous trading research platform that
-combines:
+> **Autonomous trading infrastructure, not a notebook demo.**  
+> FionaTrade is an end-to-end multi-agent trading platform that can ingest
+> market context, reason across specialized agents, route decisions through
+> risk controls, and send orders directly to a broker.
 
-- a FastAPI control plane and web UI
-- a worker/supervisor runtime for live and scheduled tasks
-- a multi-agent decision graph for research and execution
-- paper/live broker adapters and backtest tooling
-- operator harness scripts for replay, preflight, and regression checks
+## What FionaTrade Is
 
-The public repository focuses on the **core FionaTrade platform**. Strategy-
-specific news engines, proprietary datasets, and Benzinga-specific private work
-have been intentionally kept out of this repository.
+FionaTrade is a PostgreSQL-first trading research and execution stack built for
+people who want a system with explicit runtime boundaries:
 
-## Why FionaTrade
-
-- **Production-minded runtime split**
-  - Web, worker, and database responsibilities are separated instead of being
-    collapsed into a single notebook-style process.
-- **PostgreSQL-backed control plane**
-  - Live runtime state, command queue, worker heartbeats, and execution records
-    are persisted in the database.
-- **Unified research and execution stack**
-  - Backtest, paper, and live paths share the same core models and broker
-    abstractions.
-- **Agent-driven decision pipeline**
-  - Macro, news, fundamentals, technicals, risk, and portfolio stages are
-    modeled explicitly instead of as ad hoc LLM calls.
+- **Autonomous decision loop**
+  - Ingest data, build context, run a multi-agent decision graph, apply risk
+    gating, and execute through a broker adapter.
+- **Direct broker integration**
+  - Paper and live execution paths are implemented through broker adapters
+    instead of being left as hypothetical backtest-only logic.
+- **Persistent runtime control**
+  - Worker heartbeat, command queue, live runtime state, and execution records
+    are stored in PostgreSQL rather than process-local memory.
+- **Research-to-execution continuity**
+  - Backtest, paper, and live all share the same core application model.
 - **Operator harness included**
-  - Preflight checks, replay tooling, and golden-eval scripts are part of the
-    repository rather than private glue code.
+  - Replay, preflight, and regression tooling ship with the repo.
 
-## Architecture
+The public repository focuses on the **core FionaTrade platform**. Proprietary
+datasets, private operational notes, and Benzinga-specific private strategy
+work are intentionally excluded.
+
+## Why It Stands Out
+
+| Capability | FionaTrade approach |
+|---|---|
+| Strategy engine | Explicit multi-agent pipeline instead of a single opaque model call |
+| Execution | Direct broker adapters for paper and live trading |
+| Control plane | FastAPI + Jinja UI backed by database runtime state |
+| Runtime model | Separate web, worker, and database responsibilities |
+| Safety | Risk gates, live guardrails, command queue, replay tooling |
+| Research loop | Backtests and operator harness are first-class parts of the repo |
+
+## End-to-End Autonomous Loop
 
 ```mermaid
 flowchart LR
-    A["FastAPI Web / Jinja UI"] --> B["Runtime Control API"]
-    B --> C["PostgreSQL"]
-    D["Worker Supervisor"] --> E["Background Worker"]
-    E --> C
-    E --> F["Ingestion + Market Data"]
-    E --> G["Agent Graph"]
-    G --> H["Risk + Portfolio Decision"]
-    H --> I["Broker Adapters<br/>Alpaca / Paper"]
-    E --> J["Backtest Engine"]
-    J --> C
+    A["Market / Macro / News Inputs"] --> B["Ingestion + Normalization"]
+    B --> C["Multi-Agent Graph"]
+    C --> C1["Macro Agent"]
+    C --> C2["News Agent"]
+    C --> C3["Fundamentals Agent"]
+    C --> C4["Technicals Agent"]
+    C1 --> D["Risk Manager"]
+    C2 --> D
+    C3 --> D
+    C4 --> D
+    D --> E["Portfolio Manager"]
+    E --> F["Live Trading Service"]
+    F --> G["Broker Adapter<br/>Alpaca / Paper"]
+    F --> H["PostgreSQL Runtime State"]
+    I["FastAPI Control Plane"] --> H
+    J["Worker Supervisor"] --> F
+```
+
+This is the core claim of the system:
+
+- **it can think**
+  - via specialized agents with different responsibilities
+- **it can decide**
+  - via risk and portfolio aggregation
+- **it can act**
+  - via direct broker execution adapters
+- **it can be operated**
+  - via database-backed runtime control and a web UI
+
+## Multi-Agent Roles
+
+FionaTrade does not treat "AI" as one giant prompt. The current architecture
+splits responsibility across dedicated components:
+
+| Agent | Role |
+|---|---|
+| `MacroAnalystAgent` | Interprets macro regime, FRED signals, and higher-level risk backdrop |
+| `NewsSentimentAgent` | Reads event/news context and extracts directional narrative |
+| `FundamentalsAgent` | Uses company fundamentals and analyst context as structural input |
+| `TechnicalsAgent` | Provides rule-based technical state and price structure context |
+| `RiskManagerAgent` | Applies position-level and portfolio-level risk judgment |
+| `PortfolioManagerAgent` | Produces the final actionable trade decision |
+
+This matters because the architecture is easier to:
+
+- inspect
+- replay
+- test
+- constrain
+- evolve
+
+than a monolithic "LLM decides everything" design.
+
+## Direct Broker Execution
+
+FionaTrade is not just a charting or backtest tool.
+
+Execution adapters are part of the codebase:
+
+- `app/broker/alpaca.py`
+  - live/paper broker integration
+- `app/broker/paper.py`
+  - deterministic paper execution model
+- `app/services/live_trading.py`
+  - orchestration of live decision-to-order flow
+
+That means the stack can progress through:
+
+1. backtest
+2. paper trading
+3. live execution
+
+without replacing the entire application architecture.
+
+## Production-Minded Runtime Split
+
+```text
+web    -> FastAPI + Jinja UI + API control plane
+worker -> scheduler + ingestion + live cycle + command pump
+db     -> PostgreSQL runtime state, results, caches, control records
+broker -> Alpaca / Paper execution adapters
 ```
 
 Core boundaries:
 
-- `app/main.py`: web entrypoint only
-- `app/worker/`: supervisor + worker runtime
-- `app/agent_graph/`: multi-agent orchestration
-- `app/services/live_trading.py`: live execution orchestration
-- `app/backtest_engine/`: offline replay and research
-- `app/broker/`: execution adapters
+- `app/main.py`
+  - web entrypoint only
+- `app/worker/`
+  - worker runtime and supervisor
+- `app/agent_graph/`
+  - multi-agent orchestration
+- `app/services/live_trading.py`
+  - live execution engine
+- `app/backtest_engine/`
+  - offline replay and backtest layer
+- `app/broker/`
+  - broker adapters
 
-## Features
+This separation is one of the strongest parts of the project. It keeps UI,
+execution, runtime control, and research from collapsing into one process.
 
-- Live and paper trading workflows
-- Multi-agent decision graph with explicit state transitions
-- Database-backed command queue and worker heartbeat model
-- Backtest UI and worker-backed backtest execution
-- Runtime guardrails for live trading
-- Operator-focused replay and preflight harness
-- FastAPI + Jinja monitoring and control dashboard
+## Feature Highlights
+
+- FastAPI control plane and Jinja monitoring UI
+- PostgreSQL-backed runtime state and command queue
+- Multi-agent decision graph with explicit stages
+- Paper and live broker adapters
+- Worker supervisor and heartbeat model
+- Backtest execution through the same application stack
+- Replay and preflight harness for operator workflows
+- Live guardrails and runtime safety checks
 
 ## Quick Start
 
@@ -86,14 +176,18 @@ pip install -e .[dev]
 cp .env.example .env
 ```
 
-Fill in the required values in `.env`, including your database URL, LLM
-configuration, and market-data / broker credentials.
+Fill in:
 
-Important runtime assumptions:
+- database URL
+- LLM configuration
+- market-data credentials
+- broker credentials
+
+Runtime assumptions:
 
 - Production runtime is **PostgreSQL**
 - SQLite is for tests and ad hoc local fixtures only
-- All persisted timestamps are treated as UTC
+- Persisted timestamps are treated as UTC
 
 ### 3. Run locally
 
@@ -101,7 +195,7 @@ Important runtime assumptions:
 ./run_local.sh
 ```
 
-Or run the processes separately:
+Or run the services separately:
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 6888 --reload
@@ -116,13 +210,13 @@ http://localhost:6888
 
 ## Test
 
-Run the full test suite:
+Run the full suite:
 
 ```bash
 pytest
 ```
 
-Key validation areas:
+Important validation areas:
 
 - `tests/test_live_event_driven.py`
 - `tests/test_live_guardrails.py`
